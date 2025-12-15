@@ -1,0 +1,34 @@
+name: lidar_cliff_pipeline
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.9
+  # Core Geospatial & Point Cloud Libraries
+  - pdal
+  - python-pdal
+  - laspy
+  - lazrs               # Acceleration for LAS/LAZ files
+  - geopandas
+  - shapely
+  - pyproj
+  
+  # Math & Data Analysis
+  - numpy
+  - pandas
+  - scipy
+  - scikit-learn        # For DBSCAN and Random Forest
+  
+  # Visualization
+  - matplotlib
+  - seaborn
+  
+  # Utilities
+  - tqdm
+  - joblib
+  - alphashape
+  
+  # Pip fallback (if any packages are missing from conda-forge)
+  - pip
+  - pip:
+    - alphashape        # Sometimes cleaner to install via pip inside conda

@@ -1,0 +1,22 @@
+# Core Point Cloud & Geo
+# Note: 'pdal' requires system-level PDAL C++ binaries to be installed first
+pdal
+laspy[lazrs]>=2.0.0
+geopandas
+shapely
+pyproj
+
+# Math & Machine Learning
+numpy
+pandas
+scipy
+scikit-learn
+joblib
+
+# Visualization
+matplotlib
+seaborn
+
+# Utilities
+tqdm
+alphashape
