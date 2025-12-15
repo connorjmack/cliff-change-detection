@@ -1,5 +1,3 @@
-Here is the complete, professional `README.md` file in Markdown format, ready for copy-pasting.
-
 ````markdown
 # Coastal Cliff LiDAR Processing Pipeline
 
