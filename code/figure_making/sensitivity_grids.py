@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-plot_spatial_sensitivity_v3.py
+plot_spatial_sensitivity_v4.py
 
 Purpose:
     Visualizes SPATIAL differences between grid resolutions (1m, 25cm, 10cm).
     
-    CORRECTIONS:
-    1. X-Axis is NOT scaled by resolution (Polygon IDs are fixed width).
-    2. Y-Axis IS scaled by resolution (Vertical bins).
-    3. Zoom logic uses Polygon IDs directly to ensure alignment.
+    FIXES:
+    1. Fixed ValueError: "The truth value of a DataFrame is ambiguous" by removing 'or' logic.
+    2. Fixed MatplotlibDeprecationWarning by using 'matplotlib.colormaps'.
+    3. Retains correct Axis Scaling (X=PolygonID, Y=Meters) from V3.
 
 Usage:
-    python3 code/figure_making/plot_spatial_sensitivity_v3.py --location DelMar
+    python3 code/figure_making/plot_spatial_sensitivity_v4.py --location DelMar
 """
 
 import os
@@ -41,7 +41,7 @@ VMAX_CUMULATIVE = 6.0
 plt.rcParams.update({'font.size': 12, 'font.family': 'sans-serif'})
 
 # ==============================================================================
-# 2. HELPER FUNCTIONS (Matched to cum_erosion.py)
+# 2. HELPER FUNCTIONS
 # ==============================================================================
 
 def get_base_dir():
@@ -56,7 +56,12 @@ def normalize_resolution_for_files(resolution):
     else: return resolution
 
 def get_custom_cmap(name, vmax):
-    base = cm.get_cmap(name, 256)
+    # Fix for Matplotlib Deprecation Warning
+    try:
+        base = matplotlib.colormaps[name]
+    except:
+        base = plt.get_cmap(name)
+        
     colors = base(np.linspace(0, 1, 256))
     colors[0, :] = [1, 1, 1, 1] # White for 0
     return LinearSegmentedColormap.from_list(f"White_{name}", colors), Normalize(vmin=0, vmax=vmax)
@@ -119,7 +124,7 @@ def calculate_cumulative_data(files, res_val):
     """Sums up the grids."""
     if not files: return None
     
-    print(f"    Summing {len(files)} grids...")
+    # print(f"    Summing {len(files)} grids...")
     cumulative_df = None
     
     for f in files:
@@ -138,7 +143,7 @@ def calculate_cumulative_data(files, res_val):
     return cumulative_df
 
 # ==============================================================================
-# 3. PLOTTING LOGIC (Corrected Axis Scaling)
+# 3. PLOTTING LOGIC
 # ==============================================================================
 
 def plot_spatial_comparison(grids, location, out_dir):
@@ -148,7 +153,12 @@ def plot_spatial_comparison(grids, location, out_dir):
     fig1, axes1 = plt.subplots(3, 1, figsize=(18, 12), sharex=True, constrained_layout=True)
     
     # Use 10cm grid to find global X limits (Polygon IDs)
-    ref_df = grids.get("10cm") or list(grids.values())[0]
+    # FIX: Explicit check instead of 'or'
+    if "10cm" in grids:
+        ref_df = grids["10cm"]
+    else:
+        ref_df = list(grids.values())[0]
+
     global_min_id = ref_df.index.min()
     global_max_id = ref_df.index.max()
     
@@ -164,7 +174,7 @@ def plot_spatial_comparison(grids, location, out_dir):
         # TRANSPOSE: Rows=Elevation, Cols=PolygonID
         plot_df = df.T 
         
-        # --- EXTENT CALCULATION (THE FIX) ---
+        # --- EXTENT CALCULATION ---
         # X Axis = Raw Polygon IDs (Do NOT multiply by res)
         x_start = plot_df.columns.min()
         x_end   = plot_df.columns.max()
