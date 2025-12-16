@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-plot_grid_sensitivity_dashboard.py
+plot_spatial_sensitivity.py
 
 Purpose:
-    Generates a 4-panel dashboard comparing erosion results across
-    different Grid Resolutions (10cm, 25cm, 1m).
-    Follows the aesthetic and logic of existing manuscript figures.
+    Visualizes the SPATIAL differences between grid resolutions (10cm, 25cm, 1m).
+    Generates two figures:
+      1. Full Coastline Comparison (Stacked Heatmaps)
+      2. Zoomed-in View of the Largest Erosion Event (Side-by-Side)
 
 Usage:
-    python3 code/figure_making/plot_grid_sensitivity_dashboard.py --location DelMar
+    python3 code/figure_making/plot_spatial_sensitivity.py --location DelMar
 """
 
 import os
@@ -19,248 +20,279 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from datetime import datetime
-import matplotlib.dates as mdates
+from matplotlib.colors import LinearSegmentedColormap, Normalize
+from matplotlib import cm
 
 # ==============================================================================
-# 1. CONFIGURATION & AESTHETICS
+# 1. CONFIGURATION
 # ==============================================================================
 
-# Define the resolutions to test
-# Format: (Label for legend, Resolution Value (m), File Tag used in filename)
-RESOLUTIONS_TO_TEST = [
-    ("10cm (High Res)", 0.10, "10cm"),
-    ("25cm (Medium Res)", 0.25, "25cm"),
-    ("1m (Coarse Res)",   1.00, "100cm")
+RESOLUTIONS = [
+    ("1m",   1.00, "100cm"),
+    ("25cm", 0.25, "25cm"),
+    ("10cm", 0.10, "10cm")
 ]
 
-# Color Palette specifically for resolutions, distinct from erosion/deposition
-RES_COLORS = {
-    "10cm (High Res)": "#2ca02c",  # Green
-    "25cm (Medium Res)": "#ff7f0e",  # Orange
-    "1m (Coarse Res)":   "#1f77b4"   # Blue
-}
+# Visual Settings
+CMAP_NAME = 'magma_r' # White -> Yellow -> Red/Black
+VMAX_CUMULATIVE = 6.0 # Max depth (m) for colorbar saturation
 
-sns.set_theme(style="whitegrid", font_scale=1.1)
-DASH_STYLE = (2, 2) # For reference lines
+# Font Sizes
+plt.rcParams['font.family'] = 'sans-serif'
+plt.rcParams['font.sans-serif'] = ['Arial', 'DejaVu Sans']
+plt.rcParams['font.size'] = 12
 
 # ==============================================================================
 # 2. HELPER FUNCTIONS
 # ==============================================================================
 
 def get_base_dir():
-    """Determine system root path based on OS."""
     if platform.system() == 'Darwin':
         return "/Volumes/group/LiDAR/LidarProcessing/LidarProcessingCliffs"
     else:
         return "/project/group/LiDAR/LidarProcessing/LidarProcessingCliffs"
 
-def parse_dates_from_folder(folder_name):
-    """Extract datetime objects from folder naming convention."""
-    match = re.search(r'(\d{8})_to_(\d{8})', folder_name)
-    if match:
-        d1 = datetime.strptime(match.group(1), '%Y%m%d')
-        d2 = datetime.strptime(match.group(2), '%Y%m%d')
-        return d1, d2
-    return None, None
+def get_custom_cmap(name, vmax):
+    """Creates a colormap that forces 0 values to be White."""
+    base_cmap = cm.get_cmap(name, 256)
+    newcolors = base_cmap(np.linspace(0, 1, 256))
+    newcolors[0, :] = np.array([1, 1, 1, 1]) # 0 = White
+    return LinearSegmentedColormap.from_list(f"White_{name}", newcolors), Normalize(vmin=0, vmax=vmax)
 
-def calculate_main_volume(grid_path, res_val):
-    """Calculates total volume sum from a grid file."""
-    cell_area = res_val * res_val
-    if not os.path.exists(grid_path): return None
+def clean_and_snap_grid(df, resolution_val):
+    """Parses columns (elevation) and index (alongshore ID) to numeric."""
+    # Remove text like 'M3C2_' or 'm'
+    cleaned_cols = df.columns.astype(str).str.replace(r'[a-zA-Z_]', '', regex=True)
     try:
-        df_grid = pd.read_csv(grid_path, index_col=0)
-        df_grid = df_grid.apply(pd.to_numeric, errors='coerce').fillna(0)
-        distances = df_grid.values
-        vol_main = distances.sum() * cell_area
-        return vol_main
-    except Exception:
+        col_floats = cleaned_cols.astype(float)
+        # Snap to resolution grid (e.g. 0.1, 0.2 -> index 1, 2)
+        scale = 1.0 / resolution_val
+        new_cols = (col_floats * scale).round().astype(int)
+        df.columns = new_cols
+        df.index = df.index.astype(int)
+        return df
+    except:
         return None
 
-# ==============================================================================
-# 3. DATA LOADING ENGINE
-# ==============================================================================
-
-def load_dashboard_data(location):
+def load_cumulative_grid(location, res_val, file_tag):
     base_dir = get_base_dir()
     erosion_dir = os.path.join(base_dir, 'results', location, 'erosion')
     
     if not os.path.exists(erosion_dir):
-        print(f"[ERROR] Directory not found: {erosion_dir}")
+        print(f"[ERROR] Missing dir: {erosion_dir}")
         return None
 
-    intervals = sorted([d for d in os.listdir(erosion_dir) 
-                       if os.path.isdir(os.path.join(erosion_dir, d))])
+    # Find all filled grids for this resolution
+    cumulative_df = None
     
-    print(f"--- Loading data from {len(intervals)} intervals for {location} ---")
+    # Sort folders by date
+    intervals = sorted([d for d in os.listdir(erosion_dir) if os.path.isdir(os.path.join(erosion_dir, d))])
     
-    all_data_records = []
-
+    print(f"  Accumulating {file_tag} grids from {len(intervals)} surveys...")
+    
     for interval in intervals:
-        d1, d2 = parse_dates_from_folder(interval)
-        if not d1: continue
+        grid_path = os.path.join(erosion_dir, interval, f"{interval}_ero_grid_{file_tag}_filled.csv")
         
-        plot_date = d2
-        folder_path = os.path.join(erosion_dir, interval)
-        interval_record = {'Date': plot_date, 'IntervalStr': interval}
-        
-        data_found_for_interval = False
-        for res_label, res_val, file_tag in RESOLUTIONS_TO_TEST:
-            grid_file = os.path.join(folder_path, f"{interval}_ero_grid_{file_tag}_filled.csv")
-            vol = calculate_main_volume(grid_file, res_val)
-            
-            if vol is not None:
-                interval_record[res_label] = vol
-                data_found_for_interval = True
-            else:
-                interval_record[res_label] = np.nan
-
-        if data_found_for_interval:
-            all_data_records.append(interval_record)
-
-    df_master = pd.DataFrame(all_data_records).sort_values('Date').reset_index(drop=True)
-    
-    for res_label, _, _ in RESOLUTIONS_TO_TEST:
-        if res_label in df_master.columns:
-            df_master[f'{res_label}_Cumulative'] = df_master[res_label].fillna(0).cumsum()
-
-    return df_master
-
-# ==============================================================================
-# 4. DASHBOARD PLOTTING
-# ==============================================================================
-
-def plot_sensitivity_dashboard(df, location):
-    if df is None or df.empty: return
-
-    # Setup the 2x2 grid
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-    fig.suptitle(f"{location} Cliff Erosion: Grid Resolution Sensitivity Analysis", 
-                 fontsize=20, fontweight='bold', y=0.98)
-    
-    ax_cumulative = axes[0, 0]
-    ax_top_events = axes[0, 1]
-    ax_scatter   = axes[1, 0]
-    ax_ecdf      = axes[1, 1]
-
-    # ==========================================================================
-    # Panel A: Cumulative Erosion Time Series
-    # ==========================================================================
-    print("Plotting Panel A: Cumulative Time Series...")
-    for res_label, _, _ in RESOLUTIONS_TO_TEST:
-        cum_col = f'{res_label}_Cumulative'
-        if cum_col in df.columns:
-            sns.lineplot(data=df, x='Date', y=cum_col, ax=ax_cumulative, 
-                         label=res_label, color=RES_COLORS[res_label], linewidth=3)
-    
-    ax_cumulative.set_title("A. Cumulative Erosion Volume Over Time", fontweight='bold')
-    ax_cumulative.set_ylabel("Cumulative Volume ($m^3$)", fontweight='bold')
-    ax_cumulative.set_xlabel("")
-    
-    # --- FIX 1: Apply formatter directly to axis ---
-    ax_cumulative.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
-    # --- FIX 2: Use autofmt_xdate() on Figure, NO arguments ---
-    fig.autofmt_xdate() 
-    
-    ax_cumulative.legend(title="Grid Resolution")
-    ax_cumulative.grid(True, which='major', linestyle='--')
-
-    # ==========================================================================
-    # Panel B: Top N Largest Events Comparison
-    # ==========================================================================
-    print("Plotting Panel B: Top Events Barplot...")
-    N_TOP = 15
-    top_events_data = []
-    
-    for res_label, _, _ in RESOLUTIONS_TO_TEST:
-        if res_label in df.columns:
-            vols = df[res_label].dropna().sort_values(ascending=False).head(N_TOP).reset_index(drop=True)
-            for rank, vol in enumerate(vols):
-                top_events_data.append({
-                    'Resolution': res_label,
-                    'Rank': rank + 1,
-                    'Volume': vol
-                })
+        if os.path.exists(grid_path):
+            try:
+                df = pd.read_csv(grid_path, index_col=0).fillna(0)
+                # Clean header/index structure
+                df_clean = clean_and_snap_grid(df, res_val)
                 
-    df_top = pd.DataFrame(top_events_data)
-    
-    sns.barplot(data=df_top, x='Rank', y='Volume', hue='Resolution', 
-                palette=RES_COLORS, ax=ax_top_events)
-    
-    ax_top_events.set_title(f"B. Magnitudes of Top {N_TOP} Largest Events", fontweight='bold')
-    ax_top_events.set_ylabel("Event Volume ($m^3$)", fontweight='bold')
-    ax_top_events.set_xlabel("Event Rank (Largest to Smallest)")
-    ax_top_events.legend(title="Grid Resolution")
+                if df_clean is not None:
+                    if cumulative_df is None:
+                        cumulative_df = df_clean
+                    else:
+                        # Align and add (handles changing grid sizes if any)
+                        cumulative_df = cumulative_df.add(df_clean, fill_value=0)
+            except:
+                pass
 
-    # ==========================================================================
-    # Panel C: Per-Survey Volume Scatter (vs. 10cm Baseline)
-    # ==========================================================================
-    print("Plotting Panel C: Comparison Scatter Plot...")
-    baseline_label = RESOLUTIONS_TO_TEST[0][0] # Assuming 10cm is first
-    
-    # Find max value for plotting 1:1 line (safely)
-    max_vol = 0
-    cols_to_check = [r[0] for r in RESOLUTIONS_TO_TEST if r[0] in df.columns]
-    if cols_to_check:
-        max_vol = df[cols_to_check].max().max()
-    
-    ax_scatter.plot([0, max_vol], [0, max_vol], 'k--', linewidth=1.5, label="1:1 Line")
+    return cumulative_df
 
-    for res_label, _, _ in RESOLUTIONS_TO_TEST:
-        if res_label == baseline_label: continue
-        if res_label not in df.columns: continue
+# ==============================================================================
+# 3. PLOTTING: FULL COASTLINE STACK
+# ==============================================================================
+
+def plot_full_coastline(grids_dict, location, out_dir):
+    """Plots 3 stacked heatmaps (1m, 25cm, 10cm) of the entire coast."""
+    if not grids_dict: return
+
+    fig, axes = plt.subplots(3, 1, figsize=(20, 10), sharex=True, constrained_layout=True)
+    cmap, norm = get_custom_cmap(CMAP_NAME, VMAX_CUMULATIVE)
+
+    # Determine global X limits (meters)
+    # We use the 10cm grid (highest res) to define the master extent if available
+    master_ref = grids_dict.get("10cm") or list(grids_dict.values())[0]
+    master_df_T = master_ref['data'].T
+    x_min_global = master_df_T.columns.min() * master_ref['res']
+    x_max_global = master_df_T.columns.max() * master_ref['res']
+
+    for ax, (label, res_val, _) in zip(axes, RESOLUTIONS):
+        if label not in grids_dict:
+            ax.text(0.5, 0.5, "Data Not Available", ha='center', va='center')
+            continue
+
+        df = grids_dict[label]['data']
+        # Transpose so X=Alongshore, Y=Elevation
+        plot_df = df.T 
         
-        sns.scatterplot(data=df, x=baseline_label, y=res_label, ax=ax_scatter,
-                        color=RES_COLORS[res_label], label=res_label, s=80, alpha=0.7)
+        # Convert indices to physical units (meters)
+        x_indices = plot_df.columns.astype(float)
+        y_indices = plot_df.index.astype(float)
         
-    ax_scatter.set_title(f"C. Individual Survey Volume vs. {baseline_label} Baseline", fontweight='bold')
-    ax_scatter.set_xlabel(f"{baseline_label} Volume ($m^3$)", fontweight='bold')
-    ax_scatter.set_ylabel("Comparison Resolution Volume ($m^3$)", fontweight='bold')
-    ax_scatter.legend()
-    # Only set aspect equal if we have valid limits
-    if max_vol > 0:
-        ax_scatter.set_aspect('equal', adjustable='box')
+        x_meters = x_indices * res_val
+        y_meters = y_indices * res_val
+        
+        # Calculate Total Volume for Label
+        total_vol = df.sum().sum() * (res_val ** 2)
+        
+        # Extent = [left, right, bottom, top]
+        # Invert X axis (North to South usually) -> max to min
+        extent = [x_meters.max(), x_meters.min(), y_meters.min(), y_meters.max()]
+        
+        im = ax.imshow(plot_df.values, origin='lower', extent=extent, 
+                       cmap=cmap, norm=norm, aspect='auto', interpolation='none')
+        
+        # Annotation Box
+        props = dict(boxstyle='round', facecolor='white', alpha=0.9)
+        ax.text(0.01, 0.9, f"Volume: {total_vol:,.0f} $m^3$", transform=ax.transAxes, 
+                fontsize=12, fontweight='bold', bbox=props)
+        
+        ax.set_title(f"{label} Resolution", fontweight='bold', loc='center')
+        ax.set_ylabel("Elevation (m)")
+        
+        # Force X limits to align visual comparison
+        ax.set_xlim(x_max_global, x_min_global)
+        ax.set_ylim(0, 30) # Standard cliff height
 
-    # ==========================================================================
-    # Panel D: ECDF of All Event Magnitudes
-    # ==========================================================================
-    print("Plotting Panel D: ECDF...")
-    for res_label, _, _ in RESOLUTIONS_TO_TEST:
-        if res_label in df.columns:
-            vols = df[res_label].dropna()
-            vols = vols[vols > 0]
-            if not vols.empty:
-                sns.ecdfplot(data=vols, ax=ax_ecdf, label=res_label, 
-                             color=RES_COLORS[res_label], linewidth=3)
-
-    ax_ecdf.set_title("D. Empirical Cumulative Distribution of Event Volumes", fontweight='bold')
-    ax_ecdf.set_xlabel("Log10 Event Volume ($m^3$)", fontweight='bold')
-    ax_ecdf.set_ylabel("Cumulative Probability", fontweight='bold')
-    ax_ecdf.set_xscale('log')
-    ax_ecdf.legend(title="Grid Resolution", loc="lower right")
-    ax_ecdf.grid(True, which='minor', linestyle=':', alpha=0.5)
-
-    # ==========================================================================
-    # Final Layout Adjustments and Saving
-    # ==========================================================================
-    plt.tight_layout()
-    plt.subplots_adjust(top=0.93, hspace=0.3, wspace=0.2)
+    # Shared Colorbar
+    cbar = fig.colorbar(im, ax=axes, orientation='vertical', fraction=0.02, pad=0.01)
+    cbar.set_label("Cumulative Erosion (m)", fontsize=12, fontweight='bold')
     
+    axes[-1].set_xlabel("Alongshore Location (m)", fontsize=12, fontweight='bold')
+    
+    fig.suptitle(f"{location}: Spatial Resolution Sensitivity (Full Coastline)", 
+                 fontsize=18, fontweight='bold')
+    
+    save_path = os.path.join(out_dir, f"{location}_Spatial_Sensitivity_Full.png")
+    plt.savefig(save_path, dpi=300)
+    print(f"[SUCCESS] Full coastline figure saved: {save_path}")
+
+# ==============================================================================
+# 4. PLOTTING: ZOOM ON LARGEST EVENT
+# ==============================================================================
+
+def find_largest_event_bbox(df_10cm, res_val):
+    """Finds the bounding box of the single largest erosion hotspot in the 10cm grid."""
+    # Simple hotspot detection: Find column (alongshore index) with max cumulative erosion sum
+    alongshore_sums = df_10cm.sum(axis=1) # Sum vertical column
+    max_idx = alongshore_sums.idxmax()
+    
+    # Define a window around it (e.g., +/- 25 meters)
+    window_m = 25.0 
+    window_cells = int(window_m / res_val)
+    
+    center_idx = int(max_idx)
+    start_idx = max(0, center_idx - window_cells)
+    end_idx = center_idx + window_cells
+    
+    return start_idx, end_idx, window_m
+
+def plot_event_zoom(grids_dict, location, out_dir):
+    """Plots a zoomed-in view of the largest event across 3 resolutions."""
+    if "10cm" not in grids_dict:
+        print("[WARN] 10cm grid needed for hotspot detection. Skipping zoom plot.")
+        return
+
+    # 1. Find Hotspot using 10cm grid
+    df_10 = grids_dict["10cm"]['data']
+    res_10 = 0.10
+    
+    # Get index range in 10cm grid units
+    s_idx, e_idx, width_m = find_largest_event_bbox(df_10, res_10)
+    
+    # Convert to physical coordinates (Meters)
+    # Note: Indices might be reversed in plotting, but physical meters are absolute
+    x_center_m = ((s_idx + e_idx) / 2) * res_10
+    x_min_m = x_center_m - width_m
+    x_max_m = x_center_m + width_m
+
+    print(f"  Zooming on event at ~{x_center_m:.0f}m alongshore...")
+
+    # 2. Setup Figure
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6), sharey=True, constrained_layout=True)
+    cmap, norm = get_custom_cmap(CMAP_NAME, VMAX_CUMULATIVE)
+
+    for ax, (label, res_val, _) in zip(axes, RESOLUTIONS):
+        if label not in grids_dict: continue
+        
+        df = grids_dict[label]['data']
+        plot_df = df.T # X=Alongshore, Y=Elevation
+        
+        x_indices = plot_df.columns.astype(float)
+        y_indices = plot_df.index.astype(float)
+        x_meters = x_indices * res_val
+        y_meters = y_indices * res_val
+        
+        # Extent [right, left, bottom, top] for inverted X axis
+        extent = [x_meters.max(), x_meters.min(), y_meters.min(), y_meters.max()]
+        
+        im = ax.imshow(plot_df.values, origin='lower', extent=extent,
+                       cmap=cmap, norm=norm, aspect='equal', interpolation='nearest') # 'nearest' shows pixelation!
+        
+        ax.set_title(f"{label} Grid", fontweight='bold', fontsize=14)
+        ax.set_xlabel("Alongshore (m)")
+        
+        # Zoom In
+        ax.set_xlim(x_max_m, x_min_m) # Inverted: Max -> Min
+        ax.set_ylim(0, 25)
+        
+        # Add grid lines to emphasize pixel size
+        # Only visible if zoomed in enough, helps visualization
+        ax.grid(True, which='both', color='gray', linestyle='-', linewidth=0.5, alpha=0.3)
+
+    axes[0].set_ylabel("Elevation (m)", fontweight='bold', fontsize=12)
+    
+    cbar = fig.colorbar(im, ax=axes, orientation='horizontal', fraction=0.05, pad=0.05)
+    cbar.set_label("Cumulative Erosion (m)", fontsize=12)
+
+    fig.suptitle(f"{location}: Detail View of Largest Erosion Event", fontsize=16, fontweight='bold')
+    
+    save_path = os.path.join(out_dir, f"{location}_Spatial_Sensitivity_Zoom.png")
+    plt.savefig(save_path, dpi=300)
+    print(f"[SUCCESS] Zoom figure saved: {save_path}")
+
+# ==============================================================================
+# MAIN
+# ==============================================================================
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--location", default="DelMar")
+    args = parser.parse_args()
+    
+    # 1. Load Data
+    grids = {}
+    print(f"--- Loading Grids for {args.location} ---")
+    
+    for label, val, tag in RESOLUTIONS:
+        df = load_cumulative_grid(args.location, val, tag)
+        if df is not None:
+            grids[label] = {'data': df, 'res': val}
+    
+    if not grids:
+        print("[ERROR] No data found.")
+        return
+
+    # 2. Setup Output
     base_dir = get_base_dir()
     out_dir = os.path.join(base_dir, "figures", "sensitivity")
     os.makedirs(out_dir, exist_ok=True)
-    out_path_png = os.path.join(out_dir, f"{location}_Grid_Sensitivity_Dashboard.png")
-    
-    plt.savefig(out_path_png, dpi=300, bbox_inches='tight')
-    print(f"\n[SUCCESS] Dashboard saved to: {out_path_png}")
 
-# ==============================================================================
-# MAIN EXECUTION
-# ==============================================================================
+    # 3. Generate Plots
+    plot_full_coastline(grids, args.location, out_dir)
+    plot_event_zoom(grids, args.location, out_dir)
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--location", default="DelMar", help="Location to analyze (e.g., DelMar, TorreyPines)")
-    args = parser.parse_args()
-    
-    df_master = load_dashboard_data(args.location)
-    plot_sensitivity_dashboard(df_master, args.location)
+    main()
