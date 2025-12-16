@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """
-plot_grid_sensitivity.py
+plot_grid_sensitivity_dashboard.py
 
 Purpose:
-    Generates a sensitivity analysis figure showing how Total Erosion Volume
-    changes across different Grid Resolutions (10cm, 25cm, 1m).
-
-    Reuses EXACT logic from:
-      - plot_dashboard.py (Path handling, Volume calculation)
-      - 8_make_grids.py (File naming conventions)
+    Generates a 4-panel dashboard comparing erosion results across
+    different Grid Resolutions (10cm, 25cm, 1m).
+    Follows the aesthetic and logic of existing manuscript figures.
 
 Usage:
-    python3 plot_grid_sensitivity.py --location DelMar
+    python3 code/figure_making/plot_grid_sensitivity_dashboard.py --location DelMar
 """
 
 import os
@@ -23,25 +20,32 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from datetime import datetime
+import matplotlib.dates as mdates
 
 # ==============================================================================
-# 1. CONFIGURATION (Adapted from plot_dashboard.py)
+# 1. CONFIGURATION & AESTHETICS
 # ==============================================================================
 
 # Define the resolutions to test
-# Format: (Label, Resolution Value (m), File Tag)
+# Format: (Label for legend, Resolution Value (m), File Tag used in filename)
 RESOLUTIONS_TO_TEST = [
-    ("10cm", 0.10, "10cm"),
-    ("25cm", 0.25, "25cm"),
-    ("1m",   1.00, "100cm")  # Note: 8_make_grids.py names 1m files as "100cm"
+    ("10cm (High Res)", 0.10, "10cm"),
+    ("25cm (Medium Res)", 0.25, "25cm"),
+    ("1m (Coarse Res)",   1.00, "100cm")
 ]
 
-# Plotting Settings
-sns.set_theme(style="whitegrid", font_scale=1.2)
-COLOR_MAIN = "#d62728"  # Red for Erosion
+# Color Palette specifically for resolutions, distinct from erosion/deposition
+RES_COLORS = {
+    "10cm (High Res)": "#2ca02c",  # Green
+    "25cm (Medium Res)": "#ff7f0e",  # Orange
+    "1m (Coarse Res)":   "#1f77b4"   # Blue
+}
+
+sns.set_theme(style="whitegrid", font_scale=1.1)
+DASH_STYLE = (2, 2) # For reference lines
 
 # ==============================================================================
-# 2. HELPER FUNCTIONS (Directly from plot_dashboard.py)
+# 2. HELPER FUNCTIONS (Reused from pipeline logic)
 # ==============================================================================
 
 def get_base_dir():
@@ -51,8 +55,8 @@ def get_base_dir():
     else:
         return "/project/group/LiDAR/LidarProcessing/LidarProcessingCliffs"
 
-def parse_dates(folder_name):
-    """Extract dates from folder name (YYYYMMDD_to_YYYYMMDD)."""
+def parse_dates_from_folder(folder_name):
+    """Extract datetime objects from folder naming convention."""
     match = re.search(r'(\d{8})_to_(\d{8})', folder_name)
     if match:
         d1 = datetime.strptime(match.group(1), '%Y%m%d')
@@ -60,178 +64,220 @@ def parse_dates(folder_name):
         return d1, d2
     return None, None
 
-def calculate_volume_bounds_properly(grid_path, unc_path, res_val):
-    """
-    Calculates Volume using cell-by-cell logic.
-    EXACT COPY from plot_dashboard.py to ensure consistency.
-    """
+def calculate_main_volume(grid_path, res_val):
+    """Calculates total volume sum from a grid file."""
     cell_area = res_val * res_val
-    
-    if not os.path.exists(grid_path):
-        return None, None, None
-
+    if not os.path.exists(grid_path): return None
     try:
-        # Load Main Grid
         df_grid = pd.read_csv(grid_path, index_col=0)
+        # Ensure numeric and fill NaNs (though filled grids shouldn't have them)
         df_grid = df_grid.apply(pd.to_numeric, errors='coerce').fillna(0)
         distances = df_grid.values
-        
-        # Load Uncertainty Stats (Simplified for sensitivity plot - focusing on Mean Volume)
-        # We only strictly need the main volume, but the function requires the path
-        
-        # Calculate Main Volume
-        # Note: Your dashboard logic calculates bounds, but here we primarily need the main estimate
+        # Sum distances * cell area
         vol_main = distances.sum() * cell_area
-        
-        return vol_main, 0, 0 # Returning dummy bounds as we just want the main vol for sensitivity
-        
-    except Exception as e:
-        # print(f"    [Error] Reading grid {os.path.basename(grid_path)}: {e}")
-        return None, None, None
+        return vol_main
+    except Exception:
+        return None
 
 # ==============================================================================
-# 3. DATA COLLECTION
+# 3. DATA LOADING ENGINE
 # ==============================================================================
 
-def collect_sensitivity_data(location):
+def load_dashboard_data(location):
     base_dir = get_base_dir()
     erosion_dir = os.path.join(base_dir, 'results', location, 'erosion')
     
     if not os.path.exists(erosion_dir):
         print(f"[ERROR] Directory not found: {erosion_dir}")
-        return []
+        return None
 
-    # Get all survey intervals
+    # Get sorted survey interval folders
     intervals = sorted([d for d in os.listdir(erosion_dir) 
                        if os.path.isdir(os.path.join(erosion_dir, d))])
     
-    print(f"--- Scanning {len(intervals)} intervals for {location} ---")
+    print(f"--- Loading data from {len(intervals)} intervals for {location} ---")
     
-    results = []
+    # Structure to hold all data: List of dictionaries for DataFrame conversion
+    all_data_records = []
 
-    # Iterate through every resolution defined
-    for res_label, res_val, file_tag in RESOLUTIONS_TO_TEST:
-        print(f"Processing Resolution: {res_label} (Tag: {file_tag})...")
+    for interval in intervals:
+        d1, d2 = parse_dates_from_folder(interval)
+        if not d1: continue
         
-        total_volume = 0.0
-        survey_count = 0
+        # Date for plotting (using end date of interval)
+        plot_date = d2
+        folder_path = os.path.join(erosion_dir, interval)
         
-        for interval in intervals:
-            # 1. Parse Date
-            d1, d2 = parse_dates(interval)
-            if not d1: continue
+        # For this specific interval, try to load ALL resolution files
+        interval_record = {'Date': plot_date, 'IntervalStr': interval}
+        
+        data_found_for_interval = False
+        for res_label, res_val, file_tag in RESOLUTIONS_TO_TEST:
+            # Construct path based on pipeline naming convention
+            grid_file = os.path.join(folder_path, f"{interval}_ero_grid_{file_tag}_filled.csv")
             
-            # 2. Construct Paths (Using dashboard logic)
-            folder = os.path.join(erosion_dir, interval)
+            vol = calculate_main_volume(grid_file, res_val)
             
-            # Look for the specific resolution file
-            # Pattern: {interval}_ero_grid_{TAG}_filled.csv
-            grid_file = os.path.join(folder, f"{interval}_ero_grid_{file_tag}_filled.csv")
-            
-            # We don't strictly need uncertainty for the main volume sum, 
-            # but the function asks for it. We can pass None if the function handles it,
-            # or construct the path. Your dashboard function handles missing unc files gracefully.
-            unc_file = os.path.join(folder, f"{interval}_ero_uncertainty_{file_tag}.csv")
-            
-            if not os.path.exists(grid_file):
-                # print(f"  [MISSING] {grid_file}")
-                continue
+            if vol is not None:
+                # Store volume for this resolution
+                interval_record[res_label] = vol
+                data_found_for_interval = True
+            else:
+                # Mark missing data if a specific resolution file didn't exist for this date
+                interval_record[res_label] = np.nan
+
+        if data_found_for_interval:
+            all_data_records.append(interval_record)
+
+    # Create master DataFrame and sort by date
+    df_master = pd.DataFrame(all_data_records).sort_values('Date').reset_index(drop=True)
+    
+    # Calculate Cumulative Volumes
+    for res_label, _, _ in RESOLUTIONS_TO_TEST:
+        if res_label in df_master.columns:
+            # fillna(0) ensures cumulative sum doesn't break on missing intervals, 
+            # though ideally all resolutions have the same intervals.
+            df_master[f'{res_label}_Cumulative'] = df_master[res_label].fillna(0).cumsum()
+
+    return df_master
+
+# ==============================================================================
+# 4. DASHBOARD PLOTTING
+# ==============================================================================
+
+def plot_sensitivity_dashboard(df, location):
+    if df is None or df.empty: return
+
+    # Setup the 2x2 grid
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    fig.suptitle(f"{location} Cliff Erosion: Grid Resolution Sensitivity Analysis", 
+                 fontsize=20, fontweight='bold', y=0.98)
+    
+    # Flatten axes array for easy iteration
+    ax_cumulative = axes[0, 0]
+    ax_top_events = axes[0, 1]
+    ax_scatter   = axes[1, 0]
+    ax_ecdf      = axes[1, 1]
+
+    # ==========================================================================
+    # Panel A: Cumulative Erosion Time Series
+    # ==========================================================================
+    print("Plotting Panel A: Cumulative Time Series...")
+    for res_label, _, _ in RESOLUTIONS_TO_TEST:
+        cum_col = f'{res_label}_Cumulative'
+        if cum_col in df.columns:
+            sns.lineplot(data=df, x='Date', y=cum_col, ax=ax_cumulative, 
+                         label=res_label, color=RES_COLORS[res_label], linewidth=3)
+    
+    ax_cumulative.set_title("A. Cumulative Erosion Volume Over Time", fontweight='bold')
+    ax_cumulative.set_ylabel("Cumulative Volume ($m^3$)", fontweight='bold')
+    ax_cumulative.set_xlabel("")
+    ax_cumulative.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+    fig.autofmt_xdate(ax=ax_cumulative)
+    ax_cumulative.legend(title="Grid Resolution")
+    ax_cumulative.grid(True, which='major', linestyle='--')
+
+    # ==========================================================================
+    # Panel B: Top N Largest Events Comparison
+    # ==========================================================================
+    print("Plotting Panel B: Top Events Barplot...")
+    N_TOP = 15
+    top_events_data = []
+    
+    for res_label, _, _ in RESOLUTIONS_TO_TEST:
+        if res_label in df.columns:
+            # Get all individual survey volumes for this resolution, drop NaNs
+            vols = df[res_label].dropna().sort_values(ascending=False).head(N_TOP).reset_index(drop=True)
+            for rank, vol in enumerate(vols):
+                top_events_data.append({
+                    'Resolution': res_label,
+                    'Rank': rank + 1,
+                    'Volume': vol
+                })
                 
-            # 3. Calculate Volume
-            vol_main, _, _ = calculate_volume_bounds_properly(grid_file, unc_file, res_val)
+    df_top = pd.DataFrame(top_events_data)
+    
+    sns.barplot(data=df_top, x='Rank', y='Volume', hue='Resolution', 
+                palette=RES_COLORS, ax=ax_top_events)
+    
+    ax_top_events.set_title(f"B. Magnitudes of Top {N_TOP} Largest Events", fontweight='bold')
+    ax_top_events.set_ylabel("Event Volume ($m^3$)", fontweight='bold')
+    ax_top_events.set_xlabel("Event Rank (Largest to Smallest)")
+    ax_top_events.legend(title="Grid Resolution")
+
+    # ==========================================================================
+    # Panel C: Per-Survey Volume Scatter (vs. 10cm Baseline)
+    # ==========================================================================
+    print("Plotting Panel C: Comparison Scatter Plot...")
+    baseline_label = RESOLUTIONS_TO_TEST[0][0] # Assuming 10cm is first
+    
+    # Find max value for plotting 1:1 line
+    max_vol = df[[r[0] for r in RESOLUTIONS_TO_TEST]].max().max()
+    
+    # Plot 1:1 reference line
+    ax_scatter.plot([0, max_vol], [0, max_vol], 'k--', linewidth=1.5, label="1:1 Line")
+
+    for res_label, _, _ in RESOLUTIONS_TO_TEST:
+        if res_label == baseline_label: continue # Don't plot 10cm vs 10cm
+        
+        sns.scatterplot(data=df, x=baseline_label, y=res_label, ax=ax_scatter,
+                        color=RES_COLORS[res_label], label=res_label, s=80, alpha=0.7)
+        
+    ax_scatter.set_title(f"C. Individual Survey Volume vs. {baseline_label} Baseline", fontweight='bold')
+    ax_scatter.set_xlabel(f"{baseline_label} Volume ($m^3$)", fontweight='bold')
+    ax_scatter.set_ylabel("Comparison Resolution Volume ($m^3$)", fontweight='bold')
+    ax_scatter.legend()
+    ax_scatter.set_aspect('equal', adjustable='box') # Make axes square for better comparison
+
+    # ==========================================================================
+    # Panel D: ECDF of All Event Magnitudes
+    # ==========================================================================
+    print("Plotting Panel D: ECDF...")
+    for res_label, _, _ in RESOLUTIONS_TO_TEST:
+        if res_label in df.columns:
+            # Get all non-zero, non-NaN volumes
+            vols = df[res_label].dropna()
+            vols = vols[vols > 0]
             
-            if vol_main is not None:
-                total_volume += vol_main
-                survey_count += 1
-        
-        print(f"  -> Total Volume: {total_volume:,.2f} m³ ({survey_count} surveys)")
-        
-        results.append({
-            "Resolution Label": res_label,
-            "Grid Size (m)": res_val,
-            "Total Erosion Volume (m³)": total_volume,
-            "Survey Count": survey_count
-        })
+            sns.ecdfplot(data=vols, ax=ax_ecdf, label=res_label, 
+                         color=RES_COLORS[res_label], linewidth=3)
 
-    return pd.DataFrame(results)
+    ax_ecdf.set_title("D. Empirical Cumulative Distribution of Event Volumes", fontweight='bold')
+    ax_ecdf.set_xlabel("Log10 Event Volume ($m^3$)", fontweight='bold')
+    ax_ecdf.set_ylabel("Cumulative Probability", fontweight='bold')
+    ax_ecdf.set_xscale('log') # Crucial for seeing distribution across magnitudes
+    ax_ecdf.legend(title="Grid Resolution", loc="lower right")
+    ax_ecdf.grid(True, which='minor', linestyle=':', alpha=0.5)
 
-# ==============================================================================
-# 4. PLOTTING
-# ==============================================================================
-
-def plot_sensitivity(df, location):
-    if df.empty:
-        print("No data to plot.")
-        return
-
+    # ==========================================================================
+    # Final Layout Adjustments and Saving
+    # ==========================================================================
+    plt.tight_layout()
+    # Adjust for main suptitle
+    plt.subplots_adjust(top=0.93, hspace=0.3, wspace=0.2)
+    
+    # Save paths
     base_dir = get_base_dir()
     out_dir = os.path.join(base_dir, "figures", "sensitivity")
     os.makedirs(out_dir, exist_ok=True)
+    out_path_png = os.path.join(out_dir, f"{location}_Grid_Sensitivity_Dashboard.png")
+    out_path_svg = os.path.join(out_dir, f"{location}_Grid_Sensitivity_Dashboard.svg")
     
-    # Setup Figure
-    fig, ax = plt.subplots(figsize=(10, 6))
-    
-    # Plot Line with Markers
-    sns.lineplot(
-        data=df, 
-        x="Grid Size (m)", 
-        y="Total Erosion Volume (m³)", 
-        marker='o', 
-        markersize=10,
-        color=COLOR_MAIN,
-        linewidth=2.5,
-        ax=ax
-    )
-    
-    # Add text labels for points
-    for line in range(0, df.shape[0]):
-        x_val = df["Grid Size (m)"][line]
-        y_val = df["Total Erosion Volume (m³)"][line]
-        label = f"{y_val:,.0f} m³"
-        
-        ax.text(
-            x_val, y_val, 
-            label, 
-            horizontalalignment='left', 
-            size='medium', 
-            color='black', 
-            weight='semibold',
-            bbox=dict(facecolor='white', alpha=0.8, edgecolor='none', pad=1.5)
-        )
+    plt.savefig(out_path_png, dpi=300, bbox_inches='tight')
+    # plt.savefig(out_path_svg, bbox_inches='tight') # Uncomment for vector graphics
+    print(f"\n[SUCCESS] Dashboard saved to: {out_path_png}")
 
-    # Formatting
-    ax.set_title(f"Grid Size Sensitivity Analysis: {location}\nTotal Cumulative Erosion Volume", 
-                 fontweight='bold', fontsize=16)
-    ax.set_xlabel("Grid Cell Resolution (m)", fontweight='bold', fontsize=14)
-    ax.set_ylabel("Total Erosion Volume ($m^3$)", fontweight='bold', fontsize=14)
-    
-    # Force X-ticks to match our resolutions
-    ax.set_xticks(df["Grid Size (m)"].unique())
-    ax.grid(True, linestyle='--', alpha=0.6)
-    
-    # Invert X axis? Usually smaller grid size (left) is higher resolution. 
-    # Standard plots usually go 0 -> 1. Let's keep it standard.
-    
-    # Save
-    out_path = os.path.join(out_dir, f"{location}_Grid_Sensitivity.png")
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=300)
-    print(f"\n[SUCCESS] Figure saved to: {out_path}")
 
 # ==============================================================================
-# MAIN
+# MAIN EXECUTION
 # ==============================================================================
-
-def main():
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--location", default="DelMar", help="Location to analyze")
+    parser.add_argument("--location", default="DelMar", help="Location to analyze (e.g., DelMar, TorreyPines)")
     args = parser.parse_args()
     
-    # 1. Collect Data
-    df = collect_sensitivity_data(args.location)
+    # 1. Load and structure data
+    df_master = load_dashboard_data(args.location)
     
-    # 2. Plot
-    plot_sensitivity(df, args.location)
-
-if __name__ == "__main__":
-    main()
+    # 2. Generate Dashboard
+    plot_sensitivity_dashboard(df_master, args.location)
