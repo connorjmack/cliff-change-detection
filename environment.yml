@@ -1,4 +1,4 @@
-name: lidar_cliff_pipeline
+name: cliff-change-detection
 channels:
   - conda-forge
   - defaults
@@ -8,7 +8,7 @@ dependencies:
   - pdal
   - python-pdal
   - laspy
-  - lazrs               # Acceleration for LAS/LAZ files
+  - lazrs-python        # Acceleration for LAS/LAZ files
   - geopandas
   - shapely
   - pyproj
