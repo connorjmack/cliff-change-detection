@@ -18,6 +18,7 @@ Usage:
 
 import os
 import re
+import glob
 import platform
 import argparse
 import numpy as np
@@ -124,30 +125,38 @@ def find_survey_folders(erosion_dir, n_samples=None, specific_survey=None):
     return folders
 
 
-def load_survey_grids(folder_path, resolution):
+def load_survey_grids(folder_path, resolution, verbose=False):
     """Load all grid versions for a survey."""
     label = resolution_to_label(resolution)
 
     grids = {}
-    files_map = {
-        'grid_original': f'grid_{label}.csv',
-        'grid_cleaned': f'grid_{label}_cleaned.csv',
-        'grid_filled': f'grid_{label}_filled.csv',
-        'clusters_original': f'clusters_{label}.csv',
-        'clusters_cleaned': f'clusters_{label}_cleaned.csv',
-        'clusters_filled': f'clusters_{label}_filled.csv',
+
+    # File patterns to search for (handles date prefix and "ero_" prefix)
+    patterns = {
+        'grid_original': f'*ero_grid_{label}.csv',
+        'grid_cleaned': f'*ero_grid_{label}_cleaned.csv',
+        'grid_filled': f'*ero_grid_{label}_filled.csv',
+        'clusters_original': f'*ero_clusters_{label}.csv',
+        'clusters_cleaned': f'*ero_clusters_{label}_cleaned.csv',
+        'clusters_filled': f'*ero_clusters_{label}_filled.csv',
     }
 
-    for key, filename in files_map.items():
-        filepath = os.path.join(folder_path, filename)
-        data, headers, rows = load_grid_csv(filepath)
-        if data is not None:
-            grids[key] = {
-                'data': data,
-                'headers': headers,
-                'rows': rows,
-                'filepath': filepath
-            }
+    for key, pattern in patterns.items():
+        matches = glob.glob(os.path.join(folder_path, pattern))
+        if matches:
+            filepath = matches[0]  # Take first match
+            if verbose:
+                print(f"    Found {key}: {os.path.basename(filepath)}")
+            data, headers, rows = load_grid_csv(filepath)
+            if data is not None:
+                grids[key] = {
+                    'data': data,
+                    'headers': headers,
+                    'rows': rows,
+                    'filepath': filepath
+                }
+        elif verbose:
+            print(f"    Missing {key}: {pattern}")
 
     return grids
 
@@ -653,7 +662,7 @@ def main():
         print(f"Processing: {survey_name}")
 
         # Load grids
-        grids = load_survey_grids(folder_path, args.resolution)
+        grids = load_survey_grids(folder_path, args.resolution, verbose=True)
 
         if not grids:
             print(f"  [SKIP] No grid files found")
