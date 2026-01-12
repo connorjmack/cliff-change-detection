@@ -287,21 +287,3 @@ if search_button:
 else:
     st.info("👈 Configure your filters in the sidebar and click **Search Surveys** to begin")
 
-    # Show predefined location examples
-    st.markdown("---")
-    st.subheader("📍 Quick Start: Predefined Locations")
-
-    locations = {
-        "Del Mar": [595, 620],
-        "Solana": [637, 666],
-        "Encinitas": [708, 764],
-        "San Elijo": [683, 708],
-        "Torrey": [567, 581],
-        "Blacks": [520, 567]
-    }
-
-    cols = st.columns(3)
-    for idx, (location, mop_range) in enumerate(locations.items()):
-        with cols[idx % 3]:
-            st.markdown(f"**{location}**")
-            st.markdown(f"MOP {mop_range[0]} - {mop_range[1]}")
