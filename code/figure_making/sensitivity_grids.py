@@ -1,300 +1,244 @@
 #!/usr/bin/env python3
 """
-plot_spatial_sensitivity_v4.py
+plot_grid_sensitivity_final_v2.py
 
-Purpose:
-    Visualizes SPATIAL differences between grid resolutions (1m, 25cm, 10cm).
-    
-    FIXES:
-    1. Fixed ValueError: "The truth value of a DataFrame is ambiguous" by removing 'or' logic.
-    2. Fixed MatplotlibDeprecationWarning by using 'matplotlib.colormaps'.
-    3. Retains correct Axis Scaling (X=PolygonID, Y=Meters) from V3.
+Visualizes "Cliff Activity Index" (Cumulative Erosion) across different grid resolutions.
+CORRECTLY scales axes so that 1m, 25cm, and 10cm grids align spatially.
+FIXES layout to prevent colorbar overlapping x-axis labels.
+RESTORES Y-Axis scaling (divides by 100 if units are detected as cm).
 
 Usage:
-    python3 code/figure_making/plot_spatial_sensitivity_v4.py --location DelMar
+    python3 plot_grid_sensitivity_final_v2.py --location DelMar
+    python3 plot_grid_sensitivity_final_v2.py --location DelMar --zoom 1450 1550
 """
 
 import os
-import re
-import platform
 import argparse
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.cm as cm
 from matplotlib.colors import LinearSegmentedColormap, Normalize
-from matplotlib import cm
-from datetime import datetime
+import re
 
-# ==============================================================================
-# 1. CONFIGURATION
-# ==============================================================================
+# --- Configuration ---
+RESOLUTIONS = ['1m', '25cm', '10cm']
+VMAX_EROSION = 6.0  # Saturation point in meters
 
-RESOLUTIONS = [
-    ("1m",   1.00, "100cm"),
-    ("25cm", 0.25, "25cm"),
-    ("10cm", 0.10, "10cm")
-]
+# --- Styling ---
+plt.rcParams['font.family'] = 'sans-serif'
+plt.rcParams['font.sans-serif'] = ['Arial', 'DejaVu Sans']
+plt.rcParams['font.size'] = 12
 
-CMAP_NAME = 'magma_r'
-VMAX_CUMULATIVE = 6.0 
+def get_resolution_value(res_str):
+    """Returns resolution in meters (float)."""
+    if 'cm' in res_str:
+        return float(res_str.replace('cm', '')) / 100.0
+    elif 'm' in res_str:
+        return float(res_str.replace('m', ''))
+    return 0.1
 
-plt.rcParams.update({'font.size': 12, 'font.family': 'sans-serif'})
+def normalize_resolution_string(res):
+    """Matches file naming convention (1m -> 100cm)."""
+    if res == '1m': return '100cm'
+    return res
 
-# ==============================================================================
-# 2. HELPER FUNCTIONS
-# ==============================================================================
-
-def get_base_dir():
-    if platform.system() == 'Darwin':
-        return "/Volumes/group/LiDAR/LidarProcessing/LidarProcessingCliffs"
-    else:
-        return "/project/group/LiDAR/LidarProcessing/LidarProcessingCliffs"
-
-def normalize_resolution_for_files(resolution):
-    if resolution == '1m': return '100cm'
-    elif resolution == '100cm': return '100cm'
-    else: return resolution
-
-def get_custom_cmap(name, vmax):
-    # Fix for Matplotlib Deprecation Warning
-    try:
-        base = matplotlib.colormaps[name]
-    except:
-        base = plt.get_cmap(name)
-        
-    colors = base(np.linspace(0, 1, 256))
-    colors[0, :] = [1, 1, 1, 1] # White for 0
-    return LinearSegmentedColormap.from_list(f"White_{name}", colors), Normalize(vmin=0, vmax=vmax)
-
-def clean_and_snap_grid(df, resolution_val):
+def get_custom_magma_cmap():
     """
-    Standard cleaning: Strips headers to floats, Index to ints.
+    Creates 'magma_r' but with a PURE WHITE background for 0.
     """
-    # Columns (Elevation)
-    cleaned_cols = df.columns.astype(str).str.replace(r'[a-zA-Z_]', '', regex=True)
-    try:
-        col_floats = cleaned_cols.astype(float)
-        # Snap to grid index
-        scale = 1.0 / resolution_val
-        new_cols = (col_floats * scale).round().astype(int)
-        df.columns = new_cols
-    except:
+    # Get standard magma_r (reversed)
+    magma = cm.get_cmap('magma_r', 256)
+    newcolors = magma(np.linspace(0, 1, 256))
+    
+    # FORCE ZERO TO PURE WHITE [R, G, B, Alpha]
+    newcolors[0, :] = np.array([1, 1, 1, 1]) 
+    
+    return LinearSegmentedColormap.from_list("WhiteMagma", newcolors)
+
+def load_and_sum_grids(base_dir, location, resolution):
+    """
+    Loads/sums grids and returns DataFrame AND max physical dimensions.
+    """
+    file_res = normalize_resolution_string(resolution)
+    res_val = get_resolution_value(resolution)
+    data_dir = os.path.join(base_dir, 'results', location, 'erosion')
+    
+    if not os.path.isdir(data_dir):
         return None
 
-    # Index (Polygon ID)
-    try:
-        df.index = df.index.astype(int)
-    except:
-        return None
-
-    # SORT (Crucial for imshow)
-    df = df.sort_index(axis=0) # Sort Polygons
-    df = df.sort_index(axis=1) # Sort Elevations
-    return df
-
-def find_grid_files(base_dir, location, file_tag):
-    """Locates files using fuzzy matching logic from cum_erosion.py"""
-    erosion_dir = os.path.join(base_dir, 'results', location, 'erosion')
-    if not os.path.exists(erosion_dir): return []
-
-    grid_files = []
-    
-    # Try filled first, then cleaned
-    patterns = [f"grid_{file_tag}_filled.csv", f"grid_{file_tag}_cleaned.csv"]
-
-    for date_folder in sorted(os.listdir(erosion_dir)):
-        folder_path = os.path.join(erosion_dir, date_folder)
-        if not os.path.isdir(folder_path): continue
-            
-        files_in_folder = os.listdir(folder_path)
-        found_file = None
-        
-        for pattern in patterns:
-            match = [f for f in files_in_folder if pattern in f and f.endswith('.csv')]
-            if match:
-                found_file = os.path.join(folder_path, match[0])
-                break
-        
-        if found_file:
-            grid_files.append(found_file)
-            
-    return grid_files
-
-def calculate_cumulative_data(files, res_val):
-    """Sums up the grids."""
-    if not files: return None
-    
-    # print(f"    Summing {len(files)} grids...")
     cumulative_df = None
     
-    for f in files:
+    # Iterate all survey folders
+    for date_folder in sorted(os.listdir(data_dir)):
+        folder_path = os.path.join(data_dir, date_folder)
+        if not os.path.isdir(folder_path): continue
+        
+        # Find file
+        patterns = [f"_ero_grid_{file_res}_filled.csv", f"grid_{file_res}_filled.csv"]
+        target_file = None
+        for f in os.listdir(folder_path):
+            if any(p in f for p in patterns) and f.endswith('.csv'):
+                target_file = os.path.join(folder_path, f)
+                break
+        
+        if not target_file: continue
+
         try:
-            df = pd.read_csv(f, index_col=0).fillna(0)
-            df_clean = clean_and_snap_grid(df, res_val)
+            # Load
+            df = pd.read_csv(target_file, index_col=0)
+            df = df.apply(pd.to_numeric, errors='coerce').fillna(0.0)
             
-            if df_clean is not None:
-                if cumulative_df is None:
-                    cumulative_df = df_clean.fillna(0)
-                else:
-                    cumulative_df = cumulative_df.add(df_clean.fillna(0), fill_value=0)
+            # Initialize cumulative df with same shape if needed
+            if cumulative_df is None:
+                cumulative_df = df
+            else:
+                # Align indices to ensure we are adding the same polygons
+                cumulative_df = cumulative_df.add(df, fill_value=0)
+                
         except:
-            pass
-            
+            continue
+
+    if cumulative_df is None:
+        return None
+
+    # --- CLEANING AND SCALING ---
+    # 1. Clean Column Headers (Elevation)
+    # Remove characters, keep numbers. e.g. "M3C2_0.10m" -> 0.10
+    cleaned_cols = cumulative_df.columns.astype(str).str.replace(r'[a-zA-Z_]', '', regex=True)
+    cumulative_df.columns = cleaned_cols.astype(float) # Columns are now Elevation (m)
+    
+    # 2. Clean Index (Alongshore Position)
+    # The index is the Polygon ID. We need to convert this to Meters for plotting.
+    # We assume Polygon 0 = 0m, Polygon 1 = 1 * res_val, etc.
+    cumulative_df.index = cumulative_df.index.astype(int)
+    
     return cumulative_df
 
-# ==============================================================================
-# 3. PLOTTING LOGIC
-# ==============================================================================
-
-def plot_spatial_comparison(grids, location, out_dir):
-    cmap, norm = get_custom_cmap(CMAP_NAME, VMAX_CUMULATIVE)
+def plot_panel(ax, df, resolution, global_max_x, zoom_range=None):
+    """
+    Plots a single resolution panel, scaled to physical meters.
+    """
+    res_val = get_resolution_value(resolution)
     
-    # --- 1. SETUP FIGURE 1: FULL COASTLINE ---
-    fig1, axes1 = plt.subplots(3, 1, figsize=(18, 12), sharex=True, constrained_layout=True)
+    # Transpose so X=Alongshore, Y=Elevation
+    plot_df = df.T
+    plot_df.sort_index(axis=0, inplace=True) # Sort Y (Elevation)
+    plot_df.sort_index(axis=1, inplace=True) # Sort X (Alongshore)
     
-    # Use 10cm grid to find global X limits (Polygon IDs)
-    # FIX: Explicit check instead of 'or'
-    if "10cm" in grids:
-        ref_df = grids["10cm"]
+    # --- CALCULATE PHYSICAL EXTENT (METERS) ---
+    # X-Axis: Index * Resolution
+    x_indices = plot_df.columns.values
+    x_min_m = x_indices.min() * res_val
+    x_max_m = x_indices.max() * res_val
+    
+    # Y-Axis: Check if scaling is needed
+    y_min_m = plot_df.index.min()
+    y_max_m = plot_df.index.max()
+    
+    # --- RESTORED LOGIC: Auto-scale Y axis if > 100 (assume cm -> m) ---
+    if y_max_m > 100:
+        y_min_m /= 100.0
+        y_max_m /= 100.0
+    
+    extent = [x_min_m, x_max_m, y_min_m, y_max_m]
+    
+    # --- PLOTTING ---
+    cmap = get_custom_magma_cmap()
+    norm = Normalize(vmin=0, vmax=VMAX_EROSION)
+    
+    im = ax.imshow(plot_df.values, origin='lower', extent=extent, 
+                   cmap=cmap, norm=norm, aspect='auto', interpolation='nearest')
+    
+    # Styling
+    ax.set_title(f"{resolution} Resolution", fontsize=14, fontweight='bold')
+    ax.set_ylabel("Elevation (m)", fontsize=12)
+    ax.grid(False)
+    
+    # --- LOCK X-AXIS ---
+    # This ensures 1m (coarse) and 10cm (fine) share the exact same physical width
+    if zoom_range:
+        ax.set_xlim(zoom_range[1], zoom_range[0]) # Inverted X for Cliff View
     else:
-        ref_df = list(grids.values())[0]
-
-    global_min_id = ref_df.index.min()
-    global_max_id = ref_df.index.max()
-    
-    print(f"  Plotting extent: Polygon IDs {global_min_id} to {global_max_id}")
-
-    for ax, (label, res, _) in zip(axes1, RESOLUTIONS):
-        if label not in grids: 
-            ax.text(0.5,0.5,"N/A", ha='center')
-            continue
+        ax.set_xlim(global_max_x, 0) # Inverted X, 0 to Max
         
-        df = grids[label]
-        
-        # TRANSPOSE: Rows=Elevation, Cols=PolygonID
-        plot_df = df.T 
-        
-        # --- EXTENT CALCULATION ---
-        # X Axis = Raw Polygon IDs (Do NOT multiply by res)
-        x_start = plot_df.columns.min()
-        x_end   = plot_df.columns.max()
-        
-        # Y Axis = Physical Elevation (Index * Res)
-        y_start = plot_df.index.min() * res
-        y_end   = plot_df.index.max() * res
-        
-        extent = [x_start, x_end, y_start, y_end]
-        
-        im = ax.imshow(plot_df.values, origin='lower', extent=extent, 
-                       cmap=cmap, norm=norm, aspect='auto', interpolation='none')
-        
-        # Vol Label
-        vol = plot_df.values.sum() * (res**2)
-        ax.text(0.01, 0.9, f"Vol: {vol:,.0f} m³", transform=ax.transAxes, 
-                fontweight='bold', bbox=dict(facecolor='white', alpha=0.9))
-        
-        ax.set_title(f"{label} Resolution", fontweight='bold')
-        ax.set_ylabel("Elevation (m)")
-        
-        # Align X axis (Inverted for standard view)
-        ax.set_xlim(global_max_id, global_min_id) 
-        ax.set_ylim(0, 30)
-
-    axes1[-1].set_xlabel("Polygon ID (Alongshore Index)", fontweight='bold')
-    fig1.colorbar(im, ax=axes1, label="Cumulative Erosion (m)", location='right', fraction=0.02)
-    fig1.suptitle(f"{location}: Grid Resolution Sensitivity (Full Coastline)", fontsize=16, fontweight='bold')
-    
-    path1 = os.path.join(out_dir, f"{location}_Spatial_Full.png")
-    plt.savefig(path1, dpi=200)
-    print(f"  Saved: {path1}")
-    plt.close(fig1)
-
-    # --- 2. SETUP FIGURE 2: ZOOM ON LARGEST EVENT ---
-    print("  Generating Zoom Plot...")
-    
-    # Auto-detect hotspot using 10cm grid
-    if "10cm" in grids:
-        df_10 = grids["10cm"]
-        # Sum columns (Elevations) to get total erosion per Polygon ID
-        # Index is Polygon ID
-        profile = df_10.sum(axis=1)
-        peak_id = profile.idxmax()
-        
-        # Define Window (+/- 25 Polygons)
-        zoom_w = 25
-        z_min = peak_id - zoom_w
-        z_max = peak_id + zoom_w
-        
-        print(f"    Zooming at Polygon ID {peak_id} ({z_min}-{z_max})")
-
-        fig2, axes2 = plt.subplots(1, 3, figsize=(18, 6), sharey=True, constrained_layout=True)
-        
-        for ax, (label, res, _) in zip(axes2, RESOLUTIONS):
-            if label not in grids: continue
-            
-            df = grids[label]
-            plot_df = df.T
-            
-            # Recalculate extent for this grid
-            x_s = plot_df.columns.min()
-            x_e = plot_df.columns.max()
-            y_s = plot_df.index.min() * res
-            y_e = plot_df.index.max() * res
-            extent = [x_s, x_e, y_s, y_e]
-            
-            # Use 'nearest' to show pixelation
-            im = ax.imshow(plot_df.values, origin='lower', extent=extent, 
-                           cmap=cmap, norm=norm, aspect='auto', interpolation='nearest')
-            
-            ax.set_title(f"{label} Grid", fontweight='bold')
-            ax.set_xlabel("Polygon ID")
-            
-            # Apply Zoom Limits (Match Full View Flip)
-            ax.set_xlim(z_max, z_min) 
-            ax.set_ylim(0, 25)
-            
-            ax.grid(True, which='both', color='gray', linestyle='-', linewidth=0.5, alpha=0.3)
-
-        axes2[0].set_ylabel("Elevation (m)", fontweight='bold')
-        cbar2 = fig2.colorbar(im, ax=axes2, label="Cumulative Erosion (m)", location='bottom', fraction=0.05, pad=0.1)
-        fig2.suptitle(f"{location}: Detail View of Largest Erosion Event", fontsize=16, fontweight='bold')
-        
-        path2 = os.path.join(out_dir, f"{location}_Spatial_Zoom.png")
-        plt.savefig(path2, dpi=200)
-        print(f"  Saved: {path2}")
-        plt.close(fig2)
-    else:
-        print("[WARN] 10cm grid missing, cannot auto-zoom.")
-
-# ==============================================================================
-# MAIN
-# ==============================================================================
+    return im
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--location", default="DelMar")
+    parser.add_argument('--location', required=True, help="Survey Location (e.g. DelMar)")
+    parser.add_argument('--zoom', nargs=2, type=int, help="Zoom limits (e.g. 1450 1600)")
     args = parser.parse_args()
-    
-    base_dir = get_base_dir()
-    out_dir = os.path.join(base_dir, "figures", "sensitivity")
-    os.makedirs(out_dir, exist_ok=True)
 
-    # Load Data
-    grids = {}
-    print(f"--- Loading Grids for {args.location} ---")
+    import platform
+    if platform.system() == 'Darwin':
+         base_dir = '/Volumes/group/LiDAR/LidarProcessing/LidarProcessingCliffs'
+    else:
+         base_dir = '/project/group/LiDAR/LidarProcessing/LidarProcessingCliffs'
+
+    out_dir = os.path.join(base_dir, 'figures', 'grid_sensitivity')
+    os.makedirs(out_dir, exist_ok=True)
     
-    for label, val, tag in RESOLUTIONS:
-        files = find_grid_files(base_dir, args.location, tag)
-        if files:
-            df = calculate_cumulative_data(files, val)
-            if df is not None:
-                grids[label] = df
+    print(f"--- Generating Grid Sensitivity Plot for {args.location} ---")
     
-    if not grids:
-        print("No data found.")
+    # 1. Load Data first to find Global Max X (Physical Distance)
+    data_store = {}
+    global_max_dist = 0
+    
+    for res in RESOLUTIONS:
+        print(f"  Loading {res}...")
+        df = load_and_sum_grids(base_dir, args.location, res)
+        if df is not None:
+            data_store[res] = df
+            
+            # Calculate physical length of this grid
+            res_val = get_resolution_value(res)
+            max_dist = df.index.max() * res_val
+            if max_dist > global_max_dist:
+                global_max_dist = max_dist
+    
+    if not data_store:
+        print("No data found!")
         return
 
-    plot_spatial_comparison(grids, args.location, out_dir)
+    print(f"  Global Extent: {global_max_dist:.1f} meters")
 
-if __name__ == "__main__":
+    # 2. Setup Figure
+    fig, axes = plt.subplots(3, 1, figsize=(20, 12), sharex=True, sharey=True)
+    
+    # --- LAYOUT ADJUSTMENT: Reserve bottom space for colorbar ---
+    # bottom=0.15 lifts the lowest plot up, creating whitespace for the colorbar
+    plt.subplots_adjust(hspace=0.3, bottom=0.15) 
+    
+    mappable = None
+    
+    # 3. Plot Each
+    for i, res in enumerate(RESOLUTIONS):
+        if res in data_store:
+            mappable = plot_panel(axes[i], data_store[res], res, global_max_dist, args.zoom)
+        else:
+            axes[i].text(0.5, 0.5, f"No Data for {res}", ha='center', va='center')
+            axes[i].set_title(f"{res} Resolution")
+
+    # 4. Final Formatting
+    axes[-1].set_xlabel("Alongshore Location (m)", fontsize=14, fontweight='bold')
+    
+    # Shared Colorbar
+    # Placed at bottom=0.06, width=0.7, height=0.025
+    cbar_ax = fig.add_axes([0.15, 0.06, 0.7, 0.025]) 
+    if mappable:
+        cb = fig.colorbar(mappable, cax=cbar_ax, orientation='horizontal')
+        cb.set_label("Cumulative Erosion Depth (m)", fontsize=14, fontweight='bold', labelpad=10)
+        cb.ax.tick_params(labelsize=12)
+
+    zoom_str = f"(Zoom: {args.zoom[0]}-{args.zoom[1]}m)" if args.zoom else "(Full Extent)"
+    fig.suptitle(f"{args.location}: Grid Resolution Sensitivity Analysis {zoom_str}", 
+                 fontsize=20, fontweight='bold', y=0.96)
+    
+    suffix = "zoomed" if args.zoom else "full"
+    out_path = os.path.join(out_dir, f"{args.location}_Sensitivity_{suffix}.png")
+    plt.savefig(out_path, dpi=300, bbox_inches='tight')
+    print(f"✓ Saved: {out_path}")
+
+if __name__ == '__main__':
     main()

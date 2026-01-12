@@ -40,7 +40,7 @@ MOP_KML         = os.path.join(BASE_DIR, "MOPLines/MOPs_SD_County.kml")
 PROJECT_ROOT    = os.path.join(BASE_DIR, "LidarProcessing/LidarProcessingCliffs")
 SURVEY_LIST_DIR = os.path.join(PROJECT_ROOT, "survey_lists")
 RESULTS_BASE    = os.path.join(PROJECT_ROOT, "results")
-CROPBOX_DIR     = os.path.join(PROJECT_ROOT, "utilities")
+CROPBOX_DIR     = os.path.join(PROJECT_ROOT, "utilities", "cropping_boxes")
 
 # === MOP INDEX RANGES BY LOCATION ===
 mop_ranges = {
@@ -275,8 +275,12 @@ def crop_location(location: str, replace: bool = False):
     with ProcessPoolExecutor(max_workers=nprocs) as executor:
         # Use tqdm to show progress bar
         futures = tqdm(executor.map(_worker, tasks), total=len(tasks), desc=f"Cropping {location}")
-        for res in futures:
+        for res, task in zip(futures, tasks):
             results.append(res)
+            if res["status"] == "processed":
+                print(f"  ✓ {task[2]}")
+            elif res["status"] == "skipped":
+                print(f"  ⊘ SKIPPED: {task[2]}")
 
     total_duration = time.time() - total_start
     write_report(location, results, total_duration, out_dir)
