@@ -149,28 +149,51 @@ def format_name_list(names: set[str], limit: int) -> str:
     return ", ".join(sorted_names)
 
 
-def gather_m3c2_stats(m3c2_root: Path) -> Tuple[int, int, int]:
+def generate_expected_pairs(dates: List[str]) -> set[str]:
+    """Generate expected sequential survey pairs from sorted dates."""
+    if len(dates) < 2:
+        return set()
+
+    sorted_dates = sorted(dates)
+    pairs = set()
+    for i in range(len(sorted_dates) - 1):
+        pairs.add(f"{sorted_dates[i]}_to_{sorted_dates[i+1]}")
+    return pairs
+
+
+def gather_m3c2_pairs(m3c2_root: Path) -> set[str]:
+    """Get all m3c2 pairs that exist (from any pipeline_run_*)."""
     if not m3c2_root.exists():
-        return 0, 0, 0
+        return set()
 
+    pairs = set()
     run_dirs = [p for p in m3c2_root.glob("pipeline_run_*") if p.is_dir()]
-    pair_dirs = []
     for run in run_dirs:
-        pair_dirs.extend([p for p in run.glob("*_to_*") if p.is_dir()])
+        for pair_dir in run.glob("*_to_*"):
+            if pair_dir.is_dir():
+                pairs.add(pair_dir.name)
+    return pairs
 
-    m3c2_files = len(list(m3c2_root.rglob("*_m3c2.las")))
-    return len(run_dirs), len(pair_dirs), m3c2_files
 
-
-def gather_change_stats(root: Path) -> Dict[str, int]:
+def gather_change_pairs(root: Path) -> set[str]:
+    """Get all erosion/deposition pairs that exist."""
     if not root.exists():
-        return {"pairs": 0, "las": 0, "csv": 0}
+        return set()
 
-    pairs = [p for p in root.iterdir() if p.is_dir()]
+    pairs = set()
+    for pair_dir in root.glob("*_to_*"):
+        if pair_dir.is_dir():
+            pairs.add(pair_dir.name)
+    return pairs
+
+
+def compare_pairs(expected: set[str], found: set[str]) -> dict:
+    """Compare expected vs found pairs."""
     return {
-        "pairs": len(pairs),
-        "las": len(list(root.rglob("*.las"))),
-        "csv": len(list(root.rglob("*.csv"))),
+        "expected": len(expected),
+        "found": len(found),
+        "missing": expected - found,
+        "extra": found - expected,
     }
 
 
@@ -184,6 +207,7 @@ def analyze_location(location: str, project_root: Path, data_root: Path, list_li
     expected_nobeach: set[str] = set()
     expected_noveg: set[str] = set()
     raw_missing: List[str] = []
+    valid_dates: List[str] = []
 
     for row in rows:
         raw_file = locate_raw_file(row, data_root)
@@ -198,6 +222,11 @@ def analyze_location(location: str, project_root: Path, data_root: Path, list_li
         expected_nobeach.add(f"{stem}_nobeach.las")
         expected_noveg.add(f"{stem}_noveg.las")
 
+        # Extract date for pair generation
+        date_str = str(row.get("date", "")).strip()
+        if date_str and len(date_str) == 8:
+            valid_dates.append(date_str)
+
     base_dir = results_dir / location
     cropped_found = gather_las_names(base_dir / "cropped")
     nobeach_found = gather_las_names(base_dir / "nobeach") | gather_las_names(base_dir / "nobeach_new")
@@ -207,9 +236,18 @@ def analyze_location(location: str, project_root: Path, data_root: Path, list_li
     nobeach_stats = compare_stage(expected_nobeach, nobeach_found)
     noveg_stats = compare_stage(expected_noveg, noveg_found)
 
-    m3c2_runs, m3c2_pairs, m3c2_files = gather_m3c2_stats(base_dir / "m3c2")
-    erosion_stats = gather_change_stats(base_dir / "erosion")
-    deposition_stats = gather_change_stats(base_dir / "deposition")
+    # Generate expected sequential pairs
+    expected_pairs = generate_expected_pairs(valid_dates)
+
+    # Gather actual pairs
+    m3c2_pairs_found = gather_m3c2_pairs(base_dir / "m3c2")
+    erosion_pairs_found = gather_change_pairs(base_dir / "erosion")
+    deposition_pairs_found = gather_change_pairs(base_dir / "deposition")
+
+    # Compare pairs
+    m3c2_stats = compare_pairs(expected_pairs, m3c2_pairs_found)
+    erosion_stats = compare_pairs(expected_pairs, erosion_pairs_found)
+    deposition_stats = compare_pairs(expected_pairs, deposition_pairs_found)
 
     return {
         "location": location,
@@ -219,9 +257,7 @@ def analyze_location(location: str, project_root: Path, data_root: Path, list_li
         "cropped": cropped_stats,
         "nobeach": nobeach_stats,
         "noveg": noveg_stats,
-        "m3c2_runs": m3c2_runs,
-        "m3c2_pairs": m3c2_pairs,
-        "m3c2_files": m3c2_files,
+        "m3c2": m3c2_stats,
         "erosion": erosion_stats,
         "deposition": deposition_stats,
         "list_limit": list_limit,
@@ -245,7 +281,7 @@ def build_report(project_root: Path, data_root: Path, stats: List[dict], list_li
         overall["raw_found"] += s["raw_found"]
         overall["raw_missing"] += len(s["raw_missing"])
 
-        for stage in ("cropped", "nobeach", "noveg"):
+        for stage in ("cropped", "nobeach", "noveg", "m3c2", "erosion", "deposition"):
             overall[f"{stage}_expected"] += s[stage]["expected"]
             overall[f"{stage}_found"] += s[stage]["found"]
             overall[f"{stage}_missing"] += len(s[stage]["missing"])
@@ -259,6 +295,9 @@ def build_report(project_root: Path, data_root: Path, stats: List[dict], list_li
             f"  Step 2 - cropped: expected {overall['cropped_expected']} | found {overall['cropped_found']} | missing {overall['cropped_missing']} | extra {overall['cropped_extra']}",
             f"  Step 4 - nobeach: expected {overall['nobeach_expected']} | found {overall['nobeach_found']} | missing {overall['nobeach_missing']} | extra {overall['nobeach_extra']}",
             f"  Step 5 - noveg: expected {overall['noveg_expected']} | found {overall['noveg_found']} | missing {overall['noveg_missing']} | extra {overall['noveg_extra']}",
+            f"  Step 6 - m3c2: expected {overall['m3c2_expected']} pairs | found {overall['m3c2_found']} | missing {overall['m3c2_missing']} | extra {overall['m3c2_extra']}",
+            f"  Step 7 - erosion: expected {overall['erosion_expected']} pairs | found {overall['erosion_found']} | missing {overall['erosion_missing']} | extra {overall['erosion_extra']}",
+            f"  Step 7 - deposition: expected {overall['deposition_expected']} pairs | found {overall['deposition_found']} | missing {overall['deposition_missing']} | extra {overall['deposition_extra']}",
             "",
         ]
     )
@@ -286,17 +325,17 @@ def build_report(project_root: Path, data_root: Path, stats: List[dict], list_li
             if data["extra"]:
                 lines.append(f"    Extra files (not in survey list): {format_name_list(data['extra'], list_limit)}")
 
-        lines.append(
-            f"  Step 6 - m3c2: runs {s['m3c2_runs']} | pair folders {s['m3c2_pairs']} | result files {s['m3c2_files']}"
-        )
-        lines.append(
-            "  Step 7+ - erosion: "
-            f"{s['erosion']['pairs']} pairs | {s['erosion']['las']} las files | {s['erosion']['csv']} csv files"
-        )
-        lines.append(
-            "  Step 7+ - deposition: "
-            f"{s['deposition']['pairs']} pairs | {s['deposition']['las']} las files | {s['deposition']['csv']} csv files"
-        )
+        # M3C2, erosion, deposition are pair-based
+        for label, stage in (("Step 6 - m3c2", "m3c2"), ("Step 7 - erosion", "erosion"), ("Step 7 - deposition", "deposition")):
+            data = s[stage]
+            lines.append(
+                f"  {label}: expected {data['expected']} pairs | found {data['found']} | missing {len(data['missing'])} | extra {len(data['extra'])}"
+            )
+            if data["missing"]:
+                lines.append(f"    Missing pairs: {format_name_list(data['missing'], list_limit)}")
+            if data["extra"]:
+                lines.append(f"    Extra pairs (not in sequential list): {format_name_list(data['extra'], list_limit)}")
+
         lines.append("")
 
     return lines
