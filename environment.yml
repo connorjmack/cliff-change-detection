@@ -27,6 +27,7 @@ dependencies:
   - tqdm
   - joblib
   - alphashape
+  - pytest
   
   # Pip fallback (if any packages are missing from conda-forge)
   - pip
