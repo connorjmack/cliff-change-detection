@@ -102,8 +102,9 @@ def update_csv_sorted(csv_path, new_rows):
     
     # 1. Load existing data
     if os.path.exists(csv_path):
-        # Read strictly as strings to avoid messing up formatting
-        df = pd.read_csv(csv_path, dtype={'date': int})
+        df = pd.read_csv(csv_path, dtype={'path': str})
+        if 'date' in df.columns:
+            df['date'] = pd.to_numeric(df['date'], errors='coerce').astype('Int64')
     else:
         df = pd.DataFrame(columns=fieldnames)
 
