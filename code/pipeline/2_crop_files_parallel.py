@@ -26,21 +26,19 @@ from pyproj import Transformer
 import xml.etree.ElementTree as ET
 
 # === THREADING CONTROLS ===
-UTILIZATION_TARGET = 0.75  
+# Conservative defaults to reduce memory pressure and avoid worker crashes.
+UTILIZATION_TARGET = 0.50
 
-# 2. Threads per worker (Keep at 3 if you are doing heavy math/numpy)
-# For pure cropping/loading, 1 is often better, but 3 is a safe hybrid.
-OMP_THREADS = 3
+# Threads per worker. Cropping is I/O + PDAL-heavy; 1 keeps memory use lower.
+OMP_THREADS = 1
 
 CPU_COUNT = os.cpu_count() or 1
 
 # 3. Calculate "Safe" limits
-# Reserve cores for the OS (e.g., leave ~14 cores free on a 96-core box)
+# Reserve cores for the OS and cap worker count to avoid OOM/segfaults.
 usable_cores = int(CPU_COUNT * UTILIZATION_TARGET)
-
-# Calculate workers: (81 usable cores) // 3 threads = 27 Workers
-# This runs ~27 parallel files, using ~81 total CPU threads.
-DEFAULT_WORKERS = max(1, usable_cores // OMP_THREADS)
+MAX_WORKERS_CAP = 8
+DEFAULT_WORKERS = max(1, min(usable_cores // OMP_THREADS, MAX_WORKERS_CAP))
 
 # Apply settings
 os.environ["OMP_NUM_THREADS"]      = str(OMP_THREADS)
