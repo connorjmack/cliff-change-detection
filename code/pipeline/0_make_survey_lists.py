@@ -10,6 +10,7 @@ Usage:
 import os
 import csv
 import sys
+import glob
 import numpy as np
 import platform
 import argparse
@@ -43,10 +44,25 @@ mop_ranges = {
     "Blacks"      : [520, 567]
 }
 
+def ensure_mac_path(path):
+    """Normalize /project paths to /Volumes for consistency."""
+    if path.startswith("/project/group/LiDAR"):
+        return path.replace("/project/group/LiDAR", "/Volumes/group/LiDAR")
+    return path
+
+def find_target_las_files(directory):
+    """
+    Return list of *_beach_cliff_ground.las files under a survey directory.
+    """
+    return sorted([
+        f for f in glob.glob(os.path.join(directory, "**", "*.las"), recursive=True)
+        if f.lower().endswith("_beach_cliff_ground.las")
+    ])
+
 def export_surveys(location):
     """
     Walk each instrument folder, find subdirs with at least 2/3 of MOP lines overlapping the location range,
-    sort all hits by date, and write surveys_<location>.csv.
+    confirm they contain a *_beach_cliff_ground.las, sort all hits by date, and write surveys_<location>.csv.
     """
     if location not in mop_ranges:
         print(f"❌ Error: Unknown location '{location}'. Skipping.")
@@ -93,18 +109,26 @@ def export_surveys(location):
             overlap = min(mop2, max_line) - max(mop1, min_line)
             
             # Calculate required overlap (2/3 of the TARGET location's length)
-            two_thirds = np.floor((max_line - min_line) * 2/3)
+            two_thirds = (max_line - min_line) * 2/3
             
-            # If the calculated overlap covers enough of the beach, keep it
-            if overlap >= two_thirds:
-                rows.append({
-                    "path":   name,  # Just the folder name, or subdir for full path
-                    "date":   date_str,
-                    "MOP1":   mop1,
-                    "MOP2":   mop2,
-                    "beach":  location,
-                    "method": method
-                })
+            if overlap < two_thirds:
+                continue
+
+            # Verify a beach_cliff_ground LAS exists; skip otherwise
+            las_files = find_target_las_files(subdir)
+            if not las_files:
+                # print(f"⚠️ No *_beach_cliff_ground.las in {subdir}")
+                continue
+
+            mac_path = ensure_mac_path(subdir)
+            rows.append({
+                "path":   mac_path,  # full survey directory path
+                "date":   date_str,
+                "MOP1":   mop1,
+                "MOP2":   mop2,
+                "beach":  location,
+                "method": method
+            })
 
     # 2) sort by date (YYYYMMDD strings sort lexically)
     rows.sort(key=lambda r: r["date"])
