@@ -43,9 +43,10 @@ The pipeline expects and creates the following directory structure on the server
     │   └── m3c2/                            # M3C2 reports (step 6 output)
     │
     ├── code/pipeline/
-    │   ├── reports/
-    │   │   └── QC_Run_YYYYMMDD_HHMMSS/      # QC reports (step 3 output)
-    │   └── daily_reports/
+    │   └── reports/
+    │       └── QC_Run_YYYYMMDD_HHMMSS/      # QC reports (step 3 output)
+    ├── reports/
+    │   └── daily/
     │       └── daily_report_YYYYMMDD.txt    # Daily update logs (step 1 output)
     │
     └── results/<Location>/                   # ALL processed data outputs
@@ -96,6 +97,8 @@ This document describes each numbered pipeline step (0-9), its purpose, inputs, 
 
 **Inputs:** Raw survey folders under `*/LiDAR_Processed_Level2/` and MOP ranges defined in the script.
 
+**Behavior:** Requires >= 2/3 MOP overlap with the target location, confirms `*_beach_cliff_ground.las` exists, normalizes paths to `/Volumes/group/LiDAR`, and sorts by date.
+
 **Outputs:** `survey_lists/surveys_<Location>.csv`
 
 **Example:**
@@ -106,11 +109,13 @@ python3 0_make_survey_lists.py --location SanElijo
 ## Step 1: Update Survey Lists
 **Script:** `1_update_survey_lists.py`
 
-**Purpose:** Append only new surveys since the last CSV update; writes daily logs.
+**Purpose:** Append new surveys since the last CSV update; writes daily logs for scheduled runs.
 
 **Inputs:** Existing `survey_lists/surveys_<Location>.csv` and raw survey folders.
 
-**Outputs:** Updated CSV and `code/pipeline/daily_reports/daily_report_YYYYMMDD.txt`.
+**Behavior:** Accepts newer dates and same-date surveys with new folder paths, requires `*_beach_cliff_ground.las`, normalizes paths to `/Volumes/group/LiDAR`, and re-sorts by date.
+
+**Outputs:** Updated CSV and `reports/daily/daily_report_YYYYMMDD.txt`.
 
 **Example:**
 ```bash
