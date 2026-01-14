@@ -103,20 +103,18 @@ def update_csv_sorted(csv_path, new_rows):
     # 1. Load existing data
     if os.path.exists(csv_path):
         df = pd.read_csv(csv_path, dtype={'path': str})
-        if 'date' in df.columns:
-            df['date'] = pd.to_numeric(df['date'], errors='coerce').astype('Int64')
     else:
         df = pd.DataFrame(columns=fieldnames)
 
     # 2. Append new rows
     new_df = pd.DataFrame(new_rows)
-    # Ensure new_df has same columns
     if not new_df.empty:
         df = pd.concat([df, new_df], ignore_index=True)
 
-    # 3. Sort by Date
+    # 3. Sort by Date (numeric when possible)
     if 'date' in df.columns:
-        df = df.sort_values(by="date")
+        df['_date_sort'] = pd.to_numeric(df['date'], errors='coerce')
+        df = df.sort_values(by="_date_sort").drop(columns=["_date_sort"])
 
     # 4. Save back to CSV
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
@@ -131,10 +129,11 @@ def get_existing_survey_index(csv_path):
     existing_paths = set()
     if os.path.exists(csv_path):
         try:
-            df = pd.read_csv(csv_path, dtype={'date': 'Int64', 'path': str})
+            df = pd.read_csv(csv_path, dtype={'path': str})
             if not df.empty:
                 if 'date' in df.columns:
-                    max_value = df['date'].max()
+                    date_numeric = pd.to_numeric(df['date'], errors='coerce')
+                    max_value = date_numeric.max()
                     if pd.notna(max_value):
                         max_date = int(max_value)
                 if 'path' in df.columns:
