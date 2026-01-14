@@ -76,7 +76,7 @@ mop_ranges = {
 }
 
 # === PDAL SETTINGS ===
-SAMPLE_RADIUS = 0.02    # 2 cm
+SAMPLE_RADIUS = 0.03    # 2 cm
 ALONG_BUFFER  = 500.0   # meters along-track extension
 
 
