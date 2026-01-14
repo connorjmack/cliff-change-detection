@@ -5,7 +5,8 @@ crop_files_parallel.py
 Crops LAS files to MOP lines and generates a performance report.
 
 Usage:
-    python3 crop_files_parallel.py --location SanElijo [--replace]
+    python3 crop_files_parallel.py --location SanElijo [--replace] [--no-sample]
+    python3 crop_files_parallel.py --all [--replace] [--no-sample]
 """
 
 import os
@@ -53,7 +54,7 @@ mop_ranges = {
 }
 
 # === PDAL SETTINGS ===
-SAMPLE_RADIUS = 0.05    # 5 cm
+SAMPLE_RADIUS = 0.02    # 2 cm
 ALONG_BUFFER  = 500.0   # meters along-track extension
 
 
@@ -137,7 +138,7 @@ def _worker(task):
     Worker function to process a single LAS file.
     Returns a dictionary of statistics for the report.
     """
-    poly_wkt, las_in, las_out, replace = task
+    poly_wkt, las_in, las_out, replace, use_sample = task
     start_time = time.time()
     
     if not replace and os.path.exists(las_out):
@@ -149,14 +150,14 @@ def _worker(task):
         }
 
     try:
-        pipeline = {
-            "pipeline": [
-                {"type": "readers.las", "filename": las_in},
-                {"type": "filters.crop", "polygon": poly_wkt},
-                {"type": "filters.sample", "radius": SAMPLE_RADIUS},
-                {"type": "writers.las", "filename": las_out},
-            ]
-        }
+        stages = [
+            {"type": "readers.las", "filename": las_in},
+            {"type": "filters.crop", "polygon": poly_wkt},
+        ]
+        if use_sample:
+            stages.append({"type": "filters.sample", "radius": SAMPLE_RADIUS})
+        stages.append({"type": "writers.las", "filename": las_out})
+        pipeline = {"pipeline": stages}
         p = pdal.Pipeline(json.dumps(pipeline))
         count = p.execute()
         duration = time.time() - start_time
@@ -210,7 +211,7 @@ def write_report(location, stats, total_duration, out_dir):
     print(f"\n📄 Report saved to: {report_path}")
 
 
-def crop_location(location: str, replace: bool = False):
+def crop_location(location: str, replace: bool = False, no_sample: bool = False):
     total_start = time.time()
     
     if location not in mop_ranges:
@@ -261,7 +262,7 @@ def crop_location(location: str, replace: bool = False):
         las_in  = matches[0]
         stem    = os.path.splitext(os.path.basename(las_in))[0]
         las_out = os.path.join(crop_out_dir, f"{stem}_cropped.las")
-        tasks.append((poly_wkt, las_in, las_out, replace))
+        tasks.append((poly_wkt, las_in, las_out, replace, not no_sample))
 
     if not tasks:
         print("No tasks found. Check paths and survey list.")
@@ -288,11 +289,19 @@ def crop_location(location: str, replace: bool = False):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--location", required=True, help="Location name (e.g., SanElijo)")
+    parser.add_argument("--location", help="Location name (e.g., SanElijo)")
+    parser.add_argument("--all", action="store_true", help="Process all locations")
     parser.add_argument("--replace", action="store_true", help="Overwrite existing files")
+    parser.add_argument("--no-sample", action="store_true", help="Skip PDAL sampling filter")
     args = parser.parse_args()
     
-    crop_location(args.location, replace=args.replace)
+    if args.all:
+        for loc in mop_ranges.keys():
+            crop_location(loc, replace=args.replace, no_sample=args.no_sample)
+    elif args.location:
+        crop_location(args.location, replace=args.replace, no_sample=args.no_sample)
+    else:
+        parser.error("Must provide --location or --all")
 
 if __name__ == "__main__":
     main()
