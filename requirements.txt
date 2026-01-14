@@ -20,3 +20,4 @@ seaborn
 # Utilities
 tqdm
 alphashape
+pytest

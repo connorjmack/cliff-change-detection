@@ -118,6 +118,7 @@ def update_csv_sorted(csv_path, new_rows):
         df = df.sort_values(by="date")
 
     # 4. Save back to CSV
+    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
     df.to_csv(csv_path, index=False)
     print(f"[CSV UPDATE] Wrote {len(new_rows)} new rows to {os.path.basename(csv_path)}")
 
