@@ -26,9 +26,31 @@ from pyproj import Transformer
 import xml.etree.ElementTree as ET
 
 # === THREADING CONTROLS ===
-os.environ["OMP_NUM_THREADS"]      = str(3)
-os.environ["OPENBLAS_NUM_THREADS"] = str(3)
-os.environ["MKL_NUM_THREADS"]      = str(3)
+UTILIZATION_TARGET = 0.75  
+
+# 2. Threads per worker (Keep at 3 if you are doing heavy math/numpy)
+# For pure cropping/loading, 1 is often better, but 3 is a safe hybrid.
+OMP_THREADS = 3
+
+CPU_COUNT = os.cpu_count() or 1
+
+# 3. Calculate "Safe" limits
+# Reserve cores for the OS (e.g., leave ~14 cores free on a 96-core box)
+usable_cores = int(CPU_COUNT * UTILIZATION_TARGET)
+
+# Calculate workers: (81 usable cores) // 3 threads = 27 Workers
+# This runs ~27 parallel files, using ~81 total CPU threads.
+DEFAULT_WORKERS = max(1, usable_cores // OMP_THREADS)
+
+# Apply settings
+os.environ["OMP_NUM_THREADS"]      = str(OMP_THREADS)
+os.environ["OPENBLAS_NUM_THREADS"] = str(OMP_THREADS)
+os.environ["MKL_NUM_THREADS"]      = str(OMP_THREADS)
+
+# Verification Print (Optional)
+print(f"System: {CPU_COUNT} Cores | Limit: {int(UTILIZATION_TARGET*100)}% usage")
+print(f"Spawning {DEFAULT_WORKERS} Workers with {OMP_THREADS} threads each.")
+print(f"Total Theoretical Load: {DEFAULT_WORKERS * OMP_THREADS} / {CPU_COUNT} Cores")
 
 # === PATH SETUP (Cross-Platform) ===
 SYSTEM_OS = platform.system()
@@ -272,7 +294,7 @@ def crop_location(location: str, replace: bool = False, no_sample: bool = False)
     
     # Run processing
     results = []
-    nprocs = 3  # Matches OMP_NUM_THREADS settings
+    nprocs = DEFAULT_WORKERS  # Scales with CPU_COUNT // OMP_THREADS
     with ProcessPoolExecutor(max_workers=nprocs) as executor:
         # Use tqdm to show progress bar
         futures = tqdm(executor.map(_worker, tasks), total=len(tasks), desc=f"Cropping {location}")
