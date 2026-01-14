@@ -76,26 +76,50 @@ def export_surveys(location):
     os.makedirs(out_dir, exist_ok=True)
     out_name = os.path.join(out_dir, f"surveys_{location}.csv")
 
-    print(f"--- Processing {location} (MOP {min_line}-{max_line}) ---")
+    print(f"\n{'='*70}")
+    print(f"Processing {location} (MOP range: {min_line}-{max_line})")
+    print(f"{'='*70}")
+
+    # Counters for tracking
+    total_scanned = 0
+    total_matched = 0
+    skipped_not_dir = 0
+    skipped_naming = 0
+    skipped_overlap = 0
+    skipped_no_las = 0
 
     # 1) collect all matching rows with >= 2/3 overlap
     rows = []
     for method, root in instrument_paths.items():
         if not os.path.isdir(root):
-            # Only warn if it's missing but expected
-            # print(f"⚠️ Warning: instrument path not found: {root}", file=sys.stderr)
+            print(f"⚠️  Skipping {method} (path not found: {root})")
             continue
 
-        for name in os.listdir(root):
+        print(f"\n📂 Scanning instrument: {method}")
+        print(f"   Path: {root}")
+
+        # Get list of subdirectories to scan
+        try:
+            subdirs = os.listdir(root)
+        except PermissionError:
+            print(f"   ❌ Permission denied - cannot access directory")
+            continue
+
+        instrument_matches = 0
+
+        for name in subdirs:
             subdir = os.path.join(root, name)
-            
+            total_scanned += 1
+
             # Check 1: Must be a directory
             if not os.path.isdir(subdir):
+                skipped_not_dir += 1
                 continue
 
             # Check 2: Must follow naming convention YYYYMMDD_MOP1_MOP2_...
             parts = name.split("_")
             if len(parts) < 3:
+                skipped_naming += 1
                 continue
 
             try:
@@ -103,21 +127,24 @@ def export_surveys(location):
                 mop1 = int(parts[1])
                 mop2 = int(parts[2])
             except ValueError:
+                skipped_naming += 1
                 continue
 
             # Check 3: Calculate Mathematical Overlap
             overlap = min(mop2, max_line) - max(mop1, min_line)
-            
+
             # Calculate required overlap (2/3 of the TARGET location's length)
             two_thirds = (max_line - min_line) * 2/3
-            
+
             if overlap < two_thirds:
+                skipped_overlap += 1
                 continue
 
             # Verify a beach_cliff_ground LAS exists; skip otherwise
             las_files = find_target_las_files(subdir)
             if not las_files:
-                # print(f"⚠️ No *_beach_cliff_ground.las in {subdir}")
+                skipped_no_las += 1
+                print(f"   ⚠️  {name}: No *_beach_cliff_ground.las file found")
                 continue
 
             mac_path = ensure_mac_path(subdir)
@@ -129,6 +156,11 @@ def export_surveys(location):
                 "beach":  location,
                 "method": method
             })
+            instrument_matches += 1
+            total_matched += 1
+            print(f"   ✓ {date_str} (MOP {mop1}-{mop2}) - MATCH")
+
+        print(f"   → Found {instrument_matches} matching surveys in {method}")
 
     # 2) sort by date (YYYYMMDD strings sort lexically)
     rows.sort(key=lambda r: r["date"])
@@ -142,7 +174,18 @@ def export_surveys(location):
         for row in rows:
             writer.writerow(row)
 
-    print(f"✅ Wrote {out_name} with {len(rows)} surveys.")
+    # Print summary
+    print(f"\n{'='*70}")
+    print(f"SUMMARY for {location}")
+    print(f"{'='*70}")
+    print(f"Total items scanned:        {total_scanned}")
+    print(f"Surveys matched:            {total_matched}")
+    print(f"Skipped (not directory):    {skipped_not_dir}")
+    print(f"Skipped (naming format):    {skipped_naming}")
+    print(f"Skipped (MOP overlap):      {skipped_overlap}")
+    print(f"Skipped (no LAS file):      {skipped_no_las}")
+    print(f"\n✅ Wrote {out_name} with {len(rows)} surveys.")
+    print(f"{'='*70}\n")
 
 def main():
     parser = argparse.ArgumentParser(description="Generate survey lists based on MOP overlap.")

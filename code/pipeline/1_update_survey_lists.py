@@ -122,17 +122,28 @@ def update_csv_sorted(csv_path, new_rows):
     df.to_csv(csv_path, index=False)
     print(f"[CSV UPDATE] Wrote {len(new_rows)} new rows to {os.path.basename(csv_path)}")
 
-def get_max_existing_date(csv_path):
-    """Reads existing CSV to find the cutoff date."""
+def get_existing_survey_index(csv_path):
+    """
+    Reads existing CSV to find the latest date and existing survey paths.
+    """
     max_date = 0
+    existing_paths = set()
     if os.path.exists(csv_path):
         try:
-            df = pd.read_csv(csv_path)
-            if not df.empty and 'date' in df.columns:
-                max_date = df['date'].max()
+            df = pd.read_csv(csv_path, dtype={'date': 'Int64', 'path': str})
+            if not df.empty:
+                if 'date' in df.columns:
+                    max_value = df['date'].max()
+                    if pd.notna(max_value):
+                        max_date = int(max_value)
+                if 'path' in df.columns:
+                    existing_paths = {
+                        ensure_mac_path(p)
+                        for p in df['path'].dropna().astype(str)
+                    }
         except Exception:
             pass
-    return max_date
+    return max_date, existing_paths
 
 # === MAIN LOGIC ===
 
@@ -150,7 +161,7 @@ def process_location(location):
 
     min_line, max_line = mop_ranges[location]
     csv_path = os.path.join(CSV_DIR, f"surveys_{location}.csv")
-    max_existing_date = get_max_existing_date(csv_path)
+    max_existing_date, existing_paths = get_existing_survey_index(csv_path)
     
     new_csv_rows = []
     report_lines = []
@@ -172,8 +183,13 @@ def process_location(location):
                 mop2 = int(parts[2])
             except: continue
 
-            # 1. NEWER DATE CHECK
-            if date_int <= max_existing_date: continue
+            mac_path = ensure_mac_path(survey_dir)
+
+            # 1. NEWER DATE CHECK (OR same date but new path)
+            is_new_date = date_int > max_existing_date
+            is_same_date_new_path = date_int == max_existing_date and mac_path not in existing_paths
+            if not (is_new_date or is_same_date_new_path):
+                continue
 
             # 2. OVERLAP CHECK
             overlap = min(mop2, max_line) - max(mop1, min_line)
@@ -185,7 +201,6 @@ def process_location(location):
                 
                 if las_files:
                     # Prepare CSV Row
-                    mac_path = ensure_mac_path(survey_dir)
                     new_row = {
                         "path": mac_path,
                         "date": date_int, 
