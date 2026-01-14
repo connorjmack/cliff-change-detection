@@ -28,7 +28,7 @@ if system == "Darwin":
 else:
     ROOT_LIDAR = "/project/group/LiDAR"
 
-REPORT_DIR = os.path.join(ROOT_LIDAR, "LidarProcessing/LidarProcessingCliffs/code/pipeline/daily_reports")
+REPORT_DIR = os.path.join(ROOT_LIDAR, "LidarProcessing/LidarProcessingCliffs/reports/daily")
 CSV_DIR = os.path.join(ROOT_LIDAR, "LidarProcessing/LidarProcessingCliffs/survey_lists")
 
 instrument_paths = {

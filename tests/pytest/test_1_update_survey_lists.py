@@ -18,7 +18,11 @@ from unittest.mock import patch, MagicMock, mock_open
 from datetime import datetime
 import sys
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "pipeline"))
+REPO_ROOT = Path(__file__).resolve().parents[2]
+PIPELINE_DIR = REPO_ROOT / "code" / "pipeline"
+MODULE_PATH = PIPELINE_DIR / "1_update_survey_lists.py"
+
+sys.path.insert(0, str(PIPELINE_DIR))
 
 
 class TestSurveyListUpdate:
@@ -70,7 +74,7 @@ class TestSurveyListUpdate:
 
         spec = importlib.util.spec_from_file_location(
             "update_survey_lists",
-            Path(__file__).parent.parent / "pipeline" / "1_update_survey_lists.py"
+            MODULE_PATH
         )
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
@@ -81,36 +85,38 @@ class TestSurveyListUpdate:
         assert mac_path.startswith("/Volumes/group/LiDAR")
         assert "project" not in mac_path
 
-    def test_get_max_existing_date(self, existing_survey_csv):
-        """Test extracting maximum date from existing CSV."""
+    def test_get_existing_survey_index(self, existing_survey_csv):
+        """Test extracting maximum date and existing paths from CSV."""
         import importlib.util
 
         spec = importlib.util.spec_from_file_location(
             "update_survey_lists",
-            Path(__file__).parent.parent / "pipeline" / "1_update_survey_lists.py"
+            MODULE_PATH
         )
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
 
-        max_date = module.get_max_existing_date(existing_survey_csv)
+        max_date, existing_paths = module.get_existing_survey_index(existing_survey_csv)
 
         assert max_date == 20220201, "Should return the latest date from CSV"
+        assert len(existing_paths) == 2
 
-    def test_get_max_existing_date_no_file(self, temp_dir):
-        """Test get_max_existing_date with non-existent file."""
+    def test_get_existing_survey_index_no_file(self, temp_dir):
+        """Test get_existing_survey_index with non-existent file."""
         import importlib.util
 
         spec = importlib.util.spec_from_file_location(
             "update_survey_lists",
-            Path(__file__).parent.parent / "pipeline" / "1_update_survey_lists.py"
+            MODULE_PATH
         )
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
 
         nonexistent_path = Path(temp_dir) / "nonexistent.csv"
-        max_date = module.get_max_existing_date(str(nonexistent_path))
+        max_date, existing_paths = module.get_existing_survey_index(str(nonexistent_path))
 
         assert max_date == 0, "Should return 0 when file doesn't exist"
+        assert existing_paths == set()
 
     def test_find_target_las_files(self, mock_las_file):
         """Test finding _beach_cliff_ground.las files in directory."""
@@ -118,7 +124,7 @@ class TestSurveyListUpdate:
 
         spec = importlib.util.spec_from_file_location(
             "update_survey_lists",
-            Path(__file__).parent.parent / "pipeline" / "1_update_survey_lists.py"
+            MODULE_PATH
         )
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
@@ -135,7 +141,7 @@ class TestSurveyListUpdate:
 
         spec = importlib.util.spec_from_file_location(
             "update_survey_lists",
-            Path(__file__).parent.parent / "pipeline" / "1_update_survey_lists.py"
+            MODULE_PATH
         )
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
@@ -171,13 +177,11 @@ class TestSurveyListUpdate:
 
         spec = importlib.util.spec_from_file_location(
             "update_survey_lists",
-            Path(__file__).parent.parent / "pipeline" / "1_update_survey_lists.py"
+            MODULE_PATH
         )
         module = importlib.util.module_from_spec(spec)
-
+        spec.loader.exec_module(module)
         with patch.object(module, 'REPORT_DIR', temp_dir):
-            spec.loader.exec_module(module)
-
             module.init_report()
 
             # Check report file was created
@@ -196,13 +200,11 @@ class TestSurveyListUpdate:
 
         spec = importlib.util.spec_from_file_location(
             "update_survey_lists",
-            Path(__file__).parent.parent / "pipeline" / "1_update_survey_lists.py"
+            MODULE_PATH
         )
         module = importlib.util.module_from_spec(spec)
-
+        spec.loader.exec_module(module)
         with patch.object(module, 'REPORT_DIR', temp_dir):
-            spec.loader.exec_module(module)
-
             module.init_report()
 
             test_lines = ["Test line 1", "Test line 2"]
@@ -222,19 +224,48 @@ class TestSurveyListUpdate:
 
         spec = importlib.util.spec_from_file_location(
             "update_survey_lists",
-            Path(__file__).parent.parent / "pipeline" / "1_update_survey_lists.py"
+            MODULE_PATH
         )
         module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with patch.object(module, 'CSV_DIR', temp_dir), \
+            patch.object(module, 'ROOT_LIDAR', temp_dir), \
+            patch.object(module, 'instrument_paths', {}):
+            # Process location with no new data
+            result = module.process_location("DelMar")
 
-        with patch.object(module, 'CSV_DIR', temp_dir):
-            with patch.object(module, 'ROOT_LIDAR', temp_dir):
-                spec.loader.exec_module(module)
+            # Should return False (no new surveys)
+            assert result is False
 
-                # Process location with no new data
-                result = module.process_location("DelMar")
+    def test_process_location_same_date_new_path(self, temp_dir, existing_survey_csv):
+        """Test that same-date surveys with new paths are processed."""
+        import importlib.util
 
-                # Should return False (no new surveys)
-                assert result is False
+        spec = importlib.util.spec_from_file_location(
+            "update_survey_lists",
+            MODULE_PATH
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        inst_dir = Path(temp_dir) / "inst"
+        inst_dir.mkdir()
+        survey_dir = inst_dir / "20220201_595_620_extra"
+        survey_dir.mkdir()
+        las_file = survey_dir / "test_beach_cliff_ground.las"
+        las_file.touch()
+
+        with patch.object(module, 'CSV_DIR', temp_dir), \
+            patch.object(module, 'REPORT_DIR', temp_dir), \
+            patch.object(module, 'instrument_paths', {"inst": str(inst_dir)}):
+            module.init_report()
+            result = module.process_location("DelMar")
+
+        assert result is True
+
+        df = pd.read_csv(existing_survey_csv)
+        assert len(df) == 3
+        assert module.ensure_mac_path(str(survey_dir)) in set(df['path'].astype(str))
 
     def test_mop_overlap_filtering(self):
         """Test that surveys are correctly filtered by MOP overlap."""
@@ -242,7 +273,7 @@ class TestSurveyListUpdate:
 
         spec = importlib.util.spec_from_file_location(
             "update_survey_lists",
-            Path(__file__).parent.parent / "pipeline" / "1_update_survey_lists.py"
+            MODULE_PATH
         )
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
@@ -271,7 +302,7 @@ class TestSurveyListUpdate:
 
         spec = importlib.util.spec_from_file_location(
             "update_survey_lists",
-            Path(__file__).parent.parent / "pipeline" / "1_update_survey_lists.py"
+            MODULE_PATH
         )
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
@@ -295,13 +326,11 @@ class TestReportGeneration:
 
         spec = importlib.util.spec_from_file_location(
             "update_survey_lists",
-            Path(__file__).parent.parent / "pipeline" / "1_update_survey_lists.py"
+            MODULE_PATH
         )
         module = importlib.util.module_from_spec(spec)
-
+        spec.loader.exec_module(module)
         with patch.object(module, 'REPORT_DIR', temp_dir):
-            spec.loader.exec_module(module)
-
             module.init_report()
 
             test_entries = [
@@ -326,13 +355,11 @@ class TestReportGeneration:
 
         spec = importlib.util.spec_from_file_location(
             "update_survey_lists",
-            Path(__file__).parent.parent / "pipeline" / "1_update_survey_lists.py"
+            MODULE_PATH
         )
         module = importlib.util.module_from_spec(spec)
-
+        spec.loader.exec_module(module)
         with patch.object(module, 'REPORT_DIR', temp_dir):
-            spec.loader.exec_module(module)
-
             module.init_report()
             module.append_to_report(["No new surveys found. CSVs are up to date."])
 
