@@ -4,14 +4,17 @@ qc_cropped_files.py
 
 Usage:
     python3 qc_cropped_files.py
+    python3 qc_cropped_files.py --location SanElijo
     python3 qc_cropped_files.py --delete_bad_files
 
 Description:
     Scans the results/<location>/cropped/ directories for all locations.
     Extracts file size (MB) and LAS Point Counts.
     Generates distribution plots to identify outliers or failed crops.
+    Compares cropped files against the survey_list CSV for each location scanned.
     
     Optional:
+        --location         : Only scan a single location in results/<location>/cropped.
         --delete_bad_files : If set, permanently deletes files with points < threshold.
                              Plots will highlight deleted files in RED.
 
@@ -45,6 +48,10 @@ def get_root_path():
     else:
         # Linux/Cluster Path
         return "/project/group/LiDAR/LidarProcessing/LidarProcessingCliffs"
+
+def get_lidar_base(project_root):
+    """Return the base LiDAR directory (e.g., /Volumes/group/LiDAR)."""
+    return os.path.dirname(os.path.dirname(project_root))
 
 def analyze_file(filepath):
     """
@@ -87,6 +94,102 @@ def analyze_file(filepath):
             "Path": filepath,
             "Status": f"ERROR: {str(e)}"
         }
+
+def compare_cropped_to_survey_list(location, project_root, cropped_files, output_dir):
+    """Compare cropped files to the survey list and write mismatch reports."""
+    summary = ["", f"Survey List Check: {location}"]
+    survey_csv = os.path.join(project_root, "survey_lists", f"surveys_{location}.csv")
+
+    if not os.path.exists(survey_csv):
+        msg = f"Survey list not found: {survey_csv}"
+        print(f"[WARNING] {msg}")
+        summary.append(msg)
+        return summary
+
+    try:
+        survey_df = pd.read_csv(survey_csv)
+    except Exception as e:
+        msg = f"Survey list read error: {e}"
+        print(f"[ERROR] {msg}")
+        summary.append(msg)
+        return summary
+
+    base_dir = get_lidar_base(project_root)
+    expected_map = {}
+    missing_source_rows = []
+
+    for row in survey_df.to_dict(orient="records"):
+        method = str(row.get("method", "")).strip()
+        survey_raw = str(row.get("path", "")).strip()
+        if not method or not survey_raw:
+            missing_source_rows.append({
+                "Location": location,
+                "Survey_Path": survey_raw,
+                "Method": method,
+                "Pattern": ""
+            })
+            continue
+
+        survey_folder = os.path.basename(os.path.normpath(survey_raw))
+        base = os.path.join(base_dir, method, "LiDAR_Processed_Level2", survey_folder)
+        pattern = os.path.join(base, "Beach_And_Backshore", "*beach_cliff_ground.las")
+        matches = glob.glob(pattern)
+
+        if not matches:
+            missing_source_rows.append({
+                "Location": location,
+                "Survey_Path": survey_raw,
+                "Method": method,
+                "Pattern": pattern
+            })
+            continue
+
+        las_in = matches[0]
+        stem = os.path.splitext(os.path.basename(las_in))[0]
+        expected_name = f"{stem}_cropped.las"
+        expected_map[expected_name] = {
+            "Location": location,
+            "Survey_Path": survey_raw,
+            "Method": method,
+            "Source_LAS": las_in,
+            "Expected_Cropped": expected_name
+        }
+
+    expected_names = set(expected_map.keys())
+    missing_cropped = sorted(expected_names - cropped_files)
+    extra_cropped = sorted(cropped_files - expected_names)
+
+    summary.append(f"Survey list rows: {len(survey_df)}")
+    summary.append(f"Expected cropped files: {len(expected_names)}")
+    summary.append(f"Missing cropped files: {len(missing_cropped)}")
+    summary.append(f"Extra cropped files: {len(extra_cropped)}")
+    summary.append(f"Survey rows missing source LAS: {len(missing_source_rows)}")
+
+    print(f"\n=== Survey List Check: {location} ===")
+    print(f"Survey list rows: {len(survey_df)}")
+    print(f"Expected cropped files: {len(expected_names)}")
+    print(f"Missing cropped files: {len(missing_cropped)}")
+    print(f"Extra cropped files: {len(extra_cropped)}")
+    print(f"Survey rows missing source LAS: {len(missing_source_rows)}")
+
+    if missing_cropped:
+        missing_rows = [expected_map[name] for name in missing_cropped]
+        missing_path = os.path.join(output_dir, f"survey_list_missing_cropped_{location}.csv")
+        pd.DataFrame(missing_rows).to_csv(missing_path, index=False)
+        print(f"[INFO] Missing cropped files saved to: {missing_path}")
+
+    if extra_cropped:
+        extra_rows = [{"Location": location, "Filename": name} for name in extra_cropped]
+        extra_path = os.path.join(output_dir, f"survey_list_extra_cropped_{location}.csv")
+        pd.DataFrame(extra_rows).to_csv(extra_path, index=False)
+        print(f"[INFO] Extra cropped files saved to: {extra_path}")
+
+    if missing_source_rows:
+        missing_source_path = os.path.join(output_dir, f"survey_list_missing_source_{location}.csv")
+        pd.DataFrame(missing_source_rows).to_csv(missing_source_path, index=False)
+        print(f"[INFO] Survey list rows missing source LAS saved to: {missing_source_path}")
+
+    return summary
 
 def plot_results(df, output_dir, delete_mode):
     """Generates QC charts and highlights deleted/suspect files."""
@@ -159,6 +262,11 @@ def main():
     # --- Parse Arguments ---
     parser = argparse.ArgumentParser(description="QC Cropped LAS files.")
     parser.add_argument(
+        "--location",
+        type=str,
+        help="Only scan results for a single location (e.g., SanElijo)."
+    )
+    parser.add_argument(
         "--delete_bad_files", 
         action="store_true", 
         help="If set, permanently delete files with points below threshold."
@@ -171,6 +279,7 @@ def main():
     results_dir = os.path.join(root, "results")
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     reports_base = os.path.join(root, "code", "pipeline", "reports")
+    daily_reports_dir = os.path.join(root, "reports", "daily")
     run_output_dir = os.path.join(reports_base, f"QC_Run_{timestamp}")
     
     os.makedirs(run_output_dir, exist_ok=True)
@@ -181,7 +290,10 @@ def main():
     print(f"Report:   {run_output_dir}")
     
     # Find files
-    search_pattern = os.path.join(results_dir, "*", "cropped", "*.las")
+    if args.location:
+        search_pattern = os.path.join(results_dir, args.location, "cropped", "*.las")
+    else:
+        search_pattern = os.path.join(results_dir, "*", "cropped", "*.las")
     files = glob.glob(search_pattern)
 
     if not files:
@@ -271,6 +383,18 @@ def main():
         print("\n[SUCCESS] No files below point threshold found.")
         summary_lines.append("Suspect Files Found: 0")
 
+    # --- SURVEY LIST COMPARISON ---
+    if args.location:
+        locations = [args.location]
+    else:
+        locations = sorted({loc for loc in df["Location"].dropna().unique() if loc != "Unknown"})
+
+    for location in locations:
+        cropped_files = set(df.loc[df["Location"] == location, "Filename"])
+        summary_lines.extend(
+            compare_cropped_to_survey_list(location, root, cropped_files, run_output_dir)
+        )
+
     # --- SAVE OUTPUTS ---
 
     # 1. Plots (Pass delete_mode to highlight correctly)
@@ -286,6 +410,21 @@ def main():
         f.write("\n".join(summary_lines))
     
     print(f"[INFO] Run summary saved to: {summary_path}")
+
+    # Append to daily report (if present)
+    daily_report_name = f"daily_report_{datetime.now().strftime('%Y%m%d')}.txt"
+    daily_report_path = os.path.join(daily_reports_dir, daily_report_name)
+    if not os.path.exists(daily_report_path):
+        os.makedirs(daily_reports_dir, exist_ok=True)
+        with open(daily_report_path, "w") as f:
+            f.write(f"Daily Report {datetime.now().strftime('%Y-%m-%d')}\n")
+            f.write("=" * 40 + "\n")
+        print(f"[INFO] Created daily report: {daily_report_path}")
+
+    with open(daily_report_path, "a") as f:
+        f.write("\n\n=== QC Cropped Files ===\n")
+        f.write("\n".join(summary_lines))
+    print(f"[INFO] Appended summary to daily report: {daily_report_path}")
 
 if __name__ == "__main__":
     main()

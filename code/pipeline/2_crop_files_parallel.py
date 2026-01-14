@@ -5,8 +5,16 @@ crop_files_parallel.py
 Crops LAS files to MOP lines and generates a performance report.
 
 Usage:
-    python3 crop_files_parallel.py --location SanElijo [--replace] [--no-sample]
+    python3 crop_files_parallel.py --location SanElijo [--replace] [--no-sample] [--n_jobs N]
     python3 crop_files_parallel.py --all [--replace] [--no-sample]
+
+Options:
+    --location LOCATION  Process a specific location (DelMar, SanElijo, etc.)
+    --all               Process all locations
+    --replace           Overwrite existing cropped files
+    --no-sample         Skip PDAL sampling filter
+    --n_jobs N          Number of parallel workers (default: auto-calculated)
+                        Reduce this if experiencing worker crashes (e.g., --n_jobs 2)
 """
 
 import os
@@ -17,9 +25,10 @@ import argparse
 import time
 import platform
 import math
+import gc
 import pdal
 from datetime import datetime
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
 from shapely.geometry import Polygon
 from pyproj import Transformer
@@ -160,7 +169,7 @@ def _worker(task):
     """
     poly_wkt, las_in, las_out, replace, use_sample = task
     start_time = time.time()
-    
+
     if not replace and os.path.exists(las_out):
         return {
             "file": os.path.basename(las_in),
@@ -181,6 +190,11 @@ def _worker(task):
         p = pdal.Pipeline(json.dumps(pipeline))
         count = p.execute()
         duration = time.time() - start_time
+
+        # Explicitly cleanup to prevent memory leaks
+        del p
+        gc.collect()
+
         return {
             "file": os.path.basename(las_in),
             "status": "processed",
@@ -188,6 +202,8 @@ def _worker(task):
             "points": count
         }
     except Exception as e:
+        # Cleanup even on error
+        gc.collect()
         return {
             "file": os.path.basename(las_in),
             "status": "error",
@@ -202,24 +218,27 @@ def write_report(location, stats, total_duration, out_dir):
     processed = [s for s in stats if s['status'] == 'processed']
     skipped = [s for s in stats if s['status'] == 'skipped']
     errors = [s for s in stats if s['status'] == 'error']
-    
+    crashes = [s for s in stats if s['status'] == 'crash']
+
     report_dir = os.path.join(out_dir, "pipeline_reports")
     os.makedirs(report_dir, exist_ok=True)
-    
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     report_path = os.path.join(report_dir, f"cropping_report_{timestamp}.txt")
-    
+
     avg_time = sum(p['duration'] for p in processed) / len(processed) if processed else 0
-    
+
     with open(report_path, "w") as f:
         f.write(f"=== CROPPING PIPELINE REPORT: {location} ===\n")
         f.write(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"System: {platform.node()} ({platform.system()})\n")
+        f.write(f"Workers: {DEFAULT_WORKERS} processes x {OMP_THREADS} threads\n")
         f.write("-" * 40 + "\n")
         f.write(f"Total Wall Time:   {total_duration:.2f} seconds ({total_duration/60:.2f} minutes)\n")
         f.write(f"Files Processed:   {len(processed)}\n")
         f.write(f"Files Skipped:     {len(skipped)}\n")
         f.write(f"Errors:            {len(errors)}\n")
+        f.write(f"Worker Crashes:    {len(crashes)}\n")
         f.write(f"Avg Time per File: {avg_time:.2f} seconds\n")
         f.write("-" * 40 + "\n")
         f.write("DETAILS:\n")
@@ -227,16 +246,27 @@ def write_report(location, stats, total_duration, out_dir):
             f.write(f"[OK] {s['file']} | {s['duration']:.2f}s | {s['points']} pts\n")
         for s in errors:
             f.write(f"[FAIL] {s['file']} | {s['error_msg']}\n")
-            
+        for s in crashes:
+            f.write(f"[CRASH] {s['file']} | {s['error_msg']}\n")
+
+        if crashes:
+            f.write("\n" + "=" * 40 + "\n")
+            f.write("WORKER CRASHES DETECTED!\n")
+            f.write("This may indicate:\n")
+            f.write("  - Memory issues (reduce --n_jobs or run with fewer workers)\n")
+            f.write("  - PDAL segfaults (check PDAL installation)\n")
+            f.write("  - Large input files exceeding available RAM\n")
+            f.write(f"Consider reducing workers from {DEFAULT_WORKERS} to {max(1, DEFAULT_WORKERS//2)}\n")
+
     print(f"\n📄 Report saved to: {report_path}")
 
 
-def crop_location(location: str, replace: bool = False, no_sample: bool = False):
+def crop_location(location: str, replace: bool = False, no_sample: bool = False, n_jobs: int = None):
     total_start = time.time()
-    
+
     if location not in mop_ranges:
         raise ValueError(f"Unknown location '{location}'")
-    
+
     min_mop, max_mop = mop_ranges[location]
     poly = load_or_create_crop_polygon(location, min_mop, max_mop)
     poly_wkt = poly.wkt
@@ -255,7 +285,7 @@ def crop_location(location: str, replace: bool = False, no_sample: bool = False)
 
     tasks = []
     print(f"🔎 Scanning survey list for {location}...")
-    
+
     for row in rows:
         method = row["method"]
         survey_raw = row["path"].strip()
@@ -289,19 +319,41 @@ def crop_location(location: str, replace: bool = False, no_sample: bool = False)
         return
 
     print(f"🚀 Starting processing for {len(tasks)} files...")
-    
-    # Run processing
+
+    # Run processing with improved error handling
     results = []
-    nprocs = DEFAULT_WORKERS  # Scales with CPU_COUNT // OMP_THREADS
+    # Allow manual override of worker count, otherwise use calculated default
+    nprocs = n_jobs if n_jobs is not None else DEFAULT_WORKERS
+    print(f"Using {nprocs} worker processes")
     with ProcessPoolExecutor(max_workers=nprocs) as executor:
-        # Use tqdm to show progress bar
-        futures = tqdm(executor.map(_worker, tasks), total=len(tasks), desc=f"Cropping {location}")
-        for res, task in zip(futures, tasks):
-            results.append(res)
-            if res["status"] == "processed":
-                print(f"  ✓ {task[2]}")
-            elif res["status"] == "skipped":
-                print(f"  ⊘ SKIPPED: {task[2]}")
+        # Submit all tasks and create a mapping from future to task
+        future_to_task = {executor.submit(_worker, task): task for task in tasks}
+
+        # Process completed futures with progress bar
+        with tqdm(total=len(tasks), desc=f"Cropping {location}") as pbar:
+            for future in as_completed(future_to_task):
+                task = future_to_task[future]
+                try:
+                    res = future.result()
+                    results.append(res)
+                    if res["status"] == "processed":
+                        print(f"  ✓ {os.path.basename(task[2])}")
+                    elif res["status"] == "skipped":
+                        print(f"  ⊘ SKIPPED: {os.path.basename(task[2])}")
+                    elif res["status"] == "error":
+                        print(f"  ✗ ERROR: {os.path.basename(task[2])} - {res.get('error_msg', 'Unknown error')}")
+                except Exception as e:
+                    # Catch worker crashes or other critical failures
+                    print(f"  ✗ WORKER CRASH: {os.path.basename(task[2])} - {str(e)}")
+                    results.append({
+                        "file": os.path.basename(task[1]),
+                        "status": "crash",
+                        "error_msg": f"Worker process failed: {str(e)}",
+                        "duration": 0.0,
+                        "points": 0
+                    })
+                finally:
+                    pbar.update(1)
 
     total_duration = time.time() - total_start
     write_report(location, results, total_duration, out_dir)
@@ -313,13 +365,15 @@ def main():
     parser.add_argument("--all", action="store_true", help="Process all locations")
     parser.add_argument("--replace", action="store_true", help="Overwrite existing files")
     parser.add_argument("--no-sample", action="store_true", help="Skip PDAL sampling filter")
+    parser.add_argument("--n_jobs", type=int, default=None,
+                        help=f"Number of parallel workers (default: {DEFAULT_WORKERS}). Reduce if experiencing crashes.")
     args = parser.parse_args()
-    
+
     if args.all:
         for loc in mop_ranges.keys():
-            crop_location(loc, replace=args.replace, no_sample=args.no_sample)
+            crop_location(loc, replace=args.replace, no_sample=args.no_sample, n_jobs=args.n_jobs)
     elif args.location:
-        crop_location(args.location, replace=args.replace, no_sample=args.no_sample)
+        crop_location(args.location, replace=args.replace, no_sample=args.no_sample, n_jobs=args.n_jobs)
     else:
         parser.error("Must provide --location or --all")
 
