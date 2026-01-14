@@ -2,10 +2,10 @@
 """
 Status checker for the LiDAR processing pipeline.
 
-The script scans all locations listed in survey CSVs and compares expected
-outputs for each pipeline stage (cropped → nobeach → noveg) against what
-actually exists on disk. It also summarizes downstream change-detection
-artifacts (m3c2, erosion, deposition). A text report is written to
+The script scans all locations listed in survey CSVs and reports counts for
+each pipeline stage (cropped → nobeach → noveg) based on files that actually
+exist on disk. It also summarizes downstream change-detection artifacts
+(m3c2, erosion, deposition). A text report is written to
 <project_root>/results/reports.
 
 Usage:
@@ -15,13 +15,15 @@ Usage:
 import argparse
 import csv
 import platform
+import re
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 DEFAULT_MAC_ROOT = Path("/Volumes/group/LiDAR")
 DEFAULT_LINUX_ROOT = Path("/project/group/LiDAR")
+DATE_PATTERN = re.compile(r"(\d{8})")
 
 
 def resolve_roots(project_root_arg: Optional[str], data_root_arg: Optional[str]) -> Tuple[Path, Path]:
@@ -65,61 +67,6 @@ def load_survey_rows(csv_path: Path) -> List[dict]:
         return [row for row in csv.DictReader(f)]
 
 
-def locate_raw_file(row: dict, data_root: Path) -> Optional[Path]:
-    """
-    Try multiple plausible locations for the raw LAS file based on the survey row.
-    """
-    path_field = (row.get("path") or "").strip()
-    method = (row.get("method") or "").strip()
-
-    folder_name = Path(path_field).name if path_field else ""
-    candidates = []
-
-    if method and folder_name:
-        candidates.append(
-            data_root
-            / method
-            / "LiDAR_Processed_Level2"
-            / folder_name
-            / "Beach_And_Backshore"
-        )
-
-    if path_field:
-        given_path = Path(path_field)
-        candidates.append(given_path / "Beach_And_Backshore")
-        candidates.append(given_path)
-
-        if path_field.startswith("/project/group/LiDAR"):
-            mac_path = Path(path_field.replace("/project/group/LiDAR", "/Volumes/group/LiDAR", 1))
-            candidates.append(mac_path / "Beach_And_Backshore")
-        if path_field.startswith("/Volumes/group/LiDAR"):
-            linux_path = Path(path_field.replace("/Volumes/group/LiDAR", "/project/group/LiDAR", 1))
-            candidates.append(linux_path / "Beach_And_Backshore")
-
-    if folder_name and not method:
-        candidates.append(data_root / folder_name / "Beach_And_Backshore")
-
-    seen = set()
-    unique_candidates = []
-    for cand in candidates:
-        key = str(cand)
-        if key not in seen:
-            seen.add(key)
-            unique_candidates.append(cand)
-
-    for cand in unique_candidates:
-        matches = []
-        if cand.is_file() and cand.name.lower().endswith(("_beach_cliff_ground.las", "_beach_cliff_ground.laz")):
-            matches = [cand]
-        else:
-            matches = list(cand.glob("*beach_cliff_ground.las")) + list(cand.glob("*beach_cliff_ground.laz"))
-
-        if matches:
-            return matches[0]
-
-    return None
-
-
 def gather_las_names(directory: Path) -> set[str]:
     if not directory.exists():
         return set()
@@ -129,24 +76,50 @@ def gather_las_names(directory: Path) -> set[str]:
     return names
 
 
-def compare_stage(expected: set[str], found: set[str]) -> dict:
-    return {
-        "expected": len(expected),
-        "found": len(found),
-        "missing": expected - found,
-        "extra": found - expected,
-    }
+def extract_date(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+
+    cleaned = value.strip()
+    if len(cleaned) == 8 and cleaned.isdigit():
+        return cleaned
+
+    match = DATE_PATTERN.search(cleaned)
+    if match:
+        return match.group(1)
+
+    return None
 
 
-def format_name_list(names: set[str], limit: int) -> str:
-    if not names:
-        return ""
+def collect_expected_dates(rows: List[dict]) -> set[str]:
+    candidate_fields = (
+        "date",
+        "path",
+        "file",
+        "filename",
+        "las",
+        "las_file",
+        "raw_file",
+        "raw_filename",
+        "raw_path",
+    )
+    dates: set[str] = set()
+    for row in rows:
+        for key in candidate_fields:
+            date = extract_date(row.get(key))
+            if date:
+                dates.add(date)
+                break
+    return dates
 
-    sorted_names = sorted(names)
-    if len(sorted_names) > limit:
-        remaining = len(sorted_names) - limit
-        return ", ".join(sorted_names[:limit]) + f" ... (+{remaining} more)"
-    return ", ".join(sorted_names)
+
+def extract_dates_from_names(names: set[str]) -> set[str]:
+    dates = set()
+    for name in names:
+        date = extract_date(name)
+        if date:
+            dates.add(date)
+    return dates
 
 
 def generate_expected_pairs(dates: List[str]) -> set[str]:
@@ -187,81 +160,65 @@ def gather_change_pairs(root: Path) -> set[str]:
     return pairs
 
 
-def compare_pairs(expected: set[str], found: set[str]) -> dict:
-    """Compare expected vs found pairs."""
-    return {
-        "expected": len(expected),
-        "found": len(found),
-        "missing": expected - found,
-        "extra": found - expected,
-    }
-
-
-def analyze_location(location: str, project_root: Path, data_root: Path, list_limit: int) -> dict:
+def analyze_location(location: str, project_root: Path) -> dict:
     survey_dir = project_root / "survey_lists"
     results_dir = project_root / "results"
     csv_path = survey_dir / f"surveys_{location}.csv"
 
     rows = load_survey_rows(csv_path)
-    expected_cropped: set[str] = set()
-    expected_nobeach: set[str] = set()
-    expected_noveg: set[str] = set()
-    raw_missing: List[str] = []
-    valid_dates: List[str] = []
-
-    for row in rows:
-        raw_file = locate_raw_file(row, data_root)
-        survey_label = Path(row.get("path") or "").name or row.get("path") or row.get("date") or "unknown"
-
-        if not raw_file:
-            raw_missing.append(survey_label)
-            continue
-
-        stem = raw_file.stem
-        expected_cropped.add(f"{stem}_cropped.las")
-        expected_nobeach.add(f"{stem}_nobeach.las")
-        expected_noveg.add(f"{stem}_noveg.las")
-
-        # Extract date for pair generation
-        date_str = str(row.get("date", "")).strip()
-        if date_str and len(date_str) == 8:
-            valid_dates.append(date_str)
+    expected_dates = collect_expected_dates(rows)
 
     base_dir = results_dir / location
     cropped_found = gather_las_names(base_dir / "cropped")
     nobeach_found = gather_las_names(base_dir / "nobeach") | gather_las_names(base_dir / "nobeach_new")
     noveg_found = gather_las_names(base_dir / "noveg")
 
-    cropped_stats = compare_stage(expected_cropped, cropped_found)
-    nobeach_stats = compare_stage(expected_nobeach, nobeach_found)
-    noveg_stats = compare_stage(expected_noveg, noveg_found)
+    cropped_dates = extract_dates_from_names(cropped_found)
+    nobeach_dates = extract_dates_from_names(nobeach_found)
+    noveg_dates = extract_dates_from_names(noveg_found)
 
-    # Generate expected sequential pairs
-    expected_pairs = generate_expected_pairs(valid_dates)
+    missing_dates = {
+        "cropped": expected_dates - cropped_dates,
+        "nobeach": expected_dates - nobeach_dates,
+        "noveg": expected_dates - noveg_dates,
+    }
+
+    expected_pairs = generate_expected_pairs(sorted(expected_dates))
 
     # Gather actual pairs
     m3c2_pairs_found = gather_m3c2_pairs(base_dir / "m3c2")
     erosion_pairs_found = gather_change_pairs(base_dir / "erosion")
     deposition_pairs_found = gather_change_pairs(base_dir / "deposition")
 
-    # Compare pairs
-    m3c2_stats = compare_pairs(expected_pairs, m3c2_pairs_found)
-    erosion_stats = compare_pairs(expected_pairs, erosion_pairs_found)
-    deposition_stats = compare_pairs(expected_pairs, deposition_pairs_found)
+    missing_pairs = {
+        "m3c2": expected_pairs - m3c2_pairs_found,
+        "erosion": expected_pairs - erosion_pairs_found,
+        "deposition": expected_pairs - deposition_pairs_found,
+    }
 
     return {
         "location": location,
         "survey_rows": len(rows),
-        "raw_found": len(expected_cropped),
-        "raw_missing": raw_missing,
-        "cropped": cropped_stats,
-        "nobeach": nobeach_stats,
-        "noveg": noveg_stats,
-        "m3c2": m3c2_stats,
-        "erosion": erosion_stats,
-        "deposition": deposition_stats,
-        "list_limit": list_limit,
+        "cropped": len(cropped_found),
+        "nobeach": len(nobeach_found),
+        "noveg": len(noveg_found),
+        "m3c2": len(m3c2_pairs_found),
+        "erosion": len(erosion_pairs_found),
+        "deposition": len(deposition_pairs_found),
+        "missing_dates": missing_dates,
+        "missing_pairs": missing_pairs,
     }
+
+
+def format_name_list(names: set[str], limit: int) -> str:
+    if not names:
+        return "none"
+
+    sorted_names = sorted(names)
+    if len(sorted_names) > limit:
+        remaining = len(sorted_names) - limit
+        return ", ".join(sorted_names[:limit]) + f" ... (+{remaining} more)"
+    return ", ".join(sorted_names)
 
 
 def build_report(project_root: Path, data_root: Path, stats: List[dict], list_limit: int) -> List[str]:
@@ -278,63 +235,40 @@ def build_report(project_root: Path, data_root: Path, stats: List[dict], list_li
     overall = defaultdict(int)
     for s in stats:
         overall["survey_rows"] += s["survey_rows"]
-        overall["raw_found"] += s["raw_found"]
-        overall["raw_missing"] += len(s["raw_missing"])
 
-        for stage in ("cropped", "nobeach", "noveg", "m3c2", "erosion", "deposition"):
-            overall[f"{stage}_expected"] += s[stage]["expected"]
-            overall[f"{stage}_found"] += s[stage]["found"]
-            overall[f"{stage}_missing"] += len(s[stage]["missing"])
-            overall[f"{stage}_extra"] += len(s[stage]["extra"])
-
-    lines.extend(
-        [
-            "Overall:",
-            f"  Survey rows: {overall['survey_rows']}",
-            f"  Raw LAS located: {overall['raw_found']} (missing {overall['raw_missing']})",
-            f"  Step 2 - cropped: expected {overall['cropped_expected']} | found {overall['cropped_found']} | missing {overall['cropped_missing']} | extra {overall['cropped_extra']}",
-            f"  Step 4 - nobeach: expected {overall['nobeach_expected']} | found {overall['nobeach_found']} | missing {overall['nobeach_missing']} | extra {overall['nobeach_extra']}",
-            f"  Step 5 - noveg: expected {overall['noveg_expected']} | found {overall['noveg_found']} | missing {overall['noveg_missing']} | extra {overall['noveg_extra']}",
-            f"  Step 6 - m3c2: expected {overall['m3c2_expected']} pairs | found {overall['m3c2_found']} | missing {overall['m3c2_missing']} | extra {overall['m3c2_extra']}",
-            f"  Step 7 - erosion: expected {overall['erosion_expected']} pairs | found {overall['erosion_found']} | missing {overall['erosion_missing']} | extra {overall['erosion_extra']}",
-            f"  Step 7 - deposition: expected {overall['deposition_expected']} pairs | found {overall['deposition_found']} | missing {overall['deposition_missing']} | extra {overall['deposition_extra']}",
-            "",
-        ]
-    )
+    lines.append("Survey counts by location:")
+    for s in stats:
+        lines.append(f"  {s['location']}: {s['survey_rows']}")
+    lines.append(f"Total survey rows: {overall['survey_rows']}")
+    lines.append("")
 
     for s in stats:
-        lines.append(f"[{s['location']}]")
+        lines.append(
+            f"[{s['location']}] surveys: {s['survey_rows']} | "
+            f"cropped: {s['cropped']} | nobeach: {s['nobeach']} | noveg: {s['noveg']} | "
+            f"m3c2: {s['m3c2']} | erosion: {s['erosion']} | deposition: {s['deposition']}"
+        )
         if s["survey_rows"] == 0:
             lines.append("  No survey list found.")
             lines.append("")
             continue
 
         lines.append(
-            f"  Survey rows: {s['survey_rows']} | raw located: {s['raw_found']} | raw missing: {len(s['raw_missing'])}"
+            f"  Missing dates (cropped): {format_name_list(s['missing_dates']['cropped'], list_limit)}"
         )
-        if s["raw_missing"]:
-            lines.append(f"    Missing raw folders/files: {format_name_list(set(s['raw_missing']), list_limit)}")
-
-        for label, stage in (("Step 2 - cropped", "cropped"), ("Step 4 - nobeach", "nobeach"), ("Step 5 - noveg", "noveg")):
-            data = s[stage]
-            lines.append(
-                f"  {label}: expected {data['expected']} | found {data['found']} | missing {len(data['missing'])} | extra {len(data['extra'])}"
-            )
-            if data["missing"]:
-                lines.append(f"    Missing files: {format_name_list(data['missing'], list_limit)}")
-            if data["extra"]:
-                lines.append(f"    Extra files (not in survey list): {format_name_list(data['extra'], list_limit)}")
-
-        # M3C2, erosion, deposition are pair-based
-        for label, stage in (("Step 6 - m3c2", "m3c2"), ("Step 7 - erosion", "erosion"), ("Step 7 - deposition", "deposition")):
-            data = s[stage]
-            lines.append(
-                f"  {label}: expected {data['expected']} pairs | found {data['found']} | missing {len(data['missing'])} | extra {len(data['extra'])}"
-            )
-            if data["missing"]:
-                lines.append(f"    Missing pairs: {format_name_list(data['missing'], list_limit)}")
-            if data["extra"]:
-                lines.append(f"    Extra pairs (not in sequential list): {format_name_list(data['extra'], list_limit)}")
+        lines.append(
+            f"  Missing dates (nobeach): {format_name_list(s['missing_dates']['nobeach'], list_limit)}"
+        )
+        lines.append(
+            f"  Missing dates (noveg): {format_name_list(s['missing_dates']['noveg'], list_limit)}"
+        )
+        lines.append(f"  Missing pairs (m3c2): {format_name_list(s['missing_pairs']['m3c2'], list_limit)}")
+        lines.append(
+            f"  Missing pairs (erosion): {format_name_list(s['missing_pairs']['erosion'], list_limit)}"
+        )
+        lines.append(
+            f"  Missing pairs (deposition): {format_name_list(s['missing_pairs']['deposition'], list_limit)}"
+        )
 
         lines.append("")
 
@@ -363,19 +297,27 @@ def main():
         "--list-limit",
         type=int,
         default=15,
-        help="Maximum number of missing/extra filenames to list per section.",
+        help="Maximum number of missing dates or pairs to list per section.",
     )
     args = parser.parse_args()
 
     project_root, data_root = resolve_roots(args.project_root, args.data_root)
+    print(f"Project root: {project_root}")
+    print(f"Data root: {data_root}")
+
     survey_dir = project_root / "survey_lists"
     results_dir = project_root / "results"
 
     locations = discover_locations(survey_dir)
-    stats = [analyze_location(loc, project_root, data_root, args.list_limit) for loc in locations]
+    print(f"Found {len(locations)} locations to scan.")
+
+    stats = []
+    for i, loc in enumerate(locations, 1):
+        print(f"[{i}/{len(locations)}] Analyzing {loc}...")
+        stats.append(analyze_location(loc, project_root))
 
     report_lines = build_report(project_root, data_root, stats, args.list_limit)
-    report_path = write_report(results_dir / "reports", report_lines)
+    report_path = write_report(project_root / "reports", report_lines)
 
     print(f"Wrote report to: {report_path}")
 

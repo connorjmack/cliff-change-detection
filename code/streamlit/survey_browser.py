@@ -107,6 +107,7 @@ def scan_surveys(target_ranges, start_date, end_date, selected_instruments):
 
             # Construct full path to the beach_cliff_ground.las file
             las_path = os.path.join(subdir, "Beach_And_Backshore", f"{name}_beach_cliff_ground.las")
+            dem_path = f"{os.path.splitext(las_path)[0]}.tif"
 
             # Add to results
             rows.append({
@@ -115,7 +116,8 @@ def scan_surveys(target_ranges, start_date, end_date, selected_instruments):
                 "MOP2": mop2,
                 "method": method,
                 "folder_name": name,
-                "full_path": las_path
+                "full_path": las_path,
+                "dem_path": dem_path
             })
 
     # Convert to DataFrame and sort by date
@@ -124,7 +126,7 @@ def scan_surveys(target_ranges, start_date, end_date, selected_instruments):
         df = df.sort_values("date").reset_index(drop=True)
         return df
     else:
-        return pd.DataFrame(columns=["date", "MOP1", "MOP2", "method", "folder_name", "full_path"])
+        return pd.DataFrame(columns=["date", "MOP1", "MOP2", "method", "folder_name", "full_path", "dem_path"])
 
 # === Streamlit App ===
 st.set_page_config(page_title="LiDAR Survey Browser", layout="wide")
@@ -245,7 +247,8 @@ if search_button:
                     "MOP2": st.column_config.NumberColumn("MOP2", width="small"),
                     "method": st.column_config.TextColumn("Method", width="medium"),
                     "folder_name": st.column_config.TextColumn("Folder Name", width="large"),
-                    "full_path": st.column_config.TextColumn("Full Path", width="large")
+                    "full_path": st.column_config.TextColumn("Full Path", width="large"),
+                    "dem_path": st.column_config.TextColumn("DEM Path", width="large")
                 }
             )
 
@@ -286,4 +289,3 @@ if search_button:
             st.info("**Tips:**\n- Expand the MOP range\n- Expand the date range\n- Check that selected instruments have data in the specified location")
 else:
     st.info("👈 Configure your filters in the sidebar and click **Search Surveys** to begin")
-
