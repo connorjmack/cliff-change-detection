@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-qc_cropped_files.py
+2_audit_cropping.py
 
 Usage:
-    python3 qc_cropped_files.py
-    python3 qc_cropped_files.py --location SanElijo
-    python3 qc_cropped_files.py --delete_bad_files
+    python3 tests/audits/2_audit_cropping.py
+    python3 tests/audits/2_audit_cropping.py --location SanElijo
+    python3 tests/audits/2_audit_cropping.py --delete_bad_files
 
 Description:
     Scans the results/<location>/cropped/ directories for all locations.
@@ -119,8 +119,18 @@ def compare_cropped_to_survey_list(location, project_root, cropped_files, output
     missing_source_rows = []
 
     for row in survey_df.to_dict(orient="records"):
-        method = str(row.get("method", "")).strip()
-        survey_raw = str(row.get("path", "")).strip()
+        method_val = row.get("method", "")
+        survey_val = row.get("path", "")
+        if pd.isna(method_val) or pd.isna(survey_val):
+            missing_source_rows.append({
+                "Location": location,
+                "Survey_Path": "",
+                "Method": "",
+                "Pattern": ""
+            })
+            continue
+        method = str(method_val).strip()
+        survey_raw = str(survey_val).strip()
         if not method or not survey_raw:
             missing_source_rows.append({
                 "Location": location,
@@ -177,17 +187,27 @@ def compare_cropped_to_survey_list(location, project_root, cropped_files, output
         missing_path = os.path.join(output_dir, f"survey_list_missing_cropped_{location}.csv")
         pd.DataFrame(missing_rows).to_csv(missing_path, index=False)
         print(f"[INFO] Missing cropped files saved to: {missing_path}")
+        summary.append("Missing cropped files:")
+        summary.extend([f"- {name}" for name in missing_cropped])
+        summary.append(f"Missing cropped CSV: {missing_path}")
 
     if extra_cropped:
         extra_rows = [{"Location": location, "Filename": name} for name in extra_cropped]
         extra_path = os.path.join(output_dir, f"survey_list_extra_cropped_{location}.csv")
         pd.DataFrame(extra_rows).to_csv(extra_path, index=False)
         print(f"[INFO] Extra cropped files saved to: {extra_path}")
+        summary.append("Extra cropped files:")
+        summary.extend([f"- {name}" for name in extra_cropped])
+        summary.append(f"Extra cropped CSV: {extra_path}")
 
     if missing_source_rows:
         missing_source_path = os.path.join(output_dir, f"survey_list_missing_source_{location}.csv")
         pd.DataFrame(missing_source_rows).to_csv(missing_source_path, index=False)
         print(f"[INFO] Survey list rows missing source LAS saved to: {missing_source_path}")
+        summary.append("Survey rows missing source LAS:")
+        for row in missing_source_rows:
+            summary.append(f"- {row.get('Survey_Path', '')} ({row.get('Method', '')})")
+        summary.append(f"Missing source CSV: {missing_source_path}")
 
     return summary
 

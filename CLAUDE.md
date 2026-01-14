@@ -86,10 +86,10 @@ Uses PDAL to crop raw LAS files to MOP line ranges defined in KML.
 ### Step 3: Quality Control
 ```bash
 # Generate QC report
-python3 code/pipeline/3_qc_cropped_files.py
+python3 tests/audits/2_audit_cropping.py
 
 # Remove bad files below threshold
-python3 code/pipeline/3_qc_cropped_files.py --delete_bad_files
+python3 tests/audits/2_audit_cropping.py --delete_bad_files
 ```
 Generates point-count vs file-size plots to identify corrupt scans.
 

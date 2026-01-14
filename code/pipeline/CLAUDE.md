@@ -235,15 +235,15 @@ DETAILS:
 
 ## Step 3: Quality Control
 
-**Script:** `3_qc_cropped_files.py`
+**Script:** `tests/audits/2_audit_cropping.py`
 
 ### Purpose
 Analyzes cropped files to identify corrupt scans or failed crops based on point count vs file size distributions. Optionally deletes bad files.
 
 ### Usage
 ```bash
-python3 3_qc_cropped_files.py                    # Report only
-python3 3_qc_cropped_files.py --delete_bad_files # Delete files < threshold
+python3 tests/audits/2_audit_cropping.py                    # Report only
+python3 tests/audits/2_audit_cropping.py --delete_bad_files # Delete files < threshold
 ```
 
 ### Input

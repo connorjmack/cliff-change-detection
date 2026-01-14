@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 def load_module():
-    path = Path(__file__).resolve().parents[1] / "pipeline" / "3_qc_cropped_files.py"
+    path = Path(__file__).resolve().parents[1] / "audits" / "2_audit_cropping.py"
     spec = util.spec_from_file_location("qc_cropped_files", path)
     module = util.module_from_spec(spec)
     spec.loader.exec_module(module)

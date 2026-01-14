@@ -1,5 +1,5 @@
 """
-Tests for 3_qc_cropped_files.py
+Tests for 2_audit_cropping.py
 
 Tests quality control functionality including:
 - File analysis (size and point count)
@@ -15,7 +15,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 import sys
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "pipeline"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "audits"))
 
 
 class TestFileAnalysis:
@@ -27,7 +27,7 @@ class TestFileAnalysis:
 
         spec = importlib.util.spec_from_file_location(
             "qc_cropped_files",
-            Path(__file__).parent.parent / "pipeline" / "3_qc_cropped_files.py"
+            Path(__file__).parent.parent / "audits" / "2_audit_cropping.py"
         )
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
@@ -47,7 +47,7 @@ class TestFileAnalysis:
 
         spec = importlib.util.spec_from_file_location(
             "qc_cropped_files",
-            Path(__file__).parent.parent / "pipeline" / "3_qc_cropped_files.py"
+            Path(__file__).parent.parent / "audits" / "2_audit_cropping.py"
         )
         module = importlib.util.module_from_spec(spec)
 
@@ -66,7 +66,7 @@ class TestFileAnalysis:
 
         spec = importlib.util.spec_from_file_location(
             "qc_cropped_files",
-            Path(__file__).parent.parent / "pipeline" / "3_qc_cropped_files.py"
+            Path(__file__).parent.parent / "audits" / "2_audit_cropping.py"
         )
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
@@ -85,7 +85,7 @@ class TestPlotGeneration:
 
         spec = importlib.util.spec_from_file_location(
             "qc_cropped_files",
-            Path(__file__).parent.parent / "pipeline" / "3_qc_cropped_files.py"
+            Path(__file__).parent.parent / "audits" / "2_audit_cropping.py"
         )
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
@@ -112,7 +112,7 @@ class TestPlotGeneration:
 
         spec = importlib.util.spec_from_file_location(
             "qc_cropped_files",
-            Path(__file__).parent.parent / "pipeline" / "3_qc_cropped_files.py"
+            Path(__file__).parent.parent / "audits" / "2_audit_cropping.py"
         )
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
@@ -160,7 +160,7 @@ class TestOSDetection:
 
         spec = importlib.util.spec_from_file_location(
             "qc_cropped_files",
-            Path(__file__).parent.parent / "pipeline" / "3_qc_cropped_files.py"
+            Path(__file__).parent.parent / "audits" / "2_audit_cropping.py"
         )
         module = importlib.util.module_from_spec(spec)
 
@@ -177,7 +177,7 @@ class TestOSDetection:
 
         spec = importlib.util.spec_from_file_location(
             "qc_cropped_files",
-            Path(__file__).parent.parent / "pipeline" / "3_qc_cropped_files.py"
+            Path(__file__).parent.parent / "audits" / "2_audit_cropping.py"
         )
         module = importlib.util.module_from_spec(spec)
 

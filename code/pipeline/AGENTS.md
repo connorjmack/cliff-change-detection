@@ -137,7 +137,7 @@ python3 2_crop_files_parallel.py --location SanElijo --replace
 ```
 
 ## Step 3: Quality Control
-**Script:** `3_qc_cropped_files.py`
+**Script:** `tests/audits/2_audit_cropping.py`
 
 **Purpose:** Identify suspect cropped files based on point count vs file size; optional deletion.
 
@@ -147,7 +147,7 @@ python3 2_crop_files_parallel.py --location SanElijo --replace
 
 **Example:**
 ```bash
-python3 3_qc_cropped_files.py --delete_bad_files
+python3 tests/audits/2_audit_cropping.py --delete_bad_files
 ```
 
 ## Step 4: Remove Beach Points

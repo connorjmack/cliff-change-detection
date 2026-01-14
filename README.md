@@ -91,15 +91,15 @@ python3 2_crop_files_parallel.py --location SanElijo --replace
 
 ### 2\. Quality Control
 
-**Script:** `3_qc_cropped_files.py`  
+**Script:** `tests/audits/2_audit_cropping.py`  
 Generates point-count vs. file-size distribution plots to identify corrupt scans or failed crops. Can destructively remove bad files.
 
 ```bash
 # Generate report only
-python3 3_qc_cropped_files.py 
+python3 tests/audits/2_audit_cropping.py 
 
 # Delete files below point threshold
-python3 3_qc_cropped_files.py --delete_bad_files
+python3 tests/audits/2_audit_cropping.py --delete_bad_files
 ```
 
 ### 3\. Classification (Beach & Vegetation)
