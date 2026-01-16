@@ -68,8 +68,12 @@ The pipeline expects and creates the following directory structure on the server
         │   └── DATE1_to_DATE2/
         │       ├── ero_clusters.las         # Clustered erosion points
         │       ├── ero_outliers.las         # Noise points (DBSCAN=-1)
-        │       ├── clusters_<resolution>.csv     # Step 7 output: ClusterIDs grid
-        │       ├── grid_<resolution>.csv         # Step 7 output: M3C2 distance grid
+        │       ├── 10cm/                        # Step 7 resolution subdirectory
+        │       │   ├── DATE1_to_DATE2_ero_clusters_10cm.csv
+        │       │   ├── DATE1_to_DATE2_ero_grid_10cm.csv
+        │       │   └── DATE1_to_DATE2_ero_stats_10cm.npz
+        │       ├── 25cm/                        # Alternative resolution
+        │       ├── 1m/                          # Alternative resolution
         │       ├── clusters_<resolution>_cleaned.csv  # Step 8 output
         │       ├── grid_<resolution>_cleaned.csv      # Step 8 output
         │       ├── clusters_<resolution>_filled.csv   # Step 8 output (erosion only)
@@ -388,11 +392,27 @@ Computes Multi-scale Model-to-Model Cloud Comparison (M3C2) normal distances bet
 
 ### Usage
 ```bash
-# Requires display environment
-xvfb-run --auto-servernum python3 5_m3c2_parallel.py SanElijo
+# Basic usage (requires display environment)
+xvfb-run -a python3 5_m3c2_parallel.py SanElijo
 
-# Parallel with 4 workers
-python3 5_m3c2_parallel.py SanElijo --single  # Single-threaded
+# With replace flag to overwrite existing outputs
+xvfb-run -a python3 5_m3c2_parallel.py SanElijo --replace
+
+# Single-threaded mode
+python3 5_m3c2_parallel.py SanElijo --single
+
+# Process all locations
+for loc in DelMar Solana Encinitas SanElijo Torrey Blacks; do
+  xvfb-run -a python3 5_m3c2_parallel.py $loc --replace
+done
+```
+
+### Verbosity Control
+CloudCompare output is suppressed (`stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL`). Clean single-line progress output:
+```
+[M3C2] 20170301_to_20170323... OK (123.45s)
+[M3C2] 20170323_to_20170411... OK (98.32s)
+[M3C2] 20170411_to_20170501... SKIPPED (already exists)
 ```
 
 ### Input
@@ -464,7 +484,30 @@ python3 6_dbscan_parallel.py SanElijo --eps 0.35 --min_samples 30 --min_change 0
 
 ### Input
 - **M3C2 files:** `results/<Location>/m3c2/pipeline_run_*/*/DATE1_to_DATE2_m3c2.las`
-  - Uses most recent `pipeline_run_*` folder
+  - **Automatically detects and uses most recent `pipeline_run_*` folder** via `find_latest_pipeline_run()` function
+
+### Critical Significance Filtering
+**IMPORTANT:** The script enforces strict significance filtering to ensure only meaningful changes are processed:
+
+1. **Searches for significance field** with multiple name variations:
+   - 'significant change', 'Significant change', 'significant_change', 'SignificantChange', 'sig change', 'sig_change', 'sigchange'
+
+2. **Fails with clear error if significance field not found:**
+   ```
+   ValueError: No significance field found in <filename>!
+   Available fields: [...]
+   M3C2 must be configured to output 'significant change' field.
+   Cannot proceed without significance filtering.
+   ```
+
+3. **Displays which field is being used:**
+   ```
+   [INFO] Using significance field: 'significant change'
+   ```
+
+4. **Previous dangerous fallback removed:** Earlier versions would process ALL points if the field was missing. This has been replaced with a hard error to prevent accidental processing of non-significant data.
+
+**Configuration Requirement:** Ensure M3C2 parameter files (`utilities/m3c2_params/*.txt`) are configured to output the significance field
 
 ### Output Directory Structure
 ```
@@ -487,12 +530,13 @@ results/<Location>/deposition/DATE1_to_DATE2/
 **ero_outliers.las / dep_outliers.las:**
 - Same fields but ClusterID = -1 (noise points rejected by DBSCAN)
 
-### Significance Filtering
+### Significance Filtering Logic
+Points must meet BOTH criteria to be clustered:
 ```python
-# Only points meeting BOTH criteria are clustered:
-1. abs(M3C2_distance) >= min_change  (default: 0.0)
-2. abs(M3C2_distance) > Distance_uncertainty  (LoD test)
+1. Significance field == 1  (from M3C2 Level of Detection test)
+2. abs(M3C2_distance) >= min_change  (default: 0.25m, 0.30m for Torrey)
 ```
+The significance field check is performed first, then optional magnitude threshold is applied.
 
 ### DBSCAN Parameters
 - `--eps`: Neighborhood radius in meters (default: 0.35m)
@@ -541,13 +585,15 @@ python3 7_make_grids.py SanElijo --resolution 1m
    - Must contain `Polygon_ID` field
 
 ### Output Files
-**Location:** `results/<Location>/erosion/DATE1_to_DATE2/` and `.../deposition/...`
+**Location:** `results/<Location>/erosion/DATE1_to_DATE2/<resolution>/` and `.../deposition/.../`
 
-For each survey pair, generates 6 CSV files (3 erosion + 3 deposition):
+Files are organized into resolution-specific subdirectories. For each survey pair and resolution, generates:
 
-1. **grid_<resolution>.csv** (or dep_grid_<resolution>.csv)
-2. **clusters_<resolution>.csv** (or dep_clusters_<resolution>.csv)
-3. **uncertainty_<resolution>.csv** (or dep_uncertainty_<resolution>.csv)
+1. **DATE1_to_DATE2_ero_grid_<resolution>.csv** (M3C2 median values)
+2. **DATE1_to_DATE2_ero_clusters_<resolution>.csv** (ClusterID mode)
+3. **DATE1_to_DATE2_ero_stats_<resolution>.npz** (Uncertainty RMS, point counts, variance)
+
+Same for deposition with `dep_` prefix.
 
 ### CSV Grid Format
 
@@ -584,8 +630,20 @@ For each (Polygon, Elevation) cell:
 ```python
 '10cm'  -> '10cm'   # 0.10m vertical bins
 '25cm'  -> '25cm'   # 0.25m vertical bins
-'1m'    -> '100cm'  # 1.00m vertical bins
+'1m'    -> '1m'     # 1.00m vertical bins
 ```
+
+**Note:** The resolution string is used directly as the folder name and file suffix. For example, `--resolution 1m` creates:
+- Folder: `results/<Location>/erosion/DATE1_to_DATE2/1m/`
+- Files: `DATE1_to_DATE2_ero_grid_1m.csv`, `DATE1_to_DATE2_ero_clusters_1m.csv`, etc.
+
+### Legacy File Cleanup
+When running with `--replace` and `--resolution 1m`, the script automatically removes old `100cm` files if they exist:
+- Checks for `/100cm/` subdirectory in the same date folder
+- Deletes `*_grid_100cm.csv`, `*_clusters_100cm.csv`, `*_stats_100cm.npz`
+- Prints cleanup messages: `[Cleanup] Removed old file: <filename>`
+
+This ensures a clean transition from the previous `100cm` naming convention to the standardized `1m` format.
 
 ### Vertical Binning
 - Elevation range: 0.0m to 50.0m (hardcoded)
