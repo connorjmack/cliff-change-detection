@@ -312,6 +312,22 @@ def process_single_survey(task_dict):
         # Create resolution subdirectory if it doesn't exist
         os.makedirs(task_dict['out_base'], exist_ok=True)
 
+        # Clean up old 100cm files when using 1m resolution with --replace
+        if overwrite and task_dict.get('resolution') == '1m':
+            date_dir = os.path.dirname(task_dict['out_base'])
+            old_100cm_dir = os.path.join(date_dir, '100cm')
+            if os.path.isdir(old_100cm_dir):
+                prefix = "dep" if mode == "deposition" else "ero"
+                old_files = [
+                    os.path.join(old_100cm_dir, f"{dt}_{prefix}_grid_100cm.csv"),
+                    os.path.join(old_100cm_dir, f"{dt}_{prefix}_clusters_100cm.csv"),
+                    os.path.join(old_100cm_dir, f"{dt}_{prefix}_stats_100cm.npz")
+                ]
+                for old_file in old_files:
+                    if os.path.exists(old_file):
+                        os.remove(old_file)
+                        print(f"[Cleanup] Removed old file: {os.path.basename(old_file)}")
+
         print(f"[Worker PID {os.getpid()}] Processing {mode}/{dt}")
         stats = makeGrid(
             task_dict['las_in'],
@@ -531,6 +547,7 @@ def main():
                 'stats_npz': os.path.join(out_base, f"{dt}_{prefix}_stats_{label}.npz"),
                 'shp': shp,
                 'res': args.res,
+                'resolution': args.resolution,
                 'height': heights[args.location],
                 'overwrite': args.replace,
                 'location': args.location
