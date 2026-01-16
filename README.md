@@ -47,6 +47,9 @@ The pipeline relies on a specific directory structure to locate assets, models, 
 /LidarProcessingCliffs/
 ├── code/
 │   └── pipeline/           # Source code (this repo)
+│       └── daily_reports/  # Master daily run logs (run_daily.py)
+├── reports/
+│   └── daily/              # Step 1 update logs
 ├── results/
 │   └── <Location>/         # e.g., DelMar, SanElijo
 │       ├── cropped/
@@ -83,7 +86,7 @@ python3 0_make_survey_lists.py --all
 ### 1\. Update Survey Lists (Daily)
 
 **Script:** `1_update_survey_lists.py`  
-Checks for new surveys and updates the master CSV inventory. This drives the rest of the pipeline.
+Checks for new surveys and updates the master CSV inventory. This drives the rest of the pipeline and writes a daily log to `reports/daily/`.
 
 ```bash
 # Update specific location
@@ -92,6 +95,21 @@ python3 1_update_survey_lists.py --location SanElijo
 # Update all locations
 python3 1_update_survey_lists.py --all
 ```
+
+### Daily Orchestrator (Optional)
+
+**Script:** `run_daily.py`  
+Runs the detection step (Step 1) and then steps 2-8 for each location with a master log.
+
+```bash
+# Run detection then process locations with new data
+python3 run_daily.py
+
+# Skip detection and force all locations
+python3 run_daily.py --force-all
+```
+
+On Linux, CloudCompare steps are automatically wrapped with `xvfb-run`.
 
 ### 2\. Cropping (Preprocessing)
 
@@ -218,10 +236,22 @@ xvfb-run --auto-servernum --server-args="-screen 0 1024x768x24" \
 
 The pipeline automatically generates detailed logs, CSV inventories, and PNG visualizations in the following directories:
 
+  * `reports/daily/`
+  * `code/pipeline/daily_reports/`
   * `code/pipeline/reports/` (QC)
   * `utilities/beach_removal/classification_reports/`
   * `utilities/dbscan/`
+  * `validation/hole_filling/reports/`
   * `validation/m3c2/`
+
+## Testing
+
+Tests live in `tests/pytest/` with audit scripts in `tests/audits/`.
+
+```bash
+pytest tests/pytest
+pytest tests/pytest/test_2_crop_files_parallel.py
+```
 
 ## Authors
 
