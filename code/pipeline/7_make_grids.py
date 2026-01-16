@@ -481,7 +481,7 @@ def main():
             args.res = 0.1
         elif args.resolution == "25cm":
             args.res = 0.25
-        else:  # 1m
+        elif args.resolution == "1m":
             args.res = 1.0
 
     heights = {'DelMar':30,'SanElijo':40,'Solana':50,
@@ -499,8 +499,8 @@ def main():
     shp = find_shapefile(util_root,args.location,args.resolution)
     print(f"Using shapefile: {shp}")
 
-    res_cm = int(round(args.res*100))
-    label = f"{res_cm}cm"
+    # Use the resolution string directly (10cm, 25cm, or 1m)
+    label = args.resolution
     
     # Build tasks
     tasks = []
