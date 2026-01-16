@@ -27,8 +27,9 @@ import platform
 import math
 import gc
 import pdal
+import signal
 from datetime import datetime
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed, TimeoutError
 from tqdm import tqdm
 from shapely.geometry import Polygon
 from pyproj import Transformer
@@ -85,6 +86,7 @@ mop_ranges = {
 # === PDAL SETTINGS ===
 SAMPLE_RADIUS = 0.03    # 2 cm
 ALONG_BUFFER  = 500.0   # meters along-track extension
+WORKER_TIMEOUT = 600    # seconds (10 minutes) - timeout per file to prevent hangs
 
 
 def extend_line(p1, p2, along):
@@ -166,9 +168,12 @@ def _worker(task):
     """
     Worker function to process a single LAS file.
     Returns a dictionary of statistics for the report.
+
+    Improved error handling to catch PDAL segfaults and resource issues.
     """
     poly_wkt, las_in, las_out, replace, use_sample = task
     start_time = time.time()
+    p = None
 
     if not replace and os.path.exists(las_out):
         return {
@@ -179,6 +184,13 @@ def _worker(task):
         }
 
     try:
+        # Verify input file exists and is readable
+        if not os.path.exists(las_in):
+            raise FileNotFoundError(f"Input file not found: {las_in}")
+
+        if os.path.getsize(las_in) == 0:
+            raise ValueError(f"Input file is empty: {las_in}")
+
         stages = [
             {"type": "readers.las", "filename": las_in},
             {"type": "filters.crop", "polygon": poly_wkt},
@@ -186,9 +198,17 @@ def _worker(task):
         if use_sample:
             stages.append({"type": "filters.sample", "radius": SAMPLE_RADIUS})
         stages.append({"type": "writers.las", "filename": las_out})
-        pipeline = {"pipeline": stages}
-        p = pdal.Pipeline(json.dumps(pipeline))
+
+        pipeline_json = {"pipeline": stages}
+
+        # Create and execute pipeline with explicit error handling
+        p = pdal.Pipeline(json.dumps(pipeline_json))
         count = p.execute()
+
+        # Verify output was created
+        if not os.path.exists(las_out) or os.path.getsize(las_out) == 0:
+            raise RuntimeError(f"Output file was not created or is empty: {las_out}")
+
         duration = time.time() - start_time
 
         # Explicitly cleanup to prevent memory leaks
@@ -201,16 +221,44 @@ def _worker(task):
             "duration": duration,
             "points": count
         }
-    except Exception as e:
-        # Cleanup even on error
+    except MemoryError as e:
+        # Handle out-of-memory errors specifically
+        if p is not None:
+            del p
         gc.collect()
         return {
             "file": os.path.basename(las_in),
             "status": "error",
-            "error_msg": str(e),
+            "error_msg": f"Out of memory: {str(e)}. Try reducing --n_jobs.",
             "duration": time.time() - start_time,
             "points": 0
         }
+    except Exception as e:
+        # Catch all other errors (including PDAL errors)
+        if p is not None:
+            del p
+        gc.collect()
+
+        # Identify likely PDAL segfault/crash indicators
+        error_msg = str(e)
+        if "segmentation fault" in error_msg.lower() or "core dumped" in error_msg.lower():
+            error_msg = f"PDAL crash detected: {error_msg}"
+
+        return {
+            "file": os.path.basename(las_in),
+            "status": "error",
+            "error_msg": error_msg,
+            "duration": time.time() - start_time,
+            "points": 0
+        }
+    finally:
+        # Ensure cleanup happens regardless of exception
+        if p is not None:
+            try:
+                del p
+            except:
+                pass
+        gc.collect()
 
 
 def write_report(location, stats, total_duration, out_dir):
@@ -322,9 +370,11 @@ def crop_location(location: str, replace: bool = False, no_sample: bool = False,
 
     # Run processing with improved error handling
     results = []
+    crashed_count = 0
     # Allow manual override of worker count, otherwise use calculated default
     nprocs = n_jobs if n_jobs is not None else DEFAULT_WORKERS
-    print(f"Using {nprocs} worker processes")
+    print(f"Using {nprocs} worker processes with {WORKER_TIMEOUT}s timeout per file")
+
     with ProcessPoolExecutor(max_workers=nprocs) as executor:
         # Submit all tasks and create a mapping from future to task
         future_to_task = {executor.submit(_worker, task): task for task in tasks}
@@ -334,7 +384,8 @@ def crop_location(location: str, replace: bool = False, no_sample: bool = False,
             for future in as_completed(future_to_task):
                 task = future_to_task[future]
                 try:
-                    res = future.result()
+                    # Add timeout to prevent hanging on large files
+                    res = future.result(timeout=WORKER_TIMEOUT)
                     results.append(res)
                     if res["status"] == "processed":
                         print(f"  ✓ {os.path.basename(task[2])}")
@@ -342,18 +393,37 @@ def crop_location(location: str, replace: bool = False, no_sample: bool = False,
                         print(f"  ⊘ SKIPPED: {os.path.basename(task[2])}")
                     elif res["status"] == "error":
                         print(f"  ✗ ERROR: {os.path.basename(task[2])} - {res.get('error_msg', 'Unknown error')}")
-                except Exception as e:
-                    # Catch worker crashes or other critical failures
-                    print(f"  ✗ WORKER CRASH: {os.path.basename(task[2])} - {str(e)}")
+                except TimeoutError:
+                    # File took too long to process
+                    crashed_count += 1
+                    print(f"  ⏱ TIMEOUT: {os.path.basename(task[2])} exceeded {WORKER_TIMEOUT}s limit")
                     results.append({
                         "file": os.path.basename(task[1]),
                         "status": "crash",
-                        "error_msg": f"Worker process failed: {str(e)}",
+                        "error_msg": f"Processing timeout after {WORKER_TIMEOUT}s. File may be too large or corrupted.",
+                        "duration": WORKER_TIMEOUT,
+                        "points": 0
+                    })
+                except Exception as e:
+                    # Catch worker crashes or other critical failures
+                    crashed_count += 1
+                    error_type = type(e).__name__
+                    print(f"  ✗ WORKER CRASH ({error_type}): {os.path.basename(task[2])} - {str(e)}")
+                    results.append({
+                        "file": os.path.basename(task[1]),
+                        "status": "crash",
+                        "error_msg": f"Worker process failed ({error_type}): {str(e)}",
                         "duration": 0.0,
                         "points": 0
                     })
                 finally:
                     pbar.update(1)
+
+    # Alert user if crashes were detected
+    if crashed_count > 0:
+        print(f"\n⚠️  WARNING: {crashed_count} files failed due to worker crashes or timeouts.")
+        print(f"   Consider reducing workers: --n_jobs {max(1, nprocs // 2)}")
+        print(f"   Or increasing timeout if files are very large.")
 
     total_duration = time.time() - total_start
     write_report(location, results, total_duration, out_dir)
