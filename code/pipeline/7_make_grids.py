@@ -150,14 +150,14 @@ def makeGrid(pathin, pathout_m3c2, pathout_cluster, pathout_stats,
     def rms_func(x):
         return np.sqrt(np.mean(x**2))
 
-    # observed=True is faster for Categorical data (z_bin)
-    grp = joined.groupby(['Polygon_ID','z_bin'], observed=False).agg({
-        'M3C2': 'median',
-        'ClusterID': mode_func,
-        'Uncertainty': rms_func,
-        'M3C2_count': ('M3C2', 'count'),      # Point count per cell
-        'M3C2_variance': ('M3C2', 'var')      # Variance per cell
-    })
+    # Use named aggregation for cleaner column names
+    grp = joined.groupby(['Polygon_ID','z_bin'], observed=False).agg(
+        M3C2_median=('M3C2', 'median'),
+        ClusterID_mode=('ClusterID', mode_func),
+        Uncertainty_rms=('Uncertainty', rms_func),
+        M3C2_count=('M3C2', 'count'),         # Point count per cell
+        M3C2_variance=('M3C2', 'var')         # Variance per cell
+    )
 
     # 7. PIVOT & SAVE (STRICT SHAPE ENFORCEMENT)
     all_ids = polys_gdf['Polygon_ID']
@@ -238,9 +238,9 @@ def makeGrid(pathin, pathout_m3c2, pathout_cluster, pathout_stats,
         )
         print(f"Wrote: {output_path} (Shape: {unc_array.shape}, 3 arrays + metadata)")
 
-    save_pivot('M3C2', pathout_m3c2, 'M3C2')
-    save_pivot('ClusterID', pathout_cluster, 'ClusterID')
-    save_stats_npz('Uncertainty', 'M3C2_count', 'M3C2_variance', pathout_stats)
+    save_pivot('M3C2_median', pathout_m3c2, 'M3C2')
+    save_pivot('ClusterID_mode', pathout_cluster, 'ClusterID')
+    save_stats_npz('Uncertainty_rms', 'M3C2_count', 'M3C2_variance', pathout_stats)
     
     stats['processing_time_sec'] = time.time() - start_time
     return stats
