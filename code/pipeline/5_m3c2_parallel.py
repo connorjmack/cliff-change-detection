@@ -79,14 +79,14 @@ def compute_m3c2_and_save_all(ref_path, cmp_path, params_file, base_output_dir, 
     # Check existence
     expected = [out_ref, out_cmp, out_m3c2]
     if not replace and all(os.path.exists(p) for p in expected):
-        print(f"[SKIP] {pair_name} already exists")
+        print(f"[M3C2] {pair_name}... SKIPPED (already exists)")
         result["status"] = "SKIPPED"
         result["end_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         return result
 
     os.makedirs(pair_dir, exist_ok=True)
-    print(f"[M3C2] {pair_name}: running CloudCompare...")
-    
+    print(f"[M3C2] {pair_name}...", end='', flush=True)
+
     cmd = [
         cc_path,
         "-silent",
@@ -99,24 +99,24 @@ def compute_m3c2_and_save_all(ref_path, cmp_path, params_file, base_output_dir, 
     ]
 
     try:
-        subprocess.run(cmd, check=True)
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         duration = time.time() - start_time_epoch
-        print(f"[OK] {pair_name} finished ({duration:.2f}s)")
+        print(f" OK ({duration:.2f}s)")
         
         result["status"] = "SUCCESS"
         result["duration_sec"] = round(duration, 2)
         
     except subprocess.CalledProcessError as e:
         duration = time.time() - start_time_epoch
-        print(f"[FAIL] {pair_name} CloudCompare error: {e}")
-        
+        print(f" FAILED (Return Code {e.returncode})")
+
         result["status"] = "FAILED"
         result["duration_sec"] = round(duration, 2)
         result["error_message"] = f"Return Code {e.returncode}"
-        
+
     except Exception as e:
         duration = time.time() - start_time_epoch
-        print(f"[FAIL] {pair_name} Unexpected error: {e}")
+        print(f" ERROR ({str(e)})")
         
         result["status"] = "ERROR"
         result["duration_sec"] = round(duration, 2)
