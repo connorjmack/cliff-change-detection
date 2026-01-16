@@ -314,19 +314,31 @@ def process_single_survey(task_dict):
 
         # Clean up old 100cm files when using 1m resolution with --replace
         if overwrite and task_dict.get('resolution') == '1m':
+            # Old files are in the /1m/ folder with _100cm.csv suffix
+            prefix = "dep" if mode == "deposition" else "ero"
+            old_files = [
+                os.path.join(task_dict['out_base'], f"{dt}_{prefix}_grid_100cm.csv"),
+                os.path.join(task_dict['out_base'], f"{dt}_{prefix}_clusters_100cm.csv"),
+                os.path.join(task_dict['out_base'], f"{dt}_{prefix}_stats_100cm.npz")
+            ]
+            for old_file in old_files:
+                if os.path.exists(old_file):
+                    os.remove(old_file)
+                    print(f"[Cleanup] Removed old file: {os.path.basename(old_file)}")
+
+            # Also check for old /100cm/ folder and remove files there
             date_dir = os.path.dirname(task_dict['out_base'])
             old_100cm_dir = os.path.join(date_dir, '100cm')
             if os.path.isdir(old_100cm_dir):
-                prefix = "dep" if mode == "deposition" else "ero"
-                old_files = [
+                old_folder_files = [
                     os.path.join(old_100cm_dir, f"{dt}_{prefix}_grid_100cm.csv"),
                     os.path.join(old_100cm_dir, f"{dt}_{prefix}_clusters_100cm.csv"),
                     os.path.join(old_100cm_dir, f"{dt}_{prefix}_stats_100cm.npz")
                 ]
-                for old_file in old_files:
+                for old_file in old_folder_files:
                     if os.path.exists(old_file):
                         os.remove(old_file)
-                        print(f"[Cleanup] Removed old file: {os.path.basename(old_file)}")
+                        print(f"[Cleanup] Removed old file from 100cm/: {os.path.basename(old_file)}")
 
         print(f"[Worker PID {os.getpid()}] Processing {mode}/{dt}")
         stats = makeGrid(
