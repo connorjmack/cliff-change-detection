@@ -5,7 +5,7 @@ cum_raw_vis.py
 Visualizes cumulative erosion and deposition grids over time.
 
 Plots cumulative change grids for each location/resolution/type combination
-and saves to figures/raw_grid_vis/<Location>/.
+as a single heatmap (similar to dashboard Panel E).
 
 Usage:
     python3 cum_raw_vis.py --location SanElijo --resolution 25cm --type erosion
@@ -20,8 +20,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
-from matplotlib.colors import TwoSlopeNorm
+from matplotlib.colors import LinearSegmentedColormap, Normalize
+from matplotlib import cm
 from datetime import datetime
 
 # Detect OS and set base paths
@@ -36,6 +36,44 @@ FIGURES_DIR = os.path.join(BASE, 'figures', 'raw_grid_vis')
 LOCATIONS = ['DelMar', 'SanElijo', 'Solana', 'Encinitas', 'Torrey', 'Blacks']
 RESOLUTIONS = ['10cm', '25cm', '1m']
 TYPES = ['erosion', 'deposition']
+
+# Font sizes
+FS_TITLE = 18
+FS_LABEL = 14
+FS_TICK = 12
+
+
+def get_resolution_value(resolution):
+    """Convert resolution string to numeric value."""
+    if resolution == '10cm':
+        return 0.10
+    elif resolution == '25cm':
+        return 0.25
+    elif resolution == '1m':
+        return 1.0
+    return 0.25
+
+
+def get_custom_cmap(name, vmax=6.0):
+    """Creates a custom colormap with White at 0 (matching dashboard style)."""
+    base_cmap = cm.get_cmap(name, 256)
+    newcolors = base_cmap(np.linspace(0, 1, 256))
+    newcolors[0, :] = np.array([1, 1, 1, 1])  # Force 0 to be White
+    return LinearSegmentedColormap.from_list(f"White_{name}", newcolors), Normalize(vmin=0, vmax=vmax)
+
+
+def clean_and_snap_grid(df, resolution_val):
+    """Clean column names and snap to resolution grid (matching dashboard)."""
+    cleaned_cols = df.columns.astype(str).str.replace(r'[a-zA-Z_]', '', regex=True)
+    try:
+        col_floats = cleaned_cols.astype(float)
+        scale = 1.0 / resolution_val
+        new_cols = (col_floats * scale).round().astype(int)
+        df.columns = new_cols
+        df.index = df.index.astype(int)
+        return df
+    except:
+        return None
 
 
 def parse_date_from_folder(folder_name):
@@ -53,15 +91,14 @@ def parse_date_from_folder(folder_name):
 def load_grid_csv(csv_path):
     """
     Load grid CSV file.
-    Returns numpy array of grid values (rows=polygons, cols=elevations).
+    Returns pandas DataFrame.
     """
     if not os.path.exists(csv_path):
         return None
 
     try:
         df = pd.read_csv(csv_path, index_col=0, na_values=['', 'nan', 'NaN', 'NULL'])
-        # Replace NaN with 0 for cumulative calculation
-        return df.fillna(0).values
+        return df
     except Exception as e:
         print(f"Error loading {csv_path}: {e}")
         return None
@@ -71,7 +108,7 @@ def get_sorted_survey_pairs(location, change_type):
     """
     Get chronologically sorted list of survey pair folders.
 
-    Returns list of tuples: (folder_name, date, grid_csv_path)
+    Returns list of tuples: (folder_name, date)
     """
     type_dir = os.path.join(RESULTS_DIR, location, change_type)
 
@@ -95,24 +132,23 @@ def get_sorted_survey_pairs(location, change_type):
     return [(folder, date) for folder, date in folder_data]
 
 
-def compute_cumulative_grids(location, resolution, change_type):
+def compute_cumulative_grid(location, resolution, change_type):
     """
-    Compute cumulative grid values over time.
+    Compute cumulative grid across all time steps.
+    Matches dashboard Panel E logic.
 
     Returns:
-        dates: list of datetime objects
-        cumulative_grids: list of numpy arrays (cumulative sum)
-        folder_names: list of folder names
+        cumulative_grid: pandas DataFrame (cleaned and snapped)
+        n_surveys: number of surveys processed
     """
     survey_pairs = get_sorted_survey_pairs(location, change_type)
 
     if not survey_pairs:
-        return None, None, None
+        return None, 0
 
-    dates = []
-    cumulative_grids = []
-    folder_names = []
-    cumulative_sum = None
+    res_val = get_resolution_value(resolution)
+    cumulative_grid = None
+    n_surveys = 0
 
     prefix = 'ero' if change_type == 'erosion' else 'dep'
 
@@ -123,98 +159,98 @@ def compute_cumulative_grids(location, resolution, change_type):
             f"{folder}_{prefix}_grid_{resolution}.csv"
         )
 
-        grid = load_grid_csv(grid_path)
+        df_grid = load_grid_csv(grid_path)
 
-        if grid is None:
+        if df_grid is None:
             continue
 
-        # Initialize cumulative sum on first valid grid
-        if cumulative_sum is None:
-            cumulative_sum = np.zeros_like(grid)
+        # Clean and snap the grid (matching dashboard)
+        spatial_df = clean_and_snap_grid(df_grid.copy(), res_val)
 
-        # Add current grid to cumulative (using absolute values for magnitude)
-        cumulative_sum = cumulative_sum + np.abs(grid)
+        if spatial_df is not None:
+            if cumulative_grid is None:
+                cumulative_grid = spatial_df.fillna(0.0)
+            else:
+                cumulative_grid = cumulative_grid.add(spatial_df.fillna(0.0), fill_value=0)
+            n_surveys += 1
 
-        dates.append(date)
-        cumulative_grids.append(cumulative_sum.copy())
-        folder_names.append(folder)
-
-    if not dates:
-        return None, None, None
-
-    return dates, cumulative_grids, folder_names
+    return cumulative_grid, n_surveys
 
 
-def plot_cumulative_grid(dates, cumulative_grids, folder_names, location,
-                         resolution, change_type, output_path):
+def plot_cumulative_grid(cumulative_grid, location, resolution, change_type,
+                        n_surveys, output_path):
     """
-    Create visualization of cumulative grid evolution.
-
-    Creates a multi-panel figure showing grid state at key time points.
+    Create single heatmap visualization of cumulative grid.
+    Matches dashboard Panel E style.
     """
-    n_grids = len(cumulative_grids)
-
-    if n_grids == 0:
+    if cumulative_grid is None or cumulative_grid.empty:
         print(f"No data to plot for {location} {resolution} {change_type}")
         return
 
-    # Determine how many subplots to show (max 12, evenly spaced)
-    n_plots = min(12, n_grids)
-    indices = np.linspace(0, n_grids - 1, n_plots, dtype=int)
+    res_val = get_resolution_value(resolution)
 
-    # Determine grid layout
-    if n_plots <= 3:
-        nrows, ncols = 1, n_plots
-    elif n_plots <= 6:
-        nrows, ncols = 2, 3
-    elif n_plots <= 9:
-        nrows, ncols = 3, 3
+    # Transpose for plotting (matching dashboard)
+    plot_df = cumulative_grid.T
+
+    # Get spatial coordinates
+    x_indices = plot_df.columns.astype(int)
+    x_meters = x_indices * res_val
+    y_elev = plot_df.index.astype(int)
+    max_elev_m = len(y_elev) * res_val
+
+    # Get matrix values
+    matrix = plot_df.values
+
+    # Set up extent
+    extent = [x_meters.min(), x_meters.max(), 0, max_elev_m]
+
+    # Choose colormap and vmax based on type
+    if change_type == 'erosion':
+        cmap_name = 'magma_r'
+        vmax = 6.0
+        cbar_label = 'Cumulative Erosion Depth (m)'
     else:
-        nrows, ncols = 3, 4
+        cmap_name = 'viridis_r'
+        vmax = 3.0
+        cbar_label = 'Cumulative Deposition Depth (m)'
+
+    # Get custom colormap with white at 0
+    cmap, norm = get_custom_cmap(cmap_name, vmax=vmax)
 
     # Create figure
-    fig, axes = plt.subplots(nrows, ncols, figsize=(4*ncols, 3.5*nrows))
-    if n_plots == 1:
-        axes = np.array([axes])
-    axes = axes.flatten()
+    fig, ax = plt.subplots(figsize=(16, 8))
 
-    # Set colormap
-    cmap = 'Reds' if change_type == 'erosion' else 'Blues'
-
-    # Get global vmin/vmax for consistent colorbar
-    all_data = np.concatenate([g.flatten() for g in cumulative_grids])
-    vmin, vmax = 0, np.nanpercentile(all_data[all_data > 0], 99.5) if np.any(all_data > 0) else 1
-
-    # Plot each selected time point
-    for i, idx in enumerate(indices):
-        ax = axes[i]
-        grid = cumulative_grids[idx]
-        date = dates[idx]
-
-        im = ax.imshow(grid, aspect='auto', cmap=cmap,
-                      vmin=vmin, vmax=vmax, interpolation='nearest')
-
-        ax.set_title(f"{date.strftime('%Y-%m-%d')}\n({folder_names[idx]})",
-                    fontsize=9)
-        ax.set_xlabel('Elevation Bin', fontsize=8)
-        ax.set_ylabel('Polygon ID', fontsize=8)
-        ax.tick_params(labelsize=7)
-
-    # Hide unused subplots
-    for i in range(n_plots, len(axes)):
-        axes[i].axis('off')
+    # Plot heatmap
+    im = ax.imshow(matrix, origin='lower', extent=extent,
+                   cmap=cmap, norm=norm, aspect='auto',
+                   interpolation='none')
 
     # Add colorbar
-    cbar = fig.colorbar(im, ax=axes, orientation='horizontal',
-                       pad=0.05, fraction=0.03, aspect=50)
-    cbar.set_label(f'Cumulative {change_type.capitalize()} (m)', fontsize=10)
+    cbar = plt.colorbar(im, ax=ax, orientation='horizontal',
+                       pad=0.08, fraction=0.05, aspect=50)
+    cbar.set_label(cbar_label, fontsize=FS_LABEL, color='black', fontweight='bold')
+    cbar.ax.tick_params(labelsize=FS_TICK, labelcolor='black')
 
-    # Overall title
-    fig.suptitle(f'{location} - Cumulative {change_type.capitalize()} - {resolution}',
-                fontsize=14, fontweight='bold', y=0.995)
+    # Labels and title
+    ax.set_xlabel("Alongshore Location (m)", fontsize=FS_LABEL,
+                 fontweight='bold', color='black')
+    ax.set_ylabel("Elevation (m)", fontsize=FS_LABEL,
+                 fontweight='bold', color='black')
+
+    title = f'{location} - Cumulative {change_type.capitalize()} - {resolution}'
+    title += f'\n({n_surveys} survey pairs)'
+    ax.set_title(title, fontsize=FS_TITLE, fontweight='bold', color='black', pad=20)
+
+    # Reverse x-axis to match dashboard (cliff facing view)
+    ax.set_xlim(x_meters.max(), x_meters.min())
+    ax.set_ylim(0, max_elev_m)
+
+    # Grid and ticks
+    ax.grid(True, linestyle=':', alpha=0.3)
+    ax.tick_params(axis='both', labelsize=FS_TICK, labelcolor='black')
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.savefig(output_path, dpi=150, bbox_inches='tight', facecolor='white')
     plt.close()
 
     print(f"Saved: {output_path}")
@@ -226,12 +262,12 @@ def process_combination(location, resolution, change_type):
     """
     print(f"\nProcessing {location} - {resolution} - {change_type}...")
 
-    # Compute cumulative grids
-    dates, cumulative_grids, folder_names = compute_cumulative_grids(
+    # Compute cumulative grid
+    cumulative_grid, n_surveys = compute_cumulative_grid(
         location, resolution, change_type
     )
 
-    if dates is None or len(dates) == 0:
+    if cumulative_grid is None or n_surveys == 0:
         print(f"  No data found for {location} {resolution} {change_type}")
         return
 
@@ -244,10 +280,10 @@ def process_combination(location, resolution, change_type):
     output_path = os.path.join(output_dir, output_filename)
 
     # Plot
-    plot_cumulative_grid(dates, cumulative_grids, folder_names,
-                        location, resolution, change_type, output_path)
+    plot_cumulative_grid(cumulative_grid, location, resolution, change_type,
+                        n_surveys, output_path)
 
-    print(f"  Processed {len(dates)} survey pairs")
+    print(f"  Processed {n_surveys} survey pairs")
 
 
 def main():
