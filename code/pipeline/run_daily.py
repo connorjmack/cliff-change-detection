@@ -30,7 +30,7 @@ ALL_LOCATIONS = ["DelMar", "Solana", "Encinitas", "SanElijo", "Torrey", "Blacks"
 
 PIPELINE_STEPS = [
     (2, "2_crop_files_parallel.py"),
-    (3, "3_qc_cropped_files.py"),
+    (3, os.path.join("tests", "audits", "2_audit_cropping.py")),
     (4, "4_remove_beach_parallel.py"),
     (5, "5_remove_veg_parallel.py"), # Requires CloudCompare (Headless)
     (6, "6_m3c2_parallel.py"),       # Requires CloudCompare (Headless)
@@ -109,10 +109,18 @@ def get_locations_from_report(report_path):
     return list(active_locations)
 
 def run_processing_step(step_num, script_name, location, report_file):
-    script_path = os.path.join(CODE_DIR, script_name)
+    if os.path.isabs(script_name):
+        script_path = script_name
+        display_name = os.path.basename(script_name)
+    elif os.sep in script_name:
+        script_path = os.path.join(ROOT_DIR, script_name)
+        display_name = script_name
+    else:
+        script_path = os.path.join(CODE_DIR, script_name)
+        display_name = script_name
     
     header = (f"\n{'-'*60}\n"
-              f"Step {step_num}: {script_name} [{location}]\n"
+              f"Step {step_num}: {display_name} [{location}]\n"
               f"Time: {datetime.now().strftime('%H:%M:%S')}\n"
               f"{'-'*60}\n")
     print(header.strip())

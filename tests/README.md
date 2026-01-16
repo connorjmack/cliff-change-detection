@@ -4,18 +4,18 @@ Comprehensive test suite for the cliff-change-detection LiDAR processing pipelin
 
 ## Overview
 
-This directory contains tests for all 10 pipeline steps (0-9), covering:
+This directory contains tests for all 9 pipeline steps (0-8), covering:
 
 - **Step 0**: Survey list generation
 - **Step 1**: Survey list updates
 - **Step 2**: Cropping with PDAL
-- **Step 3**: Quality control
-- **Step 4**: Beach removal (Random Forest)
-- **Step 5**: Vegetation removal (CloudCompare CANUPO)
-- **Step 6**: M3C2 change detection (CloudCompare)
-- **Step 7**: DBSCAN clustering
-- **Step 8**: Spatial gridding
-- **Step 9**: Grid cleaning and hole filling
+- **Audit**: Cropped files QC (optional)
+- **Step 3**: Beach removal (Random Forest)
+- **Step 4**: Vegetation removal (CloudCompare CANUPO)
+- **Step 5**: M3C2 change detection (CloudCompare)
+- **Step 6**: DBSCAN clustering
+- **Step 7**: Spatial gridding
+- **Step 8**: Grid cleaning and hole filling
 
 ## Installation
 
@@ -78,19 +78,19 @@ Shared test fixtures provide:
 
 ### Test Files
 
-Each test file corresponds to a pipeline step:
+Each test file corresponds to a pipeline step or audit:
 
 ```
 test_0_make_survey_lists.py     # Survey inventory generation
 test_1_update_survey_lists.py   # Incremental updates
 test_2_crop_files_parallel.py   # PDAL cropping
-test_3_qc_cropped_files.py      # Quality control
-test_4_remove_beach_parallel.py # Beach classification
-test_5_remove_veg_parallel.py   # Vegetation removal
-test_6_m3c2_parallel.py         # M3C2 change detection
-test_7_dbscan_parallel.py       # Clustering
-test_8_make_grids.py            # Spatial gridding
-test_9_clean_fill_grids.py      # Grid post-processing
+test_3_qc_cropped_files.py      # Cropping audit (optional)
+test_4_remove_beach_parallel.py # Step 3: Beach classification
+test_5_remove_veg_parallel.py   # Step 4: Vegetation removal
+test_6_m3c2_parallel.py         # Step 5: M3C2 change detection
+test_7_dbscan_parallel.py       # Step 6: Clustering
+test_8_make_grids.py            # Step 7: Spatial gridding
+test_9_clean_fill_grids.py      # Step 8: Grid post-processing
 ```
 
 ### Test Categories
@@ -106,7 +106,7 @@ Tests are organized into classes by functionality:
 Some tests require external tools installed on the system:
 
 - **PDAL** (Step 2): Tests marked with `@pytest.mark.requires_pdal`
-- **CloudCompare** (Steps 5-6): Tests marked with `@pytest.mark.requires_cloudcompare`
+- **CloudCompare** (Steps 4-5): Tests marked with `@pytest.mark.requires_cloudcompare`
 
 By default, tests that require these dependencies are mocked. To run integration tests with real dependencies:
 

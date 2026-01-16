@@ -30,51 +30,51 @@ The pipeline expects and creates the following directory structure on the server
     │   ├── beach_removal/
     │   │   ├── <Location>_rf_model.joblib   # Random Forest models
     │   │   ├── <Location>_scaler.joblib     # StandardScaler for features
-    │   │   └── classification_reports/      # Beach removal stats (step 4 output)
+    │   │   └── classification_reports/      # Beach removal stats (step 3 output)
     │   ├── canupo/
     │   │   └── *.prm                        # CANUPO vegetation classifiers
     │   ├── m3c2_params/
     │   │   ├── new_params.txt               # Default M3C2 parameters
     │   │   └── m3c2_params_torrey.txt       # Torrey-specific parameters
     │   ├── shape_files/
-    │   │   └── <Location>_<resolution>/     # Shapefiles for gridding (step 8)
+    │   │   └── <Location>_<resolution>/     # Shapefiles for gridding (step 7)
     │   ├── cliff_top_cutoffs/
-    │   │   └── <Location>_Visual_CliffTop_<resolution>.csv  # Step 9 cutoff data
-    │   └── dbscan/                          # DBSCAN reports (step 7 output)
+    │   │   └── <Location>_Visual_CliffTop_<resolution>.csv  # Step 8 cutoff data
+    │   └── dbscan/                          # DBSCAN reports (step 6 output)
     │
     ├── validation/
-    │   └── m3c2/                            # M3C2 reports (step 6 output)
+    │   └── m3c2/                            # M3C2 reports (step 5 output)
     │
     ├── code/pipeline/
     │   ├── reports/
-    │   │   └── QC_Run_YYYYMMDD_HHMMSS/      # QC reports (step 3 output)
+    │   │   └── QC_Run_YYYYMMDD_HHMMSS/      # Cropping QC reports (audit output)
     │   └── daily_reports/
     │       └── daily_report_YYYYMMDD.txt    # Daily update logs (step 1 output)
     │
     └── results/<Location>/                   # ALL processed data outputs
         ├── cropped/                         # Step 2 output
         │   └── *_cropped.las
-        ├── nobeach/                         # Step 4 output
+        ├── nobeach/                         # Step 3 output
         │   └── *_nobeach.las
-        ├── noveg/                           # Step 5 output
+        ├── noveg/                           # Step 4 output
         │   └── *_noveg.las
-        ├── m3c2/                            # Step 6 output
+        ├── m3c2/                            # Step 5 output
         │   └── pipeline_run_YYYYMMDD/
         │       └── DATE1_to_DATE2/
         │           ├── DATE1.las            # Reference cloud
         │           ├── DATE2.las            # Comparison cloud
         │           └── DATE1_to_DATE2_m3c2.las  # M3C2 distances + uncertainty
-        ├── erosion/                         # Step 7 output
+        ├── erosion/                         # Step 6 output
         │   └── DATE1_to_DATE2/
         │       ├── ero_clusters.las         # Clustered erosion points
         │       ├── ero_outliers.las         # Noise points (DBSCAN=-1)
-        │       ├── clusters_<resolution>.csv     # Step 8 output: ClusterIDs grid
-        │       ├── grid_<resolution>.csv         # Step 8 output: M3C2 distance grid
-        │       ├── clusters_<resolution>_cleaned.csv  # Step 9 output
-        │       ├── grid_<resolution>_cleaned.csv      # Step 9 output
-        │       ├── clusters_<resolution>_filled.csv   # Step 9 output (erosion only)
-        │       └── grid_<resolution>_filled.csv       # Step 9 output (erosion only)
-        └── deposition/                      # Step 7 output
+        │       ├── clusters_<resolution>.csv     # Step 7 output: ClusterIDs grid
+        │       ├── grid_<resolution>.csv         # Step 7 output: M3C2 distance grid
+        │       ├── clusters_<resolution>_cleaned.csv  # Step 8 output
+        │       ├── grid_<resolution>_cleaned.csv      # Step 8 output
+        │       ├── clusters_<resolution>_filled.csv   # Step 8 output (erosion only)
+        │       └── grid_<resolution>_filled.csv       # Step 8 output (erosion only)
+        └── deposition/                      # Step 6 output
             └── DATE1_to_DATE2/
                 ├── dep_clusters.las
                 ├── dep_outliers.las
@@ -233,17 +233,17 @@ DETAILS:
 
 ---
 
-## Step 3: Quality Control
+## Audit: Cropped Files QC (Optional)
 
-**Script:** `3_qc_cropped_files.py`
+**Script:** `tests/audits/2_audit_cropping.py`
 
 ### Purpose
 Analyzes cropped files to identify corrupt scans or failed crops based on point count vs file size distributions. Optionally deletes bad files.
 
 ### Usage
 ```bash
-python3 3_qc_cropped_files.py                    # Report only
-python3 3_qc_cropped_files.py --delete_bad_files # Delete files < threshold
+python3 tests/audits/2_audit_cropping.py                    # Report only
+python3 tests/audits/2_audit_cropping.py --delete_bad_files # Delete files < threshold
 ```
 
 ### Input
@@ -283,17 +283,17 @@ MIN_POINT_THRESHOLD = 1000  # Files below this are flagged as SUSPECT
 
 ---
 
-## Step 4: Remove Beach Points
+## Step 3: Remove Beach Points
 
-**Script:** `4_remove_beach_parallel.py`
+**Script:** `3_remove_beach_parallel.py`
 
 ### Purpose
 Uses pre-trained Random Forest classifier to remove beach points based on intensity and geometric features. Includes histogram matching to normalize intensity across sensors.
 
 ### Usage
 ```bash
-python3 4_remove_beach_parallel.py SanElijo
-python3 4_remove_beach_parallel.py SanElijo --n_jobs 5 --replace
+python3 3_remove_beach_parallel.py SanElijo
+python3 3_remove_beach_parallel.py SanElijo --n_jobs 5 --replace
 ```
 
 ### Input
@@ -328,9 +328,9 @@ def match_histograms(source, reference):
 
 ---
 
-## Step 5: Remove Vegetation
+## Step 4: Remove Vegetation
 
-**Script:** `5_remove_veg_parallel.py`
+**Script:** `4_remove_veg_parallel.py`
 
 ### Purpose
 Wraps CloudCompare's CANUPO plugin to classify and remove vegetation based on multi-scale geometric analysis.
@@ -338,10 +338,10 @@ Wraps CloudCompare's CANUPO plugin to classify and remove vegetation based on mu
 ### Usage
 ```bash
 # Requires display environment
-xvfb-run --auto-servernum python3 5_remove_veg_parallel.py SanElijo
+xvfb-run --auto-servernum python3 4_remove_veg_parallel.py SanElijo
 
 # With explicit CloudCompare path
-python3 5_remove_veg_parallel.py SanElijo --cc "/path/to/CloudCompare"
+python3 4_remove_veg_parallel.py SanElijo --cc "/path/to/CloudCompare"
 ```
 
 ### Input
@@ -375,13 +375,13 @@ shift = {
 }
 ```
 
-**IMPORTANT:** These shifts must be consistent across steps 5 and 6 for coordinate alignment.
+**IMPORTANT:** These shifts must be consistent across steps 4 and 5 for coordinate alignment.
 
 ---
 
-## Step 6: M3C2 Change Detection
+## Step 5: M3C2 Change Detection
 
-**Script:** `6_m3c2_parallel.py`
+**Script:** `5_m3c2_parallel.py`
 
 ### Purpose
 Computes Multi-scale Model-to-Model Cloud Comparison (M3C2) normal distances between sequential surveys using CloudCompare.
@@ -389,10 +389,10 @@ Computes Multi-scale Model-to-Model Cloud Comparison (M3C2) normal distances bet
 ### Usage
 ```bash
 # Requires display environment
-xvfb-run --auto-servernum python3 6_m3c2_parallel.py SanElijo
+xvfb-run --auto-servernum python3 5_m3c2_parallel.py SanElijo
 
 # Parallel with 4 workers
-python3 6_m3c2_parallel.py SanElijo --single  # Single-threaded
+python3 5_m3c2_parallel.py SanElijo --single  # Single-threaded
 ```
 
 ### Input
@@ -449,17 +449,17 @@ CloudCompare -silent -auto_save off -c_export_fmt las \
 
 ---
 
-## Step 7: DBSCAN Clustering
+## Step 6: DBSCAN Clustering
 
-**Script:** `7_dbscan_parallel.py`
+**Script:** `6_dbscan_parallel.py`
 
 ### Purpose
 Filters M3C2 results for significant changes, splits into erosion/deposition, applies DBSCAN clustering to identify discrete geomorphic events, and generates visualization reports.
 
 ### Usage
 ```bash
-python3 7_dbscan_parallel.py SanElijo
-python3 7_dbscan_parallel.py SanElijo --eps 0.35 --min_samples 30 --min_change 0.25 --replace
+python3 6_dbscan_parallel.py SanElijo
+python3 6_dbscan_parallel.py SanElijo --eps 0.35 --min_samples 30 --min_change 0.25 --replace
 ```
 
 ### Input
@@ -517,18 +517,18 @@ For each pair, the script calculates:
 
 ---
 
-## Step 8: Spatial Gridding
+## Step 7: Spatial Gridding
 
-**Script:** `8_make_grids.py`
+**Script:** `7_make_grids.py`
 
 ### Purpose
 Aggregates clustered points into vertical bins within geospatial polygons. Creates spatiotemporal grids for time-series analysis.
 
 ### Usage
 ```bash
-python3 8_make_grids.py SanElijo --resolution 10cm
-python3 8_make_grids.py SanElijo --resolution 25cm --replace
-python3 8_make_grids.py SanElijo --resolution 1m
+python3 7_make_grids.py SanElijo --resolution 10cm
+python3 7_make_grids.py SanElijo --resolution 25cm --replace
+python3 7_make_grids.py SanElijo --resolution 1m
 ```
 
 ### Input
@@ -601,9 +601,9 @@ joined = gpd.sjoin(gdf_points, polygon_gdf, how='inner', predicate='within')
 
 ---
 
-## Step 9: Grid Cleaning & Hole Filling
+## Step 8: Grid Cleaning & Hole Filling
 
-**Script:** `9_clean_fill_grids.py`
+**Script:** `8_clean_fill_grids.py`
 
 ### Purpose
 Post-processes grids by:
@@ -615,23 +615,23 @@ Post-processes grids by:
 ### Usage
 ```bash
 # Erosion only (with filling)
-python3 9_clean_fill_grids.py SanElijo --resolution 10cm --erosion --min_volume 2.0
+python3 8_clean_fill_grids.py SanElijo --resolution 10cm --erosion --min_volume 2.0
 
 # Deposition only (no filling)
-python3 9_clean_fill_grids.py SanElijo --resolution 25cm --deposition
+python3 8_clean_fill_grids.py SanElijo --resolution 25cm --deposition
 
 # Both types
-python3 9_clean_fill_grids.py SanElijo --resolution 1m
+python3 8_clean_fill_grids.py SanElijo --resolution 1m
 
 # Skip cleaning, only fill
-python3 9_clean_fill_grids.py SanElijo --resolution 10cm --erosion --skip_cleaning
+python3 8_clean_fill_grids.py SanElijo --resolution 10cm --erosion --skip_cleaning
 
 # Testing mode (no file writes)
-python3 9_clean_fill_grids.py SanElijo --resolution 10cm --testing
+python3 8_clean_fill_grids.py SanElijo --resolution 10cm --testing
 ```
 
 ### Input Files
-1. **Grid CSVs from step 8:**
+1. **Grid CSVs from step 7:**
    - `results/<Location>/erosion/DATE1_to_DATE2/grid_<resolution>.csv`
    - `results/<Location>/erosion/DATE1_to_DATE2/clusters_<resolution>.csv`
    - Same for deposition
@@ -738,13 +738,13 @@ Survey                    Type     CutoffCells  Holes   Vol∆       Fill%
 ```
 Raw LAS
   └─> [Step 2: Crop] ──> cropped/
-       └─> [Step 3: QC] ──> reports/
-       └─> [Step 4: Beach] ──> nobeach/
-            └─> [Step 5: Veg] ──> noveg/
-                 └─> [Step 6: M3C2] ──> m3c2/pipeline_run_*/DATE1_to_DATE2/
-                      └─> [Step 7: DBSCAN] ──> erosion/ & deposition/
-                           └─> [Step 8: Grid] ──> grid_*.csv & clusters_*.csv
-                                └─> [Step 9: Clean/Fill] ──> *_cleaned.csv & *_filled.csv
+       ├─> [Audit: QC] ──> reports/
+       └─> [Step 3: Beach] ──> nobeach/
+            └─> [Step 4: Veg] ──> noveg/
+                 └─> [Step 5: M3C2] ──> m3c2/pipeline_run_*/DATE1_to_DATE2/
+                      └─> [Step 6: DBSCAN] ──> erosion/ & deposition/
+                           └─> [Step 7: Grid] ──> grid_*.csv & clusters_*.csv
+                                └─> [Step 8: Clean/Fill] ──> *_cleaned.csv & *_filled.csv
 ```
 
 ---
@@ -827,10 +827,10 @@ df.to_csv(filepath, na_rep='', float_format='%.6g')
 Most scripts use parallel processing with configurable workers:
 ```python
 # Adjust based on your system
---n_jobs 5        # Steps 4, 7
+--n_jobs 5        # Steps 3, 6
 max_workers=3     # Step 2 (also set in OMP_NUM_THREADS)
-max_workers=4     # Step 6
-workers = cpu_count() // 4  # Step 9
+max_workers=4     # Step 5
+workers = cpu_count() // 4  # Step 8
 ```
 
 ### Thread Control
@@ -842,15 +842,15 @@ os.environ["MKL_NUM_THREADS"] = "3"
 ```
 
 ### Memory Considerations
-- **Step 6 (M3C2):** Most memory-intensive (CloudCompare loads full clouds)
-- **Step 8 (Gridding):** Uses Geopandas spatial joins (optimized)
-- **Step 9 (Filling):** Loads full grid into memory per survey pair
+- **Step 5 (M3C2):** Most memory-intensive (CloudCompare loads full clouds)
+- **Step 7 (Gridding):** Uses Geopandas spatial joins (optimized)
+- **Step 8 (Filling):** Loads full grid into memory per survey pair
 
 ---
 
 ## Troubleshooting Common Issues
 
-### CloudCompare Failures (Steps 5 & 6)
+### CloudCompare Failures (Steps 4 & 5)
 **Symptom:** "Display required" error on headless servers
 
 **Solution:** Use Xvfb (X Virtual Framebuffer)
@@ -867,7 +867,7 @@ xvfb-run --auto-servernum --server-args="-screen 0 1024x768x24" python3 script.p
 ```
 
 ### Grid Shape Mismatches
-**Symptom:** "Shape enforcement error" in step 8
+**Symptom:** "Shape enforcement error" in step 7
 
 **Cause:** Inconsistent polygon shapefiles or elevation ranges
 
@@ -879,7 +879,7 @@ xvfb-run --auto-servernum --server-args="-screen 0 1024x768x24" python3 script.p
 ### Coordinate System Issues
 **Symptom:** Points outside expected bounds after M3C2
 
-**Cause:** Inconsistent `global_shift` between steps 5 and 6
+**Cause:** Inconsistent `global_shift` between steps 4 and 5
 
 **Solution:** Verify shift values match exactly in both scripts for the location
 
@@ -890,19 +890,19 @@ xvfb-run --auto-servernum --server-args="-screen 0 1024x768x24" python3 script.p
 ### Partial Runs
 Most scripts support `--test N` flag to process only N items:
 ```bash
-python3 4_remove_beach_parallel.py SanElijo --test 5
-python3 7_dbscan_parallel.py SanElijo --test 3
+python3 3_remove_beach_parallel.py SanElijo --test 5
+python3 6_dbscan_parallel.py SanElijo --test 3
 ```
 
 ### Dry Run Mode
-Step 9 supports testing without file writes:
+Step 8 supports testing without file writes:
 ```bash
-python3 9_clean_fill_grids.py SanElijo --resolution 10cm --testing
+python3 8_clean_fill_grids.py SanElijo --resolution 10cm --testing
 ```
 
 ### Validation Checks
 After each step, verify:
 1. **File counts:** Match expected survey pairs
 2. **Reports:** Check for errors/failures
-3. **Visualizations:** Review generated plots (steps 3, 7)
+3. **Visualizations:** Review generated plots (audit and step 6)
 4. **Sample data:** Spot-check LAS files in CloudCompare

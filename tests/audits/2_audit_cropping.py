@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-qc_cropped_files.py
+2_audit_cropping.py
 
 Usage:
-    python3 qc_cropped_files.py
-    python3 qc_cropped_files.py --location SanElijo
-    python3 qc_cropped_files.py --delete_bad_files
+    python3 tests/audits/2_audit_cropping.py
+    python3 tests/audits/2_audit_cropping.py --location SanElijo
+    python3 tests/audits/2_audit_cropping.py --delete_bad_files
 
 Description:
     Scans the results/<location>/cropped/ directories for all locations.
@@ -119,8 +119,18 @@ def compare_cropped_to_survey_list(location, project_root, cropped_files, output
     missing_source_rows = []
 
     for row in survey_df.to_dict(orient="records"):
-        method = str(row.get("method", "")).strip()
-        survey_raw = str(row.get("path", "")).strip()
+        method_val = row.get("method", "")
+        survey_val = row.get("path", "")
+        if pd.isna(method_val) or pd.isna(survey_val):
+            missing_source_rows.append({
+                "Location": location,
+                "Survey_Path": "",
+                "Method": "",
+                "Pattern": ""
+            })
+            continue
+        method = str(method_val).strip()
+        survey_raw = str(survey_val).strip()
         if not method or not survey_raw:
             missing_source_rows.append({
                 "Location": location,
@@ -177,17 +187,27 @@ def compare_cropped_to_survey_list(location, project_root, cropped_files, output
         missing_path = os.path.join(output_dir, f"survey_list_missing_cropped_{location}.csv")
         pd.DataFrame(missing_rows).to_csv(missing_path, index=False)
         print(f"[INFO] Missing cropped files saved to: {missing_path}")
+        summary.append("Missing cropped files:")
+        summary.extend([f"- {name}" for name in missing_cropped])
+        summary.append(f"Missing cropped CSV: {missing_path}")
 
     if extra_cropped:
         extra_rows = [{"Location": location, "Filename": name} for name in extra_cropped]
         extra_path = os.path.join(output_dir, f"survey_list_extra_cropped_{location}.csv")
         pd.DataFrame(extra_rows).to_csv(extra_path, index=False)
         print(f"[INFO] Extra cropped files saved to: {extra_path}")
+        summary.append("Extra cropped files:")
+        summary.extend([f"- {name}" for name in extra_cropped])
+        summary.append(f"Extra cropped CSV: {extra_path}")
 
     if missing_source_rows:
         missing_source_path = os.path.join(output_dir, f"survey_list_missing_source_{location}.csv")
         pd.DataFrame(missing_source_rows).to_csv(missing_source_path, index=False)
         print(f"[INFO] Survey list rows missing source LAS saved to: {missing_source_path}")
+        summary.append("Survey rows missing source LAS:")
+        for row in missing_source_rows:
+            summary.append(f"- {row.get('Survey_Path', '')} ({row.get('Method', '')})")
+        summary.append(f"Missing source CSV: {missing_source_path}")
 
     return summary
 
@@ -205,25 +225,25 @@ def plot_results(df, output_dir, delete_mode):
 
     # --- 1. Scatter: Points vs Size ---
     plt.figure(figsize=(12, 8))
-    
+
     # Plot Good Data (Standard)
     if not good_data.empty:
         sns.scatterplot(
-            x="Size_MB", y="Point_Count", hue="Location", 
-            data=good_data, palette=good_palette, alpha=0.6, s=50
+            x="Size_MB", y="Point_Count", hue="Location",
+            data=good_data, palette=good_palette, alpha=0.6, s=50, legend='brief'
         )
 
     # Overlay Bad Data (Highlighted)
     if not bad_data.empty:
         plt.scatter(
-            bad_data["Size_MB"], bad_data["Point_Count"], 
+            bad_data["Size_MB"], bad_data["Point_Count"],
             color=bad_color, marker='X', s=100, label=bad_label, zorder=10
         )
 
     plt.title(f"QC Sanity Check: Point Count vs File Size\n(Threshold: {MIN_POINT_THRESHOLD} points)")
     plt.xlabel("File Size (MB)")
     plt.ylabel("Point Count")
-    plt.legend(loc='upper left', bbox_to_anchor=(1, 1))
+    plt.legend(loc='upper left', bbox_to_anchor=(1, 1), frameon=True)
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "QC_Points_vs_Size.png"), dpi=150)
     plt.close()
@@ -236,18 +256,15 @@ def plot_results(df, output_dir, delete_mode):
     
     # Strip plot for GOOD data
     if not good_data.empty:
-        sns.stripplot(x="Location", y="Size_MB", data=good_data, palette=good_palette, alpha=0.5, size=3)
-    
+        sns.stripplot(x="Location", y="Size_MB", data=good_data, palette=good_palette, alpha=0.5, size=3, legend=False)
+
     # Strip plot for BAD data (Highlighted)
     if not bad_data.empty:
         sns.stripplot(
-            x="Location", y="Size_MB", data=bad_data, 
+            x="Location", y="Size_MB", data=bad_data,
             color=bad_color, marker="X", size=8, jitter=0.2, label=bad_label, zorder=10
         )
-        # Handle legend manually to avoid duplicate entries from stripplot
-        handles, labels = plt.gca().get_legend_handles_labels()
-        # Filter for just the bad label if needed, or rely on distinct styling
-        plt.legend(handles[-1:], labels[-1:], loc='upper right')
+        plt.legend(loc='upper right')
 
     plt.title(f"Distribution of Cropped File Sizes\n(Red X = {bad_label})")
     plt.ylabel("File Size (MB)")

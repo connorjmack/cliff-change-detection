@@ -39,7 +39,7 @@ The pipeline expects a specific directory structure on shared storage:
 
 ```
 /LidarProcessing/LidarProcessingCliffs/  (this repo)
-├── code/pipeline/           # Main processing scripts (0-9 sequential)
+├── code/pipeline/           # Main processing scripts (0-8 sequential)
 ├── results/<Location>/      # Output directories (e.g., DelMar, SanElijo)
 │   ├── cropped/
 │   ├── nobeach/
@@ -64,13 +64,17 @@ The pipeline expects a specific directory structure on shared storage:
 
 ## Pipeline Execution Sequence
 
-The pipeline consists of numbered scripts (0-9) that must be run sequentially. Each step transforms data for the next.
+The pipeline consists of numbered scripts (0-8) that must be run sequentially. Each step transforms data for the next.
 
-### Step 0-1: Survey Inventory
+### Step 0: Create Survey Lists
 ```bash
 # Initial creation of survey list
 python3 code/pipeline/0_make_survey_lists.py --location SanElijo
+python3 code/pipeline/0_make_survey_lists.py --all
+```
 
+### Step 1: Update Survey Lists
+```bash
 # Update with new surveys
 python3 code/pipeline/1_update_survey_lists.py --location SanElijo
 # or update all locations
@@ -83,57 +87,57 @@ python3 code/pipeline/2_crop_files_parallel.py --location SanElijo --replace
 ```
 Uses PDAL to crop raw LAS files to MOP line ranges defined in KML.
 
-### Step 3: Quality Control
+### Audit: Cropped Files QC (Optional)
 ```bash
 # Generate QC report
-python3 code/pipeline/3_qc_cropped_files.py
+python3 tests/audits/2_audit_cropping.py
 
 # Remove bad files below threshold
-python3 code/pipeline/3_qc_cropped_files.py --delete_bad_files
+python3 tests/audits/2_audit_cropping.py --delete_bad_files
 ```
 Generates point-count vs file-size plots to identify corrupt scans.
 
-### Step 4: Beach Removal
+### Step 3: Beach Removal
 ```bash
-python3 code/pipeline/4_remove_beach_parallel.py SanElijo --n_jobs 5
+python3 code/pipeline/3_remove_beach_parallel.py SanElijo --n_jobs 5
 ```
 Random Forest classifier using intensity/geometry features. Includes histogram matching to normalize intensity across sensors.
 
-### Step 5: Vegetation Removal
+### Step 4: Vegetation Removal
 ```bash
-python3 code/pipeline/5_remove_veg_parallel.py SanElijo --cc "/path/to/CloudCompare"
+python3 code/pipeline/4_remove_veg_parallel.py SanElijo --cc "/path/to/CloudCompare"
 ```
 Uses CloudCompare's CANUPO plugin for geometric scale-based classification.
 
 **Important**: Requires display environment. On headless servers:
 ```bash
-xvfb-run --auto-servernum python3 code/pipeline/5_remove_veg_parallel.py SanElijo
+xvfb-run --auto-servernum python3 code/pipeline/4_remove_veg_parallel.py SanElijo
 ```
 
-### Step 6: M3C2 Change Detection
+### Step 5: M3C2 Change Detection
 ```bash
-python3 code/pipeline/6_m3c2_parallel.py SanElijo --cc "/path/to/CloudCompare"
+python3 code/pipeline/5_m3c2_parallel.py SanElijo --cc "/path/to/CloudCompare"
 ```
 Calculates normal surface change between sequential surveys. Computationally intensive.
 
 **Important**: Also requires display environment (use xvfb-run on headless systems).
 
-### Step 7: DBSCAN Clustering
+### Step 6: DBSCAN Clustering
 ```bash
-python3 code/pipeline/7_dbscan_parallel.py SanElijo --eps 0.35 --min_samples 30 --min_change 0.25
+python3 code/pipeline/6_dbscan_parallel.py SanElijo --eps 0.35 --min_samples 30 --min_change 0.25
 ```
 Filters M3C2 results for significant change, splits into Erosion/Deposition, clusters with DBSCAN, generates visualization reports.
 
-### Step 8: Spatial Gridding
+### Step 7: Spatial Gridding
 ```bash
-python3 code/pipeline/8_make_grids.py SanElijo --resolution 10cm --replace
+python3 code/pipeline/7_make_grids.py SanElijo --resolution 10cm --replace
 # Available: 10cm, 25cm, 1m
 ```
 Aggregates clustered points into vertical bins within geospatial polygons using Geopandas spatial joins.
 
-### Step 9: Grid Cleaning & Hole Filling
+### Step 8: Grid Cleaning & Hole Filling
 ```bash
-python3 code/pipeline/9_clean_fill_grids.py SanElijo --resolution 10cm --erosion --min_volume 2.0
+python3 code/pipeline/8_clean_fill_grids.py SanElijo --resolution 10cm --erosion --min_volume 2.0
 ```
 Applies cliff-top cutoffs and fills occlusion holes using Alpha Shapes and interpolation to correct volume estimates.
 
@@ -201,17 +205,17 @@ All pipeline steps generate detailed CSV reports and PNG visualizations:
 - `validation/m3c2/` - Change detection validation
 
 ### Data Flow
-Raw Survey → Cropped → QC → Beach Removed → Vegetation Removed → M3C2 → DBSCAN Clustered → Gridded → Cleaned/Filled
+Raw Survey → Cropped → (Audit QC, optional) → Beach Removed → Vegetation Removed → M3C2 → DBSCAN Clustered → Gridded → Cleaned/Filled
 
 Each stage reads from previous stage output directory and writes to next stage directory within `results/<Location>/`.
 
 ## Important Implementation Details
 
 ### Histogram Matching
-Beach removal (step 4) includes histogram matching to normalize intensity values across different LiDAR instruments, enabling consistent Random Forest classification.
+Beach removal (step 3) includes histogram matching to normalize intensity values across different LiDAR instruments, enabling consistent Random Forest classification.
 
 ### Spatial Aggregation
-Gridding (step 8) uses optimized Geopandas spatial joins (`sjoin`) with pandas aggregation for efficiency. Calculates:
+Gridding (step 7) uses optimized Geopandas spatial joins (`sjoin`) with pandas aggregation for efficiency. Calculates:
 - Median absolute M3C2 distance
 - Mode of ClusterID
 - RMS of pointwise distance uncertainty
@@ -223,7 +227,7 @@ The pipeline supports multiple grid resolutions (10cm, 25cm, 1m) for sensitivity
 
 Run partial tests using `--test N` flag on most scripts to process only N files:
 ```bash
-python3 code/pipeline/4_remove_beach_parallel.py SanElijo --test 10
+python3 code/pipeline/3_remove_beach_parallel.py SanElijo --test 10
 ```
 
 Always check generated reports and visualizations after each pipeline stage to validate results before proceeding.
