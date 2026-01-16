@@ -34,7 +34,7 @@ RESULTS_DIR = os.path.join(BASE, 'results')
 FIGURES_DIR = os.path.join(BASE, 'figures', 'raw_grid_vis')
 
 LOCATIONS = ['DelMar', 'SanElijo', 'Solana', 'Encinitas', 'Torrey', 'Blacks']
-RESOLUTIONS = ['10cm', '25cm', '100cm']
+RESOLUTIONS = ['10cm', '25cm', '1m']
 TYPES = ['erosion', 'deposition']
 
 # Font sizes
@@ -49,7 +49,7 @@ def get_resolution_value(resolution):
         return 0.10
     elif resolution == '25cm':
         return 0.25
-    elif resolution == '100cm':
+    elif resolution == '1m':
         return 1.0
     return 0.25
 
