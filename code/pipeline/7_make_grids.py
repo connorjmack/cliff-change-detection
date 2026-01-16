@@ -1,4 +1,25 @@
 #!/usr/bin/env python3
+"""
+7_make_grids.py
+
+Converts DBSCAN clustered point clouds into spatiotemporal grids.
+
+Directory structure:
+  results/<Location>/erosion/<DATE>/<resolution>/
+  results/<Location>/deposition/<DATE>/<resolution>/
+
+Outputs per survey pair (in resolution subdirectory):
+  - {date}_{prefix}_grid_{res}.csv        : Median M3C2 distances
+  - {date}_{prefix}_clusters_{res}.csv    : Mode ClusterID
+  - {date}_{prefix}_stats_{res}.npz       : Data quality metrics (3 arrays)
+      * uncertainty: RMS of pointwise uncertainties
+      * counts: Number of points per cell
+      * variance: Variance of M3C2 values per cell
+      * polygon_ids: Row labels (Polygon IDs)
+      * elevation_labels: Column labels (elevation bins)
+
+Grid dimensions: (n_polygons x n_elevation_bins)
+"""
 import os
 import platform
 import argparse
@@ -24,17 +45,18 @@ plt.rcParams['ytick.labelsize'] = 9
 plt.rcParams['legend.fontsize'] = 9
 sns.set_style("whitegrid")
 
-def makeGrid(pathin, pathout_m3c2, pathout_cluster, pathout_uncertainty,
+def makeGrid(pathin, pathout_m3c2, pathout_cluster, pathout_stats,
              polys, res, height, overwrite=False):
     """
     Reads in a LAS file and a shapefile of polygons, calculates:
       - median absolute M3C2 distance
       - mode of ClusterID
-      - RMS of pointwise distance uncertainty
+      - data quality statistics (uncertainty, point counts, variance)
     for points within each polygon for vertical bins.
-    
+
     Optimized to use Geopandas Spatial Joins (sjoin) and Pandas Aggregation.
     STRICT SHAPE ENFORCEMENT: Ensures all output CSVs have identical Row and Column dimensions.
+    Stats are saved as NPZ with uncertainty, counts, and variance arrays.
     """
     start_time = time.time()
     stats = {}
@@ -119,12 +141,12 @@ def makeGrid(pathin, pathout_m3c2, pathout_cluster, pathout_uncertainty,
 
     # 6. AGGREGATION
     print("Aggregating statistics...")
-    
+
     def mode_func(x):
         # Safer mode calculation
         m = x.mode()
         return m.iloc[0] if not m.empty else np.nan
-        
+
     def rms_func(x):
         return np.sqrt(np.mean(x**2))
 
@@ -132,7 +154,9 @@ def makeGrid(pathin, pathout_m3c2, pathout_cluster, pathout_uncertainty,
     grp = joined.groupby(['Polygon_ID','z_bin'], observed=False).agg({
         'M3C2': 'median',
         'ClusterID': mode_func,
-        'Uncertainty': rms_func
+        'Uncertainty': rms_func,
+        'M3C2_count': ('M3C2', 'count'),      # Point count per cell
+        'M3C2_variance': ('M3C2', 'var')      # Variance per cell
     })
 
     # 7. PIVOT & SAVE (STRICT SHAPE ENFORCEMENT)
@@ -146,10 +170,10 @@ def makeGrid(pathin, pathout_m3c2, pathout_cluster, pathout_uncertainty,
             df_pivot = pd.DataFrame()
 
         # --- SHAPE ENFORCEMENT LOGIC ---
-        
+
         # 1. Define the EXACT expected columns based on height and resolution
         expected_cols = [f"{prefix}_{lbl}m" for lbl in z_labels]
-        
+
         # 2. Rename existing columns to match format (e.g. 0.10 -> M3C2_0.10m)
         # Note: df_pivot columns are currently just the z_labels (strings)
         if not df_pivot.empty:
@@ -159,19 +183,64 @@ def makeGrid(pathin, pathout_m3c2, pathout_cluster, pathout_uncertainty,
         # This forces the DataFrame to have exactly 'all_ids' rows and 'expected_cols' columns.
         # Missing data is filled with NaN.
         df_pivot = df_pivot.reindex(index=all_ids, columns=expected_cols)
-        
+
         # 4. Reset index for saving
         df_pivot = df_pivot.reset_index()
-        
+
         if os.path.exists(output_path) and not overwrite:
             print(f"Skipping existing: {output_path}")
         else:
             df_pivot.to_csv(output_path, index=False)
             print(f"Wrote: {output_path} (Shape: {df_pivot.shape})")
 
+    def save_stats_npz(uncertainty_col, count_col, variance_col, output_path):
+        """Save uncertainty, counts, and variance as NPZ file."""
+        if os.path.exists(output_path) and not overwrite:
+            print(f"Skipping existing: {output_path}")
+            return
+
+        # Pivot each metric
+        if len(joined) > 0:
+            unc_pivot = grp[uncertainty_col].unstack()
+            cnt_pivot = grp[count_col].unstack()
+            var_pivot = grp[variance_col].unstack()
+        else:
+            unc_pivot = pd.DataFrame()
+            cnt_pivot = pd.DataFrame()
+            var_pivot = pd.DataFrame()
+
+        # Shape enforcement for all three arrays
+        expected_cols = z_labels  # Just the numeric labels, no prefix for NPZ
+
+        for df_pivot in [unc_pivot, cnt_pivot, var_pivot]:
+            if not df_pivot.empty:
+                # Reindex to ensure consistent shape
+                df_pivot = df_pivot.reindex(index=all_ids, columns=expected_cols)
+
+        # Final reindexing with fill
+        unc_pivot = unc_pivot.reindex(index=all_ids, columns=expected_cols)
+        cnt_pivot = cnt_pivot.reindex(index=all_ids, columns=expected_cols)
+        var_pivot = var_pivot.reindex(index=all_ids, columns=expected_cols)
+
+        # Convert to numpy arrays (NaN will be preserved)
+        unc_array = unc_pivot.values
+        cnt_array = cnt_pivot.values
+        var_array = var_pivot.values
+
+        # Save as NPZ with named arrays
+        np.savez_compressed(
+            output_path,
+            uncertainty=unc_array,
+            counts=cnt_array,
+            variance=var_array,
+            polygon_ids=all_ids.values,
+            elevation_labels=np.array(z_labels)
+        )
+        print(f"Wrote: {output_path} (Shape: {unc_array.shape}, 3 arrays + metadata)")
+
     save_pivot('M3C2', pathout_m3c2, 'M3C2')
     save_pivot('ClusterID', pathout_cluster, 'ClusterID')
-    save_pivot('Uncertainty', pathout_uncertainty, 'Uncertainty')
+    save_stats_npz('Uncertainty', 'M3C2_count', 'M3C2_variance', pathout_stats)
     
     stats['processing_time_sec'] = time.time() - start_time
     return stats
@@ -205,34 +274,37 @@ def process_single_survey(task_dict):
         mode = task_dict['mode']
         dt = task_dict['date']
         overwrite = task_dict['overwrite']
-        
+
         # Check outputs first
-        outputs = (task_dict['grid_csv'], task_dict['cluster_csv'], task_dict['uncert_csv'])
+        outputs = (task_dict['grid_csv'], task_dict['cluster_csv'], task_dict['stats_npz'])
         if not overwrite and all(os.path.exists(p) for p in outputs):
             return None
-        
+
         # Check input
         if not os.path.isfile(task_dict['las_in']):
             return None
-        
+
+        # Create resolution subdirectory if it doesn't exist
+        os.makedirs(task_dict['out_base'], exist_ok=True)
+
         print(f"[Worker PID {os.getpid()}] Processing {mode}/{dt}")
         stats = makeGrid(
             task_dict['las_in'],
             task_dict['grid_csv'],
             task_dict['cluster_csv'],
-            task_dict['uncert_csv'],
+            task_dict['stats_npz'],
             task_dict['shp'],
             task_dict['res'],
             task_dict['height'],
             overwrite=overwrite
         )
-        
+
         # Add metadata
         stats['mode'] = mode
         stats['date'] = dt
         stats['location'] = task_dict['location']
         return stats
-        
+
     except Exception as e:
         print(f"ERROR in {task_dict.get('mode','?')}/{task_dict.get('date','?')}: {e}")
         return None
@@ -419,16 +491,19 @@ def main():
 
         prefix = "dep" if mode=="deposition" else "ero"
         for dt in dates:
-            out_base = os.path.join(mode_dir,dt)
-            las_in   = os.path.join(out_base,"dbscan.las")
-            
+            date_dir = os.path.join(mode_dir, dt)
+            # Create resolution subdirectory
+            out_base = os.path.join(date_dir, args.resolution)
+            las_in   = os.path.join(date_dir, "dbscan.las")
+
             task = {
                 'mode': mode,
                 'date': dt,
                 'las_in': las_in,
+                'out_base': out_base,
                 'grid_csv': os.path.join(out_base, f"{dt}_{prefix}_grid_{label}.csv"),
                 'cluster_csv': os.path.join(out_base, f"{dt}_{prefix}_clusters_{label}.csv"),
-                'uncert_csv': os.path.join(out_base, f"{dt}_{prefix}_uncertainty_{label}.csv"),
+                'stats_npz': os.path.join(out_base, f"{dt}_{prefix}_stats_{label}.npz"),
                 'shp': shp,
                 'res': args.res,
                 'height': heights[args.location],
