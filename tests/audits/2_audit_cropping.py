@@ -225,25 +225,25 @@ def plot_results(df, output_dir, delete_mode):
 
     # --- 1. Scatter: Points vs Size ---
     plt.figure(figsize=(12, 8))
-    
+
     # Plot Good Data (Standard)
     if not good_data.empty:
         sns.scatterplot(
-            x="Size_MB", y="Point_Count", hue="Location", 
-            data=good_data, palette=good_palette, alpha=0.6, s=50
+            x="Size_MB", y="Point_Count", hue="Location",
+            data=good_data, palette=good_palette, alpha=0.6, s=50, legend='brief'
         )
 
     # Overlay Bad Data (Highlighted)
     if not bad_data.empty:
         plt.scatter(
-            bad_data["Size_MB"], bad_data["Point_Count"], 
+            bad_data["Size_MB"], bad_data["Point_Count"],
             color=bad_color, marker='X', s=100, label=bad_label, zorder=10
         )
 
     plt.title(f"QC Sanity Check: Point Count vs File Size\n(Threshold: {MIN_POINT_THRESHOLD} points)")
     plt.xlabel("File Size (MB)")
     plt.ylabel("Point Count")
-    plt.legend(loc='upper left', bbox_to_anchor=(1, 1))
+    plt.legend(loc='upper left', bbox_to_anchor=(1, 1), frameon=True)
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "QC_Points_vs_Size.png"), dpi=150)
     plt.close()
@@ -256,18 +256,15 @@ def plot_results(df, output_dir, delete_mode):
     
     # Strip plot for GOOD data
     if not good_data.empty:
-        sns.stripplot(x="Location", y="Size_MB", data=good_data, palette=good_palette, alpha=0.5, size=3)
-    
+        sns.stripplot(x="Location", y="Size_MB", data=good_data, palette=good_palette, alpha=0.5, size=3, legend=False)
+
     # Strip plot for BAD data (Highlighted)
     if not bad_data.empty:
         sns.stripplot(
-            x="Location", y="Size_MB", data=bad_data, 
+            x="Location", y="Size_MB", data=bad_data,
             color=bad_color, marker="X", size=8, jitter=0.2, label=bad_label, zorder=10
         )
-        # Handle legend manually to avoid duplicate entries from stripplot
-        handles, labels = plt.gca().get_legend_handles_labels()
-        # Filter for just the bad label if needed, or rely on distinct styling
-        plt.legend(handles[-1:], labels[-1:], loc='upper right')
+        plt.legend(loc='upper right')
 
     plt.title(f"Distribution of Cropped File Sizes\n(Red X = {bad_label})")
     plt.ylabel("File Size (MB)")
