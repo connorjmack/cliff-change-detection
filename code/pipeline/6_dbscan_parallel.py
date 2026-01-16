@@ -130,15 +130,29 @@ def run_dbscan_file(las_path, erosion_dir, deposition_dir, eps, min_samples,
         sig_field = None
         for field in las.point_format.dimension_names:
             field_lower = field.lower()
-            if 'significant' in field_lower or 'sig_change' in field_lower:
+            if 'significant' in field_lower or 'sig_change' in field_lower or 'sigchange' in field_lower:
                 sig_field = field
                 break
-        
+
+        # Also check for exact common CloudCompare M3C2 field names
         if sig_field is None:
-            print(f"[WARN] {base_name}: No 'significant_change' field found!")
-            print(f"[WARN] Processing ALL points (no significance filtering)")
-            sig_mask = np.ones(len(las.points), dtype=bool)
+            common_names = ['significant change', 'Significant change', 'significant_change',
+                          'SignificantChange', 'sig change', 'sig_change']
+            for name in common_names:
+                if name in las.point_format.dimension_names:
+                    sig_field = name
+                    break
+
+        if sig_field is None:
+            # CRITICAL: Don't process without significance filtering - this defeats the purpose
+            raise ValueError(
+                f"No significance field found in {base_name}!\n"
+                f"Available fields: {las.point_format.dimension_names}\n"
+                f"M3C2 must be configured to output 'significant change' field.\n"
+                f"Cannot proceed without significance filtering."
+            )
         else:
+            print(f"[INFO] Using significance field: '{sig_field}'")
             sig_values = getattr(las, sig_field)
             sig_mask = sig_values == 1
         

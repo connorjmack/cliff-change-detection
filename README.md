@@ -135,17 +135,35 @@ python3 4_remove_veg_parallel.py SanElijo --cc "/path/to/CloudCompare"
 
 ### 5\. Change Detection (M3C2)
 
-**Script:** `5_m3c2_parallel.py`  
+**Script:** `5_m3c2_parallel.py`
 Calculates normal surface change between sequential surveys. *Note: This step is computationally intensive and relies on CloudCompare*.
 
+**Output Format:** Creates timestamped `pipeline_run_YYYYMMDD/` subdirectories containing date-pair folders with M3C2 results. CloudCompare output is suppressed for clean single-line progress tracking.
+
 ```bash
+# Basic usage
 python3 5_m3c2_parallel.py SanElijo --cc "/path/to/CloudCompare"
+
+# Replace existing outputs
+python3 5_m3c2_parallel.py SanElijo --replace
+
+# On headless servers (required for CloudCompare)
+xvfb-run -a python3 5_m3c2_parallel.py SanElijo --replace
+
+# Process all locations with xvfb
+for loc in DelMar Solana Encinitas SanElijo Torrey Blacks; do
+  xvfb-run -a python3 5_m3c2_parallel.py $loc --replace
+done
 ```
 
 ### 6\. Clustering (DBSCAN)
 
-**Script:** `6_dbscan_parallel.py`  
+**Script:** `6_dbscan_parallel.py`
 Filters M3C2 results for significant change, splits data into Erosion/Deposition, and clusters points using DBSCAN. Generates detailed visualization reports.
+
+**Critical Feature:** Automatically finds the most recent `pipeline_run_*` folder from Step 5. **Only processes points with significant M3C2 changes** - the script will fail with a clear error if the M3C2 significance field is not found, preventing accidental processing of all points.
+
+**Important:** M3C2 parameter files must be configured to output the 'significant change' field.
 
 ```bash
 python3 6_dbscan_parallel.py SanElijo --eps 0.35 --min_samples 30 --min_change 0.25
@@ -186,8 +204,15 @@ Some location-specific parameters are defined in dictionaries within the scripts
 Scripts utilizing CloudCompare (`4_remove_veg` and `5_m3c2`) require a display environment. On headless Linux servers (e.g., HPC clusters), wrap execution with `xvfb` (X Virtual Framebuffer):
 
 ```bash
-xvfb-run --auto-servernum python3 5_m3c2_parallel.py SanElijo
+# Use -a (auto-servernum) for automatic display assignment
+xvfb-run -a python3 5_m3c2_parallel.py SanElijo --replace
+
+# Or use the explicit form with server arguments
+xvfb-run --auto-servernum --server-args="-screen 0 1024x768x24" \
+  python3 5_m3c2_parallel.py SanElijo --replace
 ```
+
+**Note:** Step 5 (M3C2) now suppresses verbose CloudCompare output, showing only clean single-line progress per survey pair.
 
 ### Reporting
 

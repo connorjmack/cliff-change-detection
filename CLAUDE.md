@@ -116,17 +116,47 @@ xvfb-run --auto-servernum python3 code/pipeline/4_remove_veg_parallel.py SanElij
 
 ### Step 5: M3C2 Change Detection
 ```bash
+# Basic usage
 python3 code/pipeline/5_m3c2_parallel.py SanElijo --cc "/path/to/CloudCompare"
+
+# With replace flag to overwrite existing outputs
+python3 code/pipeline/5_m3c2_parallel.py SanElijo --replace
+
+# On headless servers (required)
+xvfb-run -a python3 code/pipeline/5_m3c2_parallel.py SanElijo --replace
+
+# Process all locations
+for loc in DelMar Solana Encinitas SanElijo Torrey Blacks; do
+  xvfb-run -a python3 code/pipeline/5_m3c2_parallel.py $loc --replace
+done
 ```
 Calculates normal surface change between sequential surveys. Computationally intensive.
 
-**Important**: Also requires display environment (use xvfb-run on headless systems).
+**Output Structure:** Creates timestamped `pipeline_run_YYYYMMDD/` subdirectories within `results/<Location>/m3c2/`, each containing date-pair folders with M3C2 results.
+
+**Verbosity:** CloudCompare output is suppressed. Displays clean single-line progress per survey pair:
+```
+[M3C2] 20170301_to_20170323... OK (123.45s)
+[M3C2] 20170323_to_20170411... OK (98.32s)
+```
+
+**Important**: Requires display environment (use `xvfb-run -a` on headless systems).
 
 ### Step 6: DBSCAN Clustering
 ```bash
 python3 code/pipeline/6_dbscan_parallel.py SanElijo --eps 0.35 --min_samples 30 --min_change 0.25
 ```
 Filters M3C2 results for significant change, splits into Erosion/Deposition, clusters with DBSCAN, generates visualization reports.
+
+**Automatic Input Detection:** Automatically finds and processes the most recent `pipeline_run_*` folder from Step 5.
+
+**Critical Significance Filtering:**
+- **Only processes points with significant M3C2 changes** (based on Level of Detection)
+- Searches for significance field with multiple name variations: 'significant change', 'Significant change', 'significant_change', 'SignificantChange', etc.
+- **Fails with clear error** if significance field is not found (prevents accidental processing of all points)
+- Displays which significance field is being used: `[INFO] Using significance field: 'significant change'`
+
+**Important:** Ensure M3C2 parameter files (`utilities/m3c2_params/*.txt`) are configured to output the significance field.
 
 ### Step 7: Spatial Gridding
 ```bash
@@ -205,9 +235,11 @@ All pipeline steps generate detailed CSV reports and PNG visualizations:
 - `validation/m3c2/` - Change detection validation
 
 ### Data Flow
-Raw Survey → Cropped → (Audit QC, optional) → Beach Removed → Vegetation Removed → M3C2 → DBSCAN Clustered → Gridded → Cleaned/Filled
+Raw Survey → Cropped → (Audit QC, optional) → Beach Removed → Vegetation Removed → M3C2 (`pipeline_run_YYYYMMDD/`) → DBSCAN Clustered → Gridded → Cleaned/Filled
 
 Each stage reads from previous stage output directory and writes to next stage directory within `results/<Location>/`.
+
+**Pipeline Run Tracking:** Step 5 (M3C2) creates timestamped `pipeline_run_YYYYMMDD/` subdirectories. Step 6 (DBSCAN) automatically processes the most recent pipeline run, allowing for reprocessing with different parameters while preserving historical runs.
 
 ## Important Implementation Details
 
