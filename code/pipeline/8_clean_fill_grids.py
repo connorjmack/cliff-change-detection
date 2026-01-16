@@ -116,19 +116,38 @@ def save_csv_data(filepath, data, header_labels, row_labels, testing, replace):
 def find_shapefile(base_util, location, poly_res):
     """
     Locate the shapefile for a given location and polygon resolution.
+
+    Expected naming pattern: {Location}Polygon[e]s{MOP1}to{MOP2}at{resolution}
+    Example: SanElijoPolygones683to708at25cm
     """
     sf_root = os.path.join(base_util, 'shape_files')
     if not os.path.isdir(sf_root):
         raise FileNotFoundError(f"Shape files directory not found: {sf_root}")
 
+    # Pattern: location name + "Polygon" (may have 'e' or 's') + MOP range + "at" + resolution
+    # Case-insensitive matching
     candidates = [
         d for d in os.listdir(sf_root)
         if d.lower().startswith(location.lower())
-           and poly_res.lower() in d.lower()
+           and 'polygon' in d.lower()
+           and f'at{poly_res}'.lower() in d.lower()
            and os.path.isdir(os.path.join(sf_root, d))
     ]
+
     if not candidates:
-        raise FileNotFoundError(f"No folder for '{location}' with '{poly_res}' under {sf_root}")
+        # List available folders for debugging
+        available = [d for d in os.listdir(sf_root) if os.path.isdir(os.path.join(sf_root, d))]
+        raise FileNotFoundError(
+            f"No shapefile folder found for location='{location}' resolution='{poly_res}'.\n"
+            f"Searched in: {sf_root}\n"
+            f"Available folders: {available}"
+        )
+
+    # If multiple matches, prefer exact match
+    if len(candidates) > 1:
+        print(f"Warning: Multiple shapefile folders found: {candidates}")
+        print(f"Using first match: {candidates[0]}")
+
     fld = candidates[0]
     shp_path = os.path.join(sf_root, fld, fld + '.shp')
     if not os.path.isfile(shp_path):
