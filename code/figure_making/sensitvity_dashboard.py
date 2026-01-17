@@ -64,6 +64,36 @@ def parse_dates_from_folder(folder_name):
         return d1, d2
     return None, None
 
+def resolution_folder_from_tag(file_tag):
+    """Map file tags to expected subfolder names."""
+    if file_tag == "100cm":
+        return "1m"
+    return file_tag
+
+def resolve_grid_file(folder_path, interval, file_tag, res_label):
+    """Find a filled erosion grid, preferring resolution subfolders."""
+    subfolder = resolution_folder_from_tag(file_tag)
+    label_short = res_label.split()[0]  # e.g., "10cm", "25cm", "1m"
+    candidate_dirs = [
+        os.path.join(folder_path, subfolder),
+        os.path.join(folder_path, label_short),
+        folder_path,
+    ]
+
+    tag_candidates = [file_tag]
+    for tag in (label_short, "1m"):
+        if tag not in tag_candidates and tag in ("1m", label_short):
+            tag_candidates.append(tag)
+
+    for base in candidate_dirs:
+        if not os.path.isdir(base):
+            continue
+        for tag in tag_candidates:
+            grid_file = os.path.join(base, f"{interval}_ero_grid_{tag}_filled.csv")
+            if os.path.exists(grid_file):
+                return grid_file
+    return None
+
 def calculate_main_volume(grid_path, res_val):
     """Calculates total volume sum from a grid file."""
     cell_area = res_val * res_val
@@ -106,7 +136,7 @@ def load_dashboard_data(location):
         
         data_found_for_interval = False
         for res_label, res_val, file_tag in RESOLUTIONS_TO_TEST:
-            grid_file = os.path.join(folder_path, f"{interval}_ero_grid_{file_tag}_filled.csv")
+            grid_file = resolve_grid_file(folder_path, interval, file_tag, res_label)
             vol = calculate_main_volume(grid_file, res_val)
             
             if vol is not None:

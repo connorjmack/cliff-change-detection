@@ -45,6 +45,23 @@ def parse_dates(folder_name):
         return datetime.strptime(match.group(1), '%Y%m%d'), datetime.strptime(match.group(2), '%Y%m%d')
     return None, None
 
+def resolve_interval_paths(interval_dir, interval):
+    """Return erosion grid/cluster paths, preferring resolution subfolders."""
+    candidate_dirs = [os.path.join(interval_dir, RESOLUTION), interval_dir]
+    file_tags = [FILE_TAG]
+    if RESOLUTION not in file_tags:
+        file_tags.append(RESOLUTION)
+
+    for base in candidate_dirs:
+        if not os.path.isdir(base):
+            continue
+        for tag in file_tags:
+            grid_path = os.path.join(base, f"{interval}_ero_grid_{tag}_filled.csv")
+            clus_path = os.path.join(base, f"{interval}_ero_clusters_{tag}_filled.csv")
+            if os.path.exists(grid_path) and os.path.exists(clus_path):
+                return grid_path, clus_path
+    return None, None
+
 def extract_detailed_events(cluster_path, grid_path, res_val, date_mid):
     """Extracts stats for individual erosion events from cluster and grid CSVs."""
     try:
@@ -112,10 +129,9 @@ def collect_all_data(base_dir, locations):
             if not d1: continue
             
             folder = os.path.join(erosion_dir, interval)
-            grid_file = os.path.join(folder, f"{interval}_ero_grid_{FILE_TAG}_filled.csv")
-            clus_file = os.path.join(folder, f"{interval}_ero_clusters_{FILE_TAG}_filled.csv")
+            grid_file, clus_file = resolve_interval_paths(folder, interval)
             
-            if os.path.exists(grid_file) and os.path.exists(clus_file):
+            if grid_file and clus_file:
                 # Use midpoint date for seasonality
                 date_mid = d1 + (d2 - d1)/2
                 events = extract_detailed_events(clus_file, grid_file, RES_VAL, date_mid)

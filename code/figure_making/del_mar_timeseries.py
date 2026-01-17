@@ -57,6 +57,24 @@ def parse_dates(folder_name):
         return d1, d2
     return None, None
 
+def resolve_interval_paths(interval_dir, interval):
+    """Locate grid/cluster/uncertainty files, preferring resolution subfolders."""
+    candidate_dirs = [os.path.join(interval_dir, RESOLUTION), interval_dir]
+    tags = [FILE_TAG]
+    if RESOLUTION not in tags:
+        tags.append(RESOLUTION)
+
+    for base in candidate_dirs:
+        if not os.path.isdir(base):
+            continue
+        for tag in tags:
+            grid_file = os.path.join(base, f"{interval}_ero_grid_{tag}_filled.csv")
+            unc_file = os.path.join(base, f"{interval}_ero_uncertainty_{tag}.csv")
+            clus_file = os.path.join(base, f"{interval}_ero_clusters_{tag}_filled.csv")
+            if os.path.exists(grid_file) and os.path.exists(clus_file):
+                return grid_file, unc_file, clus_file
+    return None, None, None
+
 def add_winter_shading(ax, start_date, end_date):
     """Adds shaded bands for Winter (Oct 1 - Mar 31)."""
     start_year = start_date.year - 1
@@ -117,7 +135,7 @@ def calculate_volume_bounds(grid_path, unc_path, res_val):
     return vol_main, vol_lower, vol_upper, df_grid
 
 def load_cluster_count(cluster_path):
-    if not os.path.exists(cluster_path): return 0
+    if not cluster_path or not os.path.exists(cluster_path): return 0
     try:
         df = pd.read_csv(cluster_path, index_col=0)
         vals = df.values.flatten()
@@ -159,11 +177,9 @@ def collect_dashboard_data(base_dir):
         if not d1: continue
         
         folder = os.path.join(erosion_dir, interval)
-        grid_file = os.path.join(folder, f"{interval}_ero_grid_{FILE_TAG}_filled.csv")
-        unc_file = os.path.join(folder, f"{interval}_ero_uncertainty_{FILE_TAG}.csv")
-        clus_file = os.path.join(folder, f"{interval}_ero_clusters_{FILE_TAG}_filled.csv")
+        grid_file, unc_file, clus_file = resolve_interval_paths(folder, interval)
         
-        if not os.path.exists(grid_file): continue
+        if not grid_file: continue
         
         # 1. Calculate Volumes using EXACT User Function
         # Note: calculate_volume_bounds returns (main, lower, upper)

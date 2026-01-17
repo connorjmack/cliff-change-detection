@@ -51,6 +51,24 @@ def load_csv_matrix(filepath):
         print(f"[WARN] Failed to load {filepath}: {e}")
         return None
 
+def resolve_unc_and_clusters(survey_path):
+    """Find uncertainty and cluster grids, preferring resolution subfolders."""
+    candidate_dirs = [os.path.join(survey_path, RESOLUTION), survey_path]
+    unc_file = None
+    cls_file = None
+    for base in candidate_dirs:
+        if not os.path.isdir(base):
+            continue
+        unc_pattern = os.path.join(base, f"*_uncertainty_{RESOLUTION}.csv")
+        cls_pattern = os.path.join(base, f"*_clusters_{RESOLUTION}.csv")
+        unc_files = glob.glob(unc_pattern)
+        cls_files = glob.glob(cls_pattern)
+        if unc_files and cls_files:
+            unc_file = unc_files[0]
+            cls_file = cls_files[0]
+            break
+    return unc_file, cls_file
+
 def collect_uncertainty_stats(location, base_dir):
     """
     Walks through all erosion folders for the location, collecting:
@@ -75,20 +93,13 @@ def collect_uncertainty_stats(location, base_dir):
 
     # Iterate through surveys
     for survey_path in tqdm(survey_dirs, desc="Processing Surveys"):
-        
-        # Define expected filenames
-        unc_pattern = os.path.join(survey_path, f"*_uncertainty_{RESOLUTION}.csv")
-        cls_pattern = os.path.join(survey_path, f"*_clusters_{RESOLUTION}.csv")
-
-        unc_files = glob.glob(unc_pattern)
-        cls_files = glob.glob(cls_pattern)
-
-        if not unc_files or not cls_files:
+        unc_file, cls_file = resolve_unc_and_clusters(survey_path)
+        if not unc_file or not cls_file:
             continue
 
         # Load Data
-        unc_grid = load_csv_matrix(unc_files[0])
-        cls_grid = load_csv_matrix(cls_files[0])
+        unc_grid = load_csv_matrix(unc_file)
+        cls_grid = load_csv_matrix(cls_file)
 
         if unc_grid is None or cls_grid is None:
             continue

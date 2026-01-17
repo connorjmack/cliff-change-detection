@@ -131,52 +131,65 @@ def find_grid_files(base_dir, location, resolution, data_type='erosion', use_fil
     
     # Normalize resolution for file searching (1m -> 100cm)
     file_resolution = normalize_resolution_for_files(resolution)
-    
-    # Patterns to search for (in priority order)
-    if data_type == 'erosion':
-        if use_filled:
-            patterns = [
-                f"_ero_grid_{file_resolution}_filled.csv",
-                f"grid_{file_resolution}_filled.csv",
-                f"_ero_grid_{file_resolution}_cleaned.csv",
-                f"grid_{file_resolution}_cleaned.csv",
-            ]
-        else:
-            patterns = [
-                f"_ero_grid_{file_resolution}_cleaned.csv",
-                f"grid_{file_resolution}_cleaned.csv",
-                f"_ero_grid_{file_resolution}.csv",
-                f"grid_{file_resolution}.csv",
-            ]
-    else:  # deposition
-        if use_filled:
-            patterns = [
-                f"_dep_grid_{file_resolution}_filled.csv",
-                f"dep_grid_{file_resolution}_filled.csv",
-                f"_dep_grid_{file_resolution}_cleaned.csv",
-                f"dep_grid_{file_resolution}_cleaned.csv",
-            ]
-        else:
-            patterns = [
-                f"_dep_grid_{file_resolution}_cleaned.csv",
-                f"dep_grid_{file_resolution}_cleaned.csv",
-                f"_dep_grid_{file_resolution}.csv",
-                f"dep_grid_{file_resolution}.csv",
-            ]
+    tag_candidates = [file_resolution]
+    for tag in (resolution, '1m'):
+        if tag not in tag_candidates:
+            tag_candidates.append(tag)
     
     for date_folder in os.listdir(type_dir):
         folder_path = os.path.join(type_dir, date_folder)
         if not os.path.isdir(folder_path):
             continue
         
+        candidate_dirs = [
+            os.path.join(folder_path, resolution),
+            os.path.join(folder_path, file_resolution),
+            folder_path,
+        ]
+
         # Try to find the first matching file pattern
         grid_file = None
-        files_in_folder = os.listdir(folder_path)
-        
-        for pattern in patterns:
-            matching_files = [f for f in files_in_folder if pattern in f and f.endswith('.csv')]
-            if matching_files:
-                grid_file = os.path.join(folder_path, matching_files[0])
+        for base in candidate_dirs:
+            if not os.path.isdir(base):
+                continue
+            files_in_folder = os.listdir(base)
+            for tag in tag_candidates:
+                if data_type == 'erosion':
+                    if use_filled:
+                        patterns = [
+                            f"_ero_grid_{tag}_filled.csv",
+                            f"grid_{tag}_filled.csv",
+                            f"_ero_grid_{tag}_cleaned.csv",
+                            f"grid_{tag}_cleaned.csv",
+                        ]
+                    else:
+                        patterns = [
+                            f"_ero_grid_{tag}_cleaned.csv",
+                            f"grid_{tag}_cleaned.csv",
+                            f"_ero_grid_{tag}.csv",
+                            f"grid_{tag}.csv",
+                        ]
+                else:
+                    if use_filled:
+                        patterns = [
+                            f"_dep_grid_{tag}_filled.csv",
+                            f"dep_grid_{tag}_filled.csv",
+                            f"_dep_grid_{tag}_cleaned.csv",
+                            f"dep_grid_{tag}_cleaned.csv",
+                        ]
+                    else:
+                        patterns = [
+                            f"_dep_grid_{tag}_cleaned.csv",
+                            f"dep_grid_{tag}_cleaned.csv",
+                            f"_dep_grid_{tag}.csv",
+                            f"dep_grid_{tag}.csv",
+                        ]
+
+                matching_files = [f for f in files_in_folder if f.endswith('.csv') and any(p in f for p in patterns)]
+                if matching_files:
+                    grid_file = os.path.join(base, matching_files[0])
+                    break
+            if grid_file:
                 break
         
         if grid_file:

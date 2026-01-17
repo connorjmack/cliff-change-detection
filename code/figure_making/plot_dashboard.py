@@ -85,6 +85,24 @@ def parse_dates(folder_name):
         return d1, d2
     return None, None
 
+def resolve_interval_paths(interval_dir, interval):
+    """Locate grid/cluster/uncertainty files, preferring resolution subfolders."""
+    candidate_dirs = [os.path.join(interval_dir, RESOLUTION), interval_dir]
+    tags = [FILE_TAG]
+    if RESOLUTION not in tags:
+        tags.append(RESOLUTION)
+
+    for base in candidate_dirs:
+        if not os.path.isdir(base):
+            continue
+        for tag in tags:
+            grid_file = os.path.join(base, f"{interval}_ero_grid_{tag}_filled.csv")
+            unc_file = os.path.join(base, f"{interval}_ero_uncertainty_{tag}.csv")
+            clus_file = os.path.join(base, f"{interval}_ero_clusters_{tag}_filled.csv")
+            if os.path.exists(grid_file) and os.path.exists(clus_file):
+                return grid_file, unc_file, clus_file
+    return None, None, None
+
 def add_winter_shading(ax, start_date, end_date):
     """Adds shaded bands for Winter (Oct 1 - Mar 31)."""
     start_year = start_date.year - 1
@@ -209,10 +227,8 @@ def collect_dashboard_data(base_dir, location):
         d1, d2 = parse_dates(interval)
         if not d1: continue
         folder = os.path.join(erosion_dir, interval)
-        grid_file = os.path.join(folder, f"{interval}_ero_grid_{FILE_TAG}_filled.csv")
-        unc_file = os.path.join(folder, f"{interval}_ero_uncertainty_{FILE_TAG}.csv")
-        clus_file = os.path.join(folder, f"{interval}_ero_clusters_{FILE_TAG}_filled.csv")
-        if not os.path.exists(grid_file): continue
+        grid_file, unc_file, clus_file = resolve_interval_paths(folder, interval)
+        if not grid_file: continue
         vol_main, vol_low, vol_high, df_grid = calculate_volume_bounds_properly(grid_file, unc_file, RES_VAL)
         if vol_main is None: continue
         if vol_main == 0:
@@ -225,8 +241,10 @@ def collect_dashboard_data(base_dir, location):
                 else: cumulative_grid = cumulative_grid.add(spatial_df.fillna(0.0), fill_value=0)
         
         date_mid = d1 + (d2 - d1)/2
-        events = extract_cluster_events(clus_file, grid_file, RES_VAL, date_mid)
-        all_events.extend(events)
+        events = []
+        if clus_file:
+            events = extract_cluster_events(clus_file, grid_file, RES_VAL, date_mid)
+            all_events.extend(events)
         days = (d2 - d1).days
         if days < 1: days = 1
         stats_list.append({'start': d1, 'end': d2, 'mid': date_mid, 'days': days, 'volume': vol_main, 'vol_lower': vol_low, 'vol_upper': vol_high})
