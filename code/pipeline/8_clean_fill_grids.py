@@ -182,6 +182,75 @@ def parse_elevation_from_header(header):
     except:
         return None
 
+# ============================================================================
+# NEW: VERTICAL CUTOFF LOGIC (FIXED PARSER)
+# ============================================================================
+
+def load_cutoff_dataframe(base_dir, location, resolution):
+    """
+    Loads the visual cliff top cutoff file.
+    Tries multiple potential paths.
+    """
+    filename = f"{location}_Visual_CliffTop_{resolution}.csv"
+
+    paths = [
+        os.path.join(base_dir, "utilities", "cliff_top_cutoffs", filename),
+        os.path.join(base_dir, "utilities", "cliff_top_cutoffs", "computer_vision", location, filename),
+        os.path.join("utilities", "cliff_top_cutoffs", filename)
+    ]
+
+    for p in paths:
+        if os.path.exists(p):
+            print(f"Loaded Cutoff File: {p}")
+            try:
+                df = pd.read_csv(p)
+                if 'Polygon_ID' in df.columns:
+                    df.set_index('Polygon_ID', inplace=True)
+                return df
+            except Exception as e:
+                print(f"[ERROR] Failed to load cutoff file: {e}")
+                return None
+
+    print(f"[WARNING] No visual cutoff file found for {location} {resolution}. Skipping vertical slice.")
+    return None
+
+
+def apply_vertical_cutoff(grid, clusters, header_labels, row_labels, cutoff_df):
+    """
+    Zeros out any data where Elevation > CliffTop_Z for that polygon.
+    """
+    if cutoff_df is None:
+        return grid, clusters, 0
+
+    try:
+        col_elevs = [parse_elevation_from_header(h) for h in header_labels]
+        if any(x is None for x in col_elevs):
+            print(f"[WARNING] Header parsing failed for some columns (e.g. {header_labels[0]}). Skipping cutoff.")
+            return grid, clusters, 0
+        col_elevs = np.array(col_elevs)
+    except Exception:
+        print("[WARNING] Exception during header parsing. Skipping cutoff.")
+        return grid, clusters, 0
+
+    try:
+        row_ids = np.array(row_labels).astype(float).astype(int)
+    except Exception:
+        print("[WARNING] Could not parse row labels as IDs. Skipping cutoff.")
+        return grid, clusters, 0
+
+    aligned_cutoffs = cutoff_df.reindex(row_ids)['CliffTop_Z'].values
+    aligned_cutoffs = np.nan_to_num(aligned_cutoffs, nan=9999.0)
+
+    mask_above = col_elevs[None, :] > aligned_cutoffs[:, None]
+    cells_removed = np.sum((grid != 0) & mask_above & ~np.isnan(grid))
+
+    grid_cut = grid.copy()
+    clusters_cut = clusters.copy()
+    grid_cut[mask_above] = 0
+    clusters_cut[mask_above] = 0
+
+    return grid_cut, clusters_cut, cells_removed
+
 
 # ============================================================================
 # CLEANING FUNCTIONS
@@ -588,7 +657,8 @@ def fill_holes_alphashape(grid, clusters_grid, hole_mask, cluster_volumes,
 def worker(task):
     (date_folder, ftype, threshold, resolution, testing, replace,
      skip_cleaning, skip_filling, min_volume, res_params,
-     polygon_centroids, elevation_scale, cleanup_size) = task
+     polygon_centroids, elevation_scale, cleanup_size,
+     base_dir, location) = task
 
     folder_name = os.path.basename(date_folder)
 
@@ -605,11 +675,17 @@ def worker(task):
                 res['filt_c'], res['filt_g'] = dc, dg
                 removed_footprint = rm_count
 
+        # Apply vertical cutoff (cliff top)
+        cutoff_df = load_cutoff_dataframe(base_dir, location, resolution)
+        cleaned_grid, cleaned_clusters, removed_vertical = apply_vertical_cutoff(
+            res['filt_g'], res['filt_c'], res['header_g'], res['rows_g'], cutoff_df
+        )
+
         # Skip saving _cleaned.csv - will only save final _filled.csv output
         cleaning_stats = res['stats']
+        cleaning_stats['removed_vertical'] = removed_vertical
+        cleaning_stats['removed_footprint'] = removed_footprint if ftype == 'deposition' else 0
 
-        cleaned_grid = res['filt_g']
-        cleaned_clusters = res['filt_c']
         header_g, rows_g = res['header_g'], res['rows_g']
         header_c, rows_c = res['header_c'], res['rows_c']
         gfile = res['gfile']
@@ -702,7 +778,12 @@ def generate_combined_report(location, resolution, threshold, min_volume, stats_
         # Cleaning is always performed
         f.write(f"\nCLEANING SUMMARY\n" + "-" * 30 + "\n")
         total_removed = sum(s['cleaning'].get('removed_threshold', 0) for s in stats_list)
+        total_vertical = sum(s['cleaning'].get('removed_vertical', 0) for s in stats_list)
+        total_footprint = sum(s['cleaning'].get('removed_footprint', 0) for s in stats_list)
         f.write(f"Total Clusters Removed by Threshold: {total_removed}\n")
+        f.write(f"Total Cells Removed by Cliff-Top Cutoff: {total_vertical}\n")
+        if total_footprint:
+            f.write(f"Total Deposition Clusters Removed by Footprint Check: {total_footprint}\n")
 
         if not skip_filling:
             filled_stats = [s for s in stats_list if s['filling'] is not None]
@@ -712,14 +793,15 @@ def generate_combined_report(location, resolution, threshold, min_volume, stats_
                 f.write(f"Total Holes Filled: {sum(s['filling']['holes_filled'] for s in filled_stats)}\n")
 
         f.write(f"\nDETAILED LOG\n" + "-" * 90 + "\n")
-        f.write(f"{'Survey':<25} {'Type':<8} {'Removed':<10} {'Holes':<7} {'Vol∆':<10} {'Fill%':<7}\n")
+        f.write(f"{'Survey':<25} {'Type':<8} {'RemThr':<8} {'RemVert':<8} {'Holes':<7} {'Vol∆':<10} {'Fill%':<7}\n")
         for s in sorted(stats_list, key=lambda x: (x['survey'], x['type'])):
             removed = s['cleaning'].get('removed_threshold', 0)
+            removed_vert = s['cleaning'].get('removed_vertical', 0)
             if s['filling']:
-                f.write(f"{s['survey']:<25} {s['type']:<8} {removed:<10} {s['filling']['holes_filled']:<7} "
+                f.write(f"{s['survey']:<25} {s['type']:<8} {removed:<8} {removed_vert:<8} {s['filling']['holes_filled']:<7} "
                        f"{s['filling']['volume_change']:<10.3f} {s['filling']['fill_percentage']:<7.1f}\n")
             else:
-                f.write(f"{s['survey']:<25} {s['type']:<8} {removed:<10} {'N/A':<7} {'N/A':<10} {'N/A':<7}\n")
+                f.write(f"{s['survey']:<25} {s['type']:<8} {removed:<8} {removed_vert:<8} {'N/A':<7} {'N/A':<10} {'N/A':<7}\n")
 
     print(f"\n✓ Report generated: {report_path}")
 
@@ -818,7 +900,8 @@ def process_location(location, args):
                     tasks.append((path, 'erosion', threshold, args.resolution,
                                 args.testing, args.replace, skip_cleaning,
                                 args.skip_filling, args.min_volume, res_params,
-                                polygon_centroids, args.elevation_scale, args.cleanup_size))
+                                polygon_centroids, args.elevation_scale, args.cleanup_size,
+                                base_dir, location))
 
     if process_deposition:
         dep_dir = os.path.join(results_dir, 'deposition')
@@ -829,7 +912,8 @@ def process_location(location, args):
                     tasks.append((path, 'deposition', threshold, args.resolution,
                                 args.testing, args.replace, skip_cleaning,
                                 True, args.min_volume, res_params,
-                                polygon_centroids, args.elevation_scale, args.cleanup_size))
+                                polygon_centroids, args.elevation_scale, args.cleanup_size,
+                                base_dir, location))
 
     if not tasks:
         print(f"[WARNING] No tasks found for location: {location}")
