@@ -69,7 +69,7 @@ def extract_detailed_events(cluster_path, grid_path, unc_path, res_val, date_mid
         df_c = pd.read_csv(cluster_path, index_col=0).fillna(0)
         df_g = pd.read_csv(grid_path, index_col=0).fillna(0)
         
-        if os.path.exists(unc_path):
+        if unc_path and os.path.exists(unc_path):
             df_u = pd.read_csv(unc_path, index_col=0).fillna(0)
         else:
             df_u = None
@@ -134,6 +134,26 @@ def extract_detailed_events(cluster_path, grid_path, unc_path, res_val, date_mid
     except Exception as e:
         return []
 
+def resolve_interval_paths(interval_dir, interval):
+    """Return erosion grid/cluster/uncertainty paths, preferring resolution subfolders."""
+    res_dir = os.path.join(interval_dir, RESOLUTION)
+    candidates = [
+        (
+            os.path.join(res_dir, f"{interval}_ero_grid_{FILE_TAG}_filled.csv"),
+            os.path.join(res_dir, f"{interval}_ero_clusters_{FILE_TAG}_filled.csv"),
+            os.path.join(res_dir, f"{interval}_ero_uncertainty_{FILE_TAG}.csv"),
+        ),
+        (
+            os.path.join(interval_dir, f"{interval}_ero_grid_{FILE_TAG}_filled.csv"),
+            os.path.join(interval_dir, f"{interval}_ero_clusters_{FILE_TAG}_filled.csv"),
+            os.path.join(interval_dir, f"{interval}_ero_uncertainty_{FILE_TAG}.csv"),
+        ),
+    ]
+    for grid_path, clus_path, unc_path in candidates:
+        if os.path.exists(grid_path) and os.path.exists(clus_path):
+            return grid_path, clus_path, unc_path
+    return None, None, None
+
 def collect_all_data(base_dir, locations):
     all_events = []
     for loc in locations:
@@ -148,11 +168,9 @@ def collect_all_data(base_dir, locations):
             if not d1: continue
             
             folder = os.path.join(erosion_dir, interval)
-            grid_file = os.path.join(folder, f"{interval}_ero_grid_{FILE_TAG}_filled.csv")
-            clus_file = os.path.join(folder, f"{interval}_ero_clusters_{FILE_TAG}_filled.csv")
-            unc_file  = os.path.join(folder, f"{interval}_ero_uncertainty_{FILE_TAG}.csv")
+            grid_file, clus_file, unc_file = resolve_interval_paths(folder, interval)
             
-            if os.path.exists(grid_file) and os.path.exists(clus_file):
+            if grid_file and clus_file:
                 events = extract_detailed_events(clus_file, grid_file, unc_file, RES_VAL, d1 + (d2 - d1)/2)
                 all_events.extend(events)
                 

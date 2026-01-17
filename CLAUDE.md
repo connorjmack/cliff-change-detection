@@ -188,9 +188,15 @@ For example: `results/DelMar/erosion/20250813_to_20250821/1m/20250813_to_2025082
 
 ### Step 8: Grid Cleaning & Hole Filling
 ```bash
+# Process all locations
+python3 code/pipeline/8_clean_fill_grids.py --all --resolution 25cm
+
+# Process single location
 python3 code/pipeline/8_clean_fill_grids.py SanElijo --resolution 10cm --erosion --min_volume 2.0
 ```
 Applies cliff-top cutoffs and fills occlusion holes using Alpha Shapes and interpolation to correct volume estimates.
+
+**Output:** Saves only final `_filled.csv` files (no intermediate `_cleaned.csv`). For erosion: includes cleaning + hole filling + morphological cleanup. For deposition: includes cleaning only.
 
 ## Location-Specific Configuration
 
