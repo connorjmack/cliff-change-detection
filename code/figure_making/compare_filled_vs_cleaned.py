@@ -216,7 +216,7 @@ def plot_fill_vs_original(base_dir, location, resolution, vmax, output_path):
         print(f"[Warning] No erosion grids found for {location} at {resolution}. Nothing to plot.")
         return
 
-    fig, axes = plt.subplots(1, 2, figsize=(18, 8), sharey=True)
+    fig, axes = plt.subplots(2, 1, figsize=(12, 14), sharex=True, sharey=True)
     axes = axes.ravel()
 
     ims = []
@@ -277,7 +277,7 @@ def plot_fill_vs_original(base_dir, location, resolution, vmax, output_path):
             ax=axes,
             orientation='horizontal',
             fraction=0.05,
-            pad=0.12,
+            pad=0.06,
         )
         cbar.set_label("Cumulative Erosion Depth (m)", fontsize=12)
 
