@@ -66,20 +66,24 @@ The pipeline expects and creates the following directory structure on the server
         │   └── DATE1_to_DATE2/
         │       ├── ero_clusters.las         # Clustered erosion points
         │       ├── ero_outliers.las         # Noise points (DBSCAN=-1)
-        │       ├── clusters_<resolution>.csv     # Step 7 output: ClusterIDs grid
-        │       ├── grid_<resolution>.csv         # Step 7 output: M3C2 distance grid
-        │       ├── clusters_<resolution>_cleaned.csv  # Step 8 output
-        │       ├── grid_<resolution>_cleaned.csv      # Step 8 output
-        │       ├── clusters_<resolution>_filled.csv   # Step 8 output (erosion only)
-        │       └── grid_<resolution>_filled.csv       # Step 8 output (erosion only)
+        │       └── <resolution>/              # e.g., 10cm, 25cm, 1m (steps 7-8)
+        │           ├── DATE1_to_DATE2_ero_grid_<resolution>.csv
+        │           ├── DATE1_to_DATE2_ero_clusters_<resolution>.csv
+        │           ├── DATE1_to_DATE2_ero_stats_<resolution>.npz
+        │           ├── DATE1_to_DATE2_ero_grid_<resolution>_cleaned.csv
+        │           ├── DATE1_to_DATE2_ero_clusters_<resolution>_cleaned.csv
+        │           ├── DATE1_to_DATE2_ero_grid_<resolution>_filled.csv   # Erosion only
+        │           └── DATE1_to_DATE2_ero_clusters_<resolution>_filled.csv
         └── deposition/                      # Step 6 output
             └── DATE1_to_DATE2/
                 ├── dep_clusters.las
                 ├── dep_outliers.las
-                ├── dep_clusters_<resolution>.csv
-                ├── dep_grid_<resolution>.csv
-                ├── dep_clusters_<resolution>_cleaned.csv
-                └── dep_grid_<resolution>_cleaned.csv
+                └── <resolution>/              # e.g., 10cm, 25cm, 1m (steps 7-8)
+                    ├── DATE1_to_DATE2_dep_grid_<resolution>.csv
+                    ├── DATE1_to_DATE2_dep_clusters_<resolution>.csv
+                    ├── DATE1_to_DATE2_dep_stats_<resolution>.npz
+                    ├── DATE1_to_DATE2_dep_grid_<resolution>_cleaned.csv
+                    └── DATE1_to_DATE2_dep_clusters_<resolution>_cleaned.csv
 ```
 
 This document describes each numbered pipeline step (0-8), its purpose, inputs, outputs, and example usage. Steps must be run in order because each stage reads from the previous stage's output.
@@ -213,7 +217,7 @@ python3 6_dbscan_parallel.py SanElijo --eps 0.35 --min_samples 30 --min_change 0
 
 **Inputs:** Clustered LAS files and `utilities/shape_files/<Location>_<resolution>/` polygons.
 
-**Outputs:** `grid_<resolution>.csv`, `clusters_<resolution>.csv`, and uncertainty grids per pair.
+**Outputs:** Resolution-specific grids under `results/<Location>/<erosion|deposition>/DATE1_to_DATE2/<resolution>/`, e.g., `DATE1_to_DATE2_ero_grid_<resolution>.csv`, `DATE1_to_DATE2_ero_clusters_<resolution>.csv`, and `DATE1_to_DATE2_ero_stats_<resolution>.npz` (plus `dep_*` equivalents).
 
 **Example:**
 ```bash
@@ -227,7 +231,7 @@ python3 7_make_grids.py SanElijo --resolution 10cm --replace
 
 **Inputs:** Grids from step 7 and cutoff CSVs in `utilities/cliff_top_cutoffs/`.
 
-**Outputs:** `*_cleaned.csv` and (erosion) `*_filled.csv` per pair; validation reports.
+**Outputs:** Cleaned/filled grids saved in each resolution folder (e.g., `DATE1_to_DATE2_ero_grid_<resolution>_cleaned.csv`, `DATE1_to_DATE2_ero_grid_<resolution>_filled.csv`, and `DATE1_to_DATE2_dep_grid_<resolution>_cleaned.csv`); validation reports.
 
 **Example:**
 ```bash

@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
-9_clean_fill_grids.py
+8_clean_fill_grids.py
 
 Combined parallel processing: cleaning + hole filling for erosion/deposition grids.
 Uses physical coordinates (polygon centroids) for spatial proximity calculations.
+
+Outputs only _filled.csv files (not _cleaned.csv intermediate files).
+For erosion: applies cleaning + hole filling + morphological cleanup
+For deposition: applies cleaning only (no hole filling)
 
 Arguments:
     location          Name of the study site folder (e.g. SanElijo, Encinitas)
@@ -16,8 +20,7 @@ Arguments:
     --cleanup_size    Min connected component size to keep (default: 3)
     --testing         Print actions without writing files
     --replace         Overwrite existing outputs
-    --skip_cleaning   Skip cleaning step, only do hole filling
-    --skip_filling    Skip hole filling step, only do cleaning
+    --skip_filling    Skip hole filling step, only do cleaning (erosion only)
 """
 import os
 import platform
@@ -184,15 +187,23 @@ def parse_elevation_from_header(header):
 # ============================================================================
 
 def resolution_to_label(resolution):
-    """Convert resolution string to cm label matching 8_make_grids.py"""
-    res_map = {'10cm': '10cm', '25cm': '25cm', '1m': '100cm'}
+    """Convert resolution string to label matching 7_make_grids.py"""
+    res_map = {'10cm': '10cm', '25cm': '25cm', '1m': '1m'}
     return res_map.get(resolution, resolution)
 
 
 def process_files_in_folder(date_folder, file_type, threshold, resolution):
     """Load and filter grid/cluster files by threshold."""
-    files = os.listdir(date_folder)
     label = resolution_to_label(resolution)
+
+    # Navigate into resolution subdirectory
+    resolution_folder = os.path.join(date_folder, label)
+    if not os.path.isdir(resolution_folder):
+        return None
+
+    files = os.listdir(resolution_folder)
+
+    # New file naming pattern includes date prefix: DATE1_to_DATE2_ero_grid_10cm.csv
     clust_pattern = f"clusters_{label}.csv"
     grid_pattern = f"grid_{label}.csv"
 
@@ -208,8 +219,8 @@ def process_files_in_folder(date_folder, file_type, threshold, resolution):
     if not cls or not grd:
         return None
 
-    cpath = os.path.join(date_folder, cls[0])
-    gpath = os.path.join(date_folder, grd[0])
+    cpath = os.path.join(resolution_folder, cls[0])
+    gpath = os.path.join(resolution_folder, grd[0])
 
     try:
         h_c, r_c, clusters = load_csv_data(cpath)
@@ -593,11 +604,7 @@ def worker(task):
                 res['filt_c'], res['filt_g'] = dc, dg
                 removed_footprint = rm_count
 
-        c_out = res['cfile'].replace('.csv', '_cleaned.csv')
-        g_out = res['gfile'].replace('.csv', '_cleaned.csv')
-        save_csv_data(c_out, res['filt_c'], res['header_c'], res['rows_c'], testing, replace)
-        save_csv_data(g_out, res['filt_g'], res['header_g'], res['rows_g'], testing, replace)
-
+        # Skip saving _cleaned.csv - will only save final _filled.csv output
         cleaning_stats = res['stats']
 
         cleaned_grid = res['filt_g']
@@ -607,20 +614,11 @@ def worker(task):
         gfile = res['gfile']
         cfile = res['cfile']
     else:
-        # Load existing cleaned
-        files = os.listdir(date_folder)
-        label = resolution_to_label(resolution)
-        grd = [f for f in files if f"grid_{label}_cleaned.csv" in f and (ftype == 'erosion' or 'dep_' in f)]
-        cls = [f for f in files if f"clusters_{label}_cleaned.csv" in f and (ftype == 'erosion' or 'dep_' in f)]
-
-        if not cls or not grd: return None
-        try:
-            header_g, rows_g, cleaned_grid = load_csv_data(os.path.join(date_folder, grd[0]))
-            header_c, rows_c, cleaned_clusters = load_csv_data(os.path.join(date_folder, cls[0]))
-            cleaning_stats = {'total_clusters': 0, 'removed_threshold': 0, 'kept_threshold': 0}
-            gfile = os.path.join(date_folder, grd[0].replace('_cleaned.csv', '.csv'))
-            cfile = os.path.join(date_folder, cls[0].replace('_cleaned.csv', '.csv'))
-        except: return None
+        # --skip_cleaning option is no longer supported since _cleaned.csv files are not saved
+        # Users should run the full pipeline (cleaning is fast)
+        print(f"[WARNING] --skip_cleaning is no longer supported. Intermediate _cleaned.csv files are not saved.")
+        print(f"[WARNING] Skipping {folder_name} - run without --skip_cleaning flag.")
+        return None
 
     # ========== STEP 2: ALPHASHAPE HOLE FILLING (EROSION ONLY) ==========
     if not skip_filling and ftype == 'erosion':
@@ -662,6 +660,13 @@ def worker(task):
             'clusters_skipped': clusters_skipped
         }
     else:
+        # For deposition (or when filling is skipped), save cleaned results as _filled.csv
+        g_filled = gfile.replace('.csv', '_filled.csv')
+        save_csv_data(g_filled, cleaned_grid, header_g, rows_g, testing, replace)
+
+        c_filled = cfile.replace('.csv', '_filled.csv')
+        save_csv_data(c_filled, cleaned_clusters, header_c, rows_c, testing, replace)
+
         filling_stats = None
 
     return {

@@ -46,7 +46,22 @@ The pipeline expects a specific directory structure on shared storage:
 │   ├── noveg/
 │   ├── m3c2/
 │   ├── erosion/
+│   │   └── DATE1_to_DATE2/
+│   │       ├── ero_clusters.las
+│   │       ├── ero_outliers.las
+│   │       ├── 10cm/                 # Resolution-specific subdirectory
+│   │       │   ├── DATE1_to_DATE2_ero_grid_10cm.csv
+│   │       │   ├── DATE1_to_DATE2_ero_clusters_10cm.csv
+│   │       │   └── DATE1_to_DATE2_ero_stats_10cm.npz
+│   │       ├── 25cm/                 # Alternative resolution
+│   │       └── 1m/                   # Alternative resolution
 │   └── deposition/
+│       └── DATE1_to_DATE2/
+│           ├── dep_clusters.las
+│           ├── dep_outliers.las
+│           ├── 10cm/                 # Resolution-specific subdirectory
+│           ├── 25cm/
+│           └── 1m/
 ├── survey_lists/            # CSV inventories of surveys
 └── utilities/
     ├── shape_files/         # Polygons for gridding
@@ -164,6 +179,12 @@ python3 code/pipeline/7_make_grids.py SanElijo --resolution 10cm --replace
 # Available: 10cm, 25cm, 1m
 ```
 Aggregates clustered points into vertical bins within geospatial polygons using Geopandas spatial joins.
+
+**Output Structure:** Creates resolution-specific subdirectories within each date folder:
+- `results/<Location>/erosion/DATE1_to_DATE2/<resolution>/`
+- `results/<Location>/deposition/DATE1_to_DATE2/<resolution>/`
+
+For example: `results/DelMar/erosion/20250813_to_20250821/1m/20250813_to_20250821_ero_grid_1m.csv`
 
 ### Step 8: Grid Cleaning & Hole Filling
 ```bash
