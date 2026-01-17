@@ -43,6 +43,26 @@ def normalize_resolution_string(res):
     if res == '1m': return '100cm'
     return res
 
+def find_grid_file(folder_path, resolution):
+    """Locate filled erosion grid inside the interval folder (prefers resolution subdir)."""
+    file_res = normalize_resolution_string(resolution)
+    tags = [file_res]
+    if resolution not in tags:
+        tags.append(resolution)
+
+    candidate_dirs = [os.path.join(folder_path, resolution), folder_path]
+    patterns = []
+    for tag in tags:
+        patterns.extend([f"_ero_grid_{tag}_filled.csv", f"grid_{tag}_filled.csv"])
+
+    for base in candidate_dirs:
+        if not os.path.isdir(base):
+            continue
+        for fname in os.listdir(base):
+            if fname.endswith('.csv') and any(p in fname for p in patterns):
+                return os.path.join(base, fname)
+    return None
+
 def get_custom_magma_cmap():
     """
     Creates 'magma_r' but with a PURE WHITE background for 0.
@@ -74,13 +94,7 @@ def load_and_sum_grids(base_dir, location, resolution):
         folder_path = os.path.join(data_dir, date_folder)
         if not os.path.isdir(folder_path): continue
         
-        # Find file
-        patterns = [f"_ero_grid_{file_res}_filled.csv", f"grid_{file_res}_filled.csv"]
-        target_file = None
-        for f in os.listdir(folder_path):
-            if any(p in f for p in patterns) and f.endswith('.csv'):
-                target_file = os.path.join(folder_path, f)
-                break
+        target_file = find_grid_file(folder_path, resolution)
         
         if not target_file: continue
 

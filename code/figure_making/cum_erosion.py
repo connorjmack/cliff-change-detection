@@ -104,26 +104,39 @@ def find_grid_files(base_dir, location, resolution, data_type, use_filled=True):
 
     # Normalize resolution for file searching (1m -> 100cm)
     file_resolution = normalize_resolution_for_files(resolution)
+    tag_candidates = [file_resolution]
+    for tag in (resolution, '1m'):
+        if tag not in tag_candidates:
+            tag_candidates.append(tag)
 
     grid_files = []
-    
-    if data_type == 'erosion':
-        patterns = [f"_ero_grid_{file_resolution}_filled.csv", f"grid_{file_resolution}_filled.csv"] if use_filled else \
-                   [f"_ero_grid_{file_resolution}_cleaned.csv", f"grid_{file_resolution}_cleaned.csv"]
-    else:
-        patterns = [f"_dep_grid_{file_resolution}_filled.csv", f"dep_grid_{file_resolution}_filled.csv"] if use_filled else \
-                   [f"_dep_grid_{file_resolution}_cleaned.csv", f"dep_grid_{file_resolution}_cleaned.csv"]
 
     for date_folder in sorted(os.listdir(type_dir)):
         folder_path = os.path.join(type_dir, date_folder)
         if not os.path.isdir(folder_path): continue
-            
-        files_in_folder = os.listdir(folder_path)
+        
+        candidate_dirs = [
+            os.path.join(folder_path, resolution),
+            os.path.join(folder_path, file_resolution),
+            folder_path,
+        ]
         grid_file = None
-        for pattern in patterns:
-            match = [f for f in files_in_folder if pattern in f and f.endswith('.csv')]
-            if match:
-                grid_file = os.path.join(folder_path, match[0])
+        for base in candidate_dirs:
+            if not os.path.isdir(base):
+                continue
+            files_in_folder = os.listdir(base)
+            for tag in tag_candidates:
+                if data_type == 'erosion':
+                    patterns = [f"_ero_grid_{tag}_filled.csv", f"grid_{tag}_filled.csv"] if use_filled else \
+                               [f"_ero_grid_{tag}_cleaned.csv", f"grid_{tag}_cleaned.csv"]
+                else:
+                    patterns = [f"_dep_grid_{tag}_filled.csv", f"dep_grid_{tag}_filled.csv"] if use_filled else \
+                               [f"_dep_grid_{tag}_cleaned.csv", f"dep_grid_{tag}_cleaned.csv"]
+                match = [f for f in files_in_folder if f.endswith('.csv') and any(p in f for p in patterns)]
+                if match:
+                    grid_file = os.path.join(base, match[0])
+                    break
+            if grid_file:
                 break
         
         if grid_file:
