@@ -69,23 +69,51 @@ The pipeline expects and creates the following directory structure on the server
         │       ├── ero_clusters.las         # Clustered erosion points
         │       ├── ero_outliers.las         # Noise points (DBSCAN=-1)
         │       ├── 10cm/                        # Step 7 resolution subdirectory
-        │       │   ├── DATE1_to_DATE2_ero_clusters_10cm.csv
         │       │   ├── DATE1_to_DATE2_ero_grid_10cm.csv
-        │       │   └── DATE1_to_DATE2_ero_stats_10cm.npz
+        │       │   ├── DATE1_to_DATE2_ero_clusters_10cm.csv
+        │       │   ├── DATE1_to_DATE2_ero_stats_10cm.npz
+        │       │   ├── DATE1_to_DATE2_ero_grid_10cm_cleaned.csv      # Step 8 output
+        │       │   ├── DATE1_to_DATE2_ero_clusters_10cm_cleaned.csv  # Step 8 output
+        │       │   ├── DATE1_to_DATE2_ero_grid_10cm_filled.csv       # Step 8 output
+        │       │   └── DATE1_to_DATE2_ero_clusters_10cm_filled.csv   # Step 8 output
         │       ├── 25cm/                        # Alternative resolution
-        │       ├── 1m/                          # Alternative resolution
-        │       ├── clusters_<resolution>_cleaned.csv  # Step 8 output
-        │       ├── grid_<resolution>_cleaned.csv      # Step 8 output
-        │       ├── clusters_<resolution>_filled.csv   # Step 8 output (erosion only)
-        │       └── grid_<resolution>_filled.csv       # Step 8 output (erosion only)
+        │       │   ├── DATE1_to_DATE2_ero_grid_25cm.csv
+        │       │   ├── DATE1_to_DATE2_ero_clusters_25cm.csv
+        │       │   ├── DATE1_to_DATE2_ero_stats_25cm.npz
+        │       │   ├── DATE1_to_DATE2_ero_grid_25cm_cleaned.csv
+        │       │   ├── DATE1_to_DATE2_ero_clusters_25cm_cleaned.csv
+        │       │   ├── DATE1_to_DATE2_ero_grid_25cm_filled.csv
+        │       │   └── DATE1_to_DATE2_ero_clusters_25cm_filled.csv
+        │       └── 1m/                          # Alternative resolution
+        │           ├── DATE1_to_DATE2_ero_grid_1m.csv
+        │           ├── DATE1_to_DATE2_ero_clusters_1m.csv
+        │           ├── DATE1_to_DATE2_ero_stats_1m.npz
+        │           ├── DATE1_to_DATE2_ero_grid_1m_cleaned.csv
+        │           ├── DATE1_to_DATE2_ero_clusters_1m_cleaned.csv
+        │           ├── DATE1_to_DATE2_ero_grid_1m_filled.csv
+        │           └── DATE1_to_DATE2_ero_clusters_1m_filled.csv
         └── deposition/                      # Step 6 output
             └── DATE1_to_DATE2/
                 ├── dep_clusters.las
                 ├── dep_outliers.las
-                ├── dep_clusters_<resolution>.csv
-                ├── dep_grid_<resolution>.csv
-                ├── dep_clusters_<resolution>_cleaned.csv
-                └── dep_grid_<resolution>_cleaned.csv
+                ├── 10cm/                        # Step 7 resolution subdirectory
+                │   ├── DATE1_to_DATE2_dep_grid_10cm.csv
+                │   ├── DATE1_to_DATE2_dep_clusters_10cm.csv
+                │   ├── DATE1_to_DATE2_dep_stats_10cm.npz
+                │   ├── DATE1_to_DATE2_dep_grid_10cm_cleaned.csv      # Step 8 output
+                │   └── DATE1_to_DATE2_dep_clusters_10cm_cleaned.csv  # Step 8 output
+                ├── 25cm/                        # Alternative resolution
+                │   ├── DATE1_to_DATE2_dep_grid_25cm.csv
+                │   ├── DATE1_to_DATE2_dep_clusters_25cm.csv
+                │   ├── DATE1_to_DATE2_dep_stats_25cm.npz
+                │   ├── DATE1_to_DATE2_dep_grid_25cm_cleaned.csv
+                │   └── DATE1_to_DATE2_dep_clusters_25cm_cleaned.csv
+                └── 1m/                          # Alternative resolution
+                    ├── DATE1_to_DATE2_dep_grid_1m.csv
+                    ├── DATE1_to_DATE2_dep_clusters_1m.csv
+                    ├── DATE1_to_DATE2_dep_stats_1m.npz
+                    ├── DATE1_to_DATE2_dep_grid_1m_cleaned.csv
+                    └── DATE1_to_DATE2_dep_clusters_1m_cleaned.csv
 ```
 
 ---
@@ -585,15 +613,20 @@ python3 7_make_grids.py SanElijo --resolution 1m
    - Must contain `Polygon_ID` field
 
 ### Output Files
-**Location:** `results/<Location>/erosion/DATE1_to_DATE2/<resolution>/` and `.../deposition/.../`
+**Location:** `results/<Location>/erosion/DATE1_to_DATE2/<resolution>/` and `.../deposition/DATE1_to_DATE2/<resolution>/`
 
-Files are organized into resolution-specific subdirectories. For each survey pair and resolution, generates:
+Files are organized into resolution-specific subdirectories within each date folder. For each survey pair and resolution, generates:
 
-1. **DATE1_to_DATE2_ero_grid_<resolution>.csv** (M3C2 median values)
-2. **DATE1_to_DATE2_ero_clusters_<resolution>.csv** (ClusterID mode)
-3. **DATE1_to_DATE2_ero_stats_<resolution>.npz** (Uncertainty RMS, point counts, variance)
+**Erosion:**
+1. `results/<Location>/erosion/DATE1_to_DATE2/<resolution>/DATE1_to_DATE2_ero_grid_<resolution>.csv` (M3C2 median values)
+2. `results/<Location>/erosion/DATE1_to_DATE2/<resolution>/DATE1_to_DATE2_ero_clusters_<resolution>.csv` (ClusterID mode)
+3. `results/<Location>/erosion/DATE1_to_DATE2/<resolution>/DATE1_to_DATE2_ero_stats_<resolution>.npz` (Uncertainty RMS, point counts, variance)
 
-Same for deposition with `dep_` prefix.
+**Deposition:**
+Same structure with `dep_` prefix instead of `ero_`.
+
+**Example:**
+`/Volumes/group/LiDAR/LidarProcessing/LidarProcessingCliffs/results/DelMar/erosion/20250813_to_20250821/1m/20250813_to_20250821_ero_grid_1m.csv`
 
 ### CSV Grid Format
 
@@ -690,9 +723,9 @@ python3 8_clean_fill_grids.py SanElijo --resolution 10cm --testing
 
 ### Input Files
 1. **Grid CSVs from step 7:**
-   - `results/<Location>/erosion/DATE1_to_DATE2/grid_<resolution>.csv`
-   - `results/<Location>/erosion/DATE1_to_DATE2/clusters_<resolution>.csv`
-   - Same for deposition
+   - `results/<Location>/erosion/DATE1_to_DATE2/<resolution>/DATE1_to_DATE2_ero_grid_<resolution>.csv`
+   - `results/<Location>/erosion/DATE1_to_DATE2/<resolution>/DATE1_to_DATE2_ero_clusters_<resolution>.csv`
+   - Same for deposition with `dep_` prefix
 
 2. **Visual cutoff file:** `utilities/cliff_top_cutoffs/<Location>_Visual_CliffTop_<resolution>.csv`
    ```csv
@@ -702,12 +735,19 @@ python3 8_clean_fill_grids.py SanElijo --resolution 10cm --testing
    ```
 
 ### Output Files
-**Location:** Same directories as input files
+**Location:** Same resolution-specific subdirectories as input files (`results/<Location>/erosion/DATE1_to_DATE2/<resolution>/`)
 
-1. **grid_<resolution>_cleaned.csv** (or dep_grid_<resolution>_cleaned.csv)
-2. **clusters_<resolution>_cleaned.csv**
-3. **grid_<resolution>_filled.csv** (erosion only)
-4. **clusters_<resolution>_filled.csv** (erosion only)
+**Erosion:**
+1. `DATE1_to_DATE2_ero_grid_<resolution>_cleaned.csv`
+2. `DATE1_to_DATE2_ero_clusters_<resolution>_cleaned.csv`
+3. `DATE1_to_DATE2_ero_grid_<resolution>_filled.csv` (erosion only)
+4. `DATE1_to_DATE2_ero_clusters_<resolution>_filled.csv` (erosion only)
+
+**Deposition:**
+1. `DATE1_to_DATE2_dep_grid_<resolution>_cleaned.csv`
+2. `DATE1_to_DATE2_dep_clusters_<resolution>_cleaned.csv`
+
+(Deposition does not have filled versions)
 
 ### Processing Steps
 
