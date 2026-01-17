@@ -17,6 +17,7 @@ import argparse
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
 from matplotlib.colors import LinearSegmentedColormap, Normalize
 from matplotlib import cm
 from datetime import datetime
@@ -216,8 +217,12 @@ def plot_fill_vs_original(base_dir, location, resolution, vmax, output_path):
         print(f"[Warning] No erosion grids found for {location} at {resolution}. Nothing to plot.")
         return
 
-    fig, axes = plt.subplots(2, 1, figsize=(12, 14), sharex=True, sharey=True)
-    axes = axes.ravel()
+    fig = plt.figure(figsize=(12, 14))
+    gs = gridspec.GridSpec(3, 1, height_ratios=[1, 1, 0.05], hspace=0.25)
+    ax_top = fig.add_subplot(gs[0])
+    ax_bottom = fig.add_subplot(gs[1], sharex=ax_top, sharey=ax_top)
+    cbar_ax = fig.add_subplot(gs[2])
+    axes = [ax_top, ax_bottom]
 
     ims = []
     panels = [
@@ -253,16 +258,11 @@ def plot_fill_vs_original(base_dir, location, resolution, vmax, output_path):
 
     # Shared colorbar if at least one panel plotted
     if ims:
-        # Place the colorbar beneath the lower panel to keep plots clear
-        bottom_box = axes[-1].get_position()
-        cbar_height = 0.02
-        pad = 0.035
-        cbar_ax = fig.add_axes([bottom_box.x0, bottom_box.y0 - pad, bottom_box.width, cbar_height])
         cbar = fig.colorbar(ims[-1], cax=cbar_ax, orientation='horizontal')
         cbar.set_label("Cumulative Erosion Depth (m)", fontsize=12)
 
-    fig.suptitle(f"{location} | Cumulative Erosion Comparison ({resolution})", fontsize=16, fontweight='bold')
-    plt.tight_layout(rect=[0, 0, 1, 0.94])
+    fig.suptitle(f"{location} | Cumulative Erosion Comparison ({resolution})", fontsize=16, fontweight='bold', y=0.995)
+    plt.tight_layout(rect=[0, 0, 1, 0.985])
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     plt.savefig(output_path, dpi=DPI, bbox_inches='tight', facecolor='white')
