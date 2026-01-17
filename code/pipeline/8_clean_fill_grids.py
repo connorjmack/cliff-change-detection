@@ -11,6 +11,7 @@ For deposition: applies cleaning only (no hole filling)
 
 Arguments:
     location          Name of the study site folder (e.g. SanElijo, Encinitas)
+    --all             Process all locations (DelMar, Solana, Encinitas, SanElijo, Torrey, Blacks)
     --resolution      Grid resolution: '10cm', '25cm', or '1m' (default: 10cm)
     --erosion         Process only erosion clusters/grids
     --deposition      Process only deposition clusters/grids
@@ -681,7 +682,7 @@ def worker(task):
 # ============================================================================
 
 def generate_combined_report(location, resolution, threshold, min_volume, stats_list,
-                             base_dir, skip_cleaning, skip_filling):
+                             base_dir, skip_filling):
     report_dir = os.path.join(base_dir, 'validation', 'hole_filling', 'reports', location)
     os.makedirs(report_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -692,27 +693,28 @@ def generate_combined_report(location, resolution, threshold, min_volume, stats_
         f.write(f"=" * 80 + "\n")
         f.write(f"Location: {location}\nResolution: {resolution}\n")
         f.write(f"Method: Vector (Alphashape) with Physical Coordinates\n")
+        f.write(f"Output: _filled.csv files only (no intermediate _cleaned.csv)\n")
 
         if not stats_list:
             f.write("No files processed.\n")
             return
 
-        if not skip_cleaning:
-            f.write(f"\nCLEANING SUMMARY\n" + "-" * 30 + "\n")
-            total_removed = sum(s['cleaning'].get('removed_threshold', 0) for s in stats_list)
-            f.write(f"Total Clusters Removed by Threshold: {total_removed}\n")
+        # Cleaning is always performed
+        f.write(f"\nCLEANING SUMMARY\n" + "-" * 30 + "\n")
+        total_removed = sum(s['cleaning'].get('removed_threshold', 0) for s in stats_list)
+        f.write(f"Total Clusters Removed by Threshold: {total_removed}\n")
 
         if not skip_filling:
             filled_stats = [s for s in stats_list if s['filling'] is not None]
             if filled_stats:
-                f.write(f"\nHOLE FILLING SUMMARY\n" + "-" * 30 + "\n")
+                f.write(f"\nHOLE FILLING SUMMARY (Erosion only)\n" + "-" * 30 + "\n")
                 f.write(f"Total Vol Change: {sum(s['filling']['volume_change'] for s in filled_stats):.4f} m³\n")
                 f.write(f"Total Holes Filled: {sum(s['filling']['holes_filled'] for s in filled_stats)}\n")
 
         f.write(f"\nDETAILED LOG\n" + "-" * 90 + "\n")
         f.write(f"{'Survey':<25} {'Type':<8} {'Removed':<10} {'Holes':<7} {'Vol∆':<10} {'Fill%':<7}\n")
         for s in sorted(stats_list, key=lambda x: (x['survey'], x['type'])):
-            removed = s['cleaning'].get('removed_threshold', 0) if not skip_cleaning else 'N/A'
+            removed = s['cleaning'].get('removed_threshold', 0)
             if s['filling']:
                 f.write(f"{s['survey']:<25} {s['type']:<8} {removed:<10} {s['filling']['holes_filled']:<7} "
                        f"{s['filling']['volume_change']:<10.3f} {s['filling']['fill_percentage']:<7.1f}\n")
@@ -728,7 +730,8 @@ def generate_combined_report(location, resolution, threshold, min_volume, stats_
 
 def main():
     parser = argparse.ArgumentParser(description='Cleaning + hole filling with physical coordinates')
-    parser.add_argument('location', help='Site folder under results/')
+    parser.add_argument('location', nargs='?', help='Site folder under results/')
+    parser.add_argument('--all', action='store_true', help='Process all locations')
     parser.add_argument('--resolution', choices=['10cm', '25cm', '1m'], default='10cm')
     parser.add_argument('--erosion', action='store_true')
     parser.add_argument('--deposition', action='store_true')
@@ -740,36 +743,69 @@ def main():
                         help='Min connected component size to keep (default: 3)')
     parser.add_argument('--testing', action='store_true')
     parser.add_argument('--replace', action='store_true')
-    parser.add_argument('--skip_cleaning', action='store_true')
-    parser.add_argument('--skip_filling', action='store_true')
+    parser.add_argument('--skip_filling', action='store_true',
+                        help='Skip hole filling (erosion only), only apply cleaning')
     args = parser.parse_args()
 
+    # Validate arguments
+    if args.all and args.location:
+        parser.error("Cannot specify both --all and a specific location")
+    if not args.all and not args.location:
+        parser.error("Must specify either a location or --all")
+
+    # Define all locations
+    all_locations = ['DelMar', 'Solana', 'Encinitas', 'SanElijo', 'Torrey', 'Blacks']
+
+    # Determine which locations to process
+    if args.all:
+        locations = all_locations
+        print(f"\n{'='*80}\nProcessing ALL locations\n{'='*80}")
+    else:
+        locations = [args.location]
+
+    # Process each location
+    for location in locations:
+        process_location(location, args)
+
+
+def process_location(location, args):
+    """Process a single location with the given arguments."""
+    # Set skip_cleaning to False (always do cleaning since we don't save intermediate files)
+    skip_cleaning = False
+
     res_params = get_resolution_params(args.resolution)
-    if args.threshold is None: args.threshold = res_params['default_threshold']
+    threshold = args.threshold if args.threshold is not None else res_params['default_threshold']
 
     process_erosion = args.erosion or not (args.erosion or args.deposition)
     process_deposition = args.deposition or not (args.erosion or args.deposition)
 
     print(f"\n{'='*80}\nCLEANING + HOLE FILLING (Physical Coordinates)\n{'='*80}")
-    print(f"Location: {args.location}")
+    print(f"Location: {location}")
     print(f"Resolution: {args.resolution}")
     print(f"Elevation Scale: {args.elevation_scale}")
     print(f"Cleanup Size: {args.cleanup_size}")
 
     system = platform.system()
     base_dir = '/Volumes/group/LiDAR/LidarProcessing/LidarProcessingCliffs' if system == 'Darwin' else '/project/group/LiDAR/LidarProcessing/LidarProcessingCliffs'
-    results_dir = os.path.join(base_dir, 'results', args.location)
+    results_dir = os.path.join(base_dir, 'results', location)
     util_dir = os.path.join(base_dir, 'utilities')
+
+    # Check if results directory exists
+    if not os.path.isdir(results_dir):
+        print(f"[WARNING] Results directory not found: {results_dir}")
+        print(f"[WARNING] Skipping location: {location}")
+        return
 
     # LOAD SHAPEFILE AND POLYGON CENTROIDS
     try:
-        shp_path = find_shapefile(util_dir, args.location, args.resolution)
+        shp_path = find_shapefile(util_dir, location, args.resolution)
         print(f"Loading shapefile: {shp_path}")
         polygon_centroids = load_polygon_centroids(shp_path)
         print(f"Loaded {len(polygon_centroids)} polygon centroids")
     except FileNotFoundError as e:
         print(f"[ERROR] {e}")
-        print("Cannot proceed without shapefile for physical coordinates.")
+        print(f"[WARNING] Cannot proceed without shapefile for physical coordinates.")
+        print(f"[WARNING] Skipping location: {location}")
         return
 
     tasks = []
@@ -779,8 +815,8 @@ def main():
             for d in os.listdir(ero_dir):
                 path = os.path.join(ero_dir, d)
                 if os.path.isdir(path):
-                    tasks.append((path, 'erosion', args.threshold, args.resolution,
-                                args.testing, args.replace, args.skip_cleaning,
+                    tasks.append((path, 'erosion', threshold, args.resolution,
+                                args.testing, args.replace, skip_cleaning,
                                 args.skip_filling, args.min_volume, res_params,
                                 polygon_centroids, args.elevation_scale, args.cleanup_size))
 
@@ -790,10 +826,14 @@ def main():
             for d in os.listdir(dep_dir):
                 path = os.path.join(dep_dir, d)
                 if os.path.isdir(path):
-                    tasks.append((path, 'deposition', args.threshold, args.resolution,
-                                args.testing, args.replace, args.skip_cleaning,
+                    tasks.append((path, 'deposition', threshold, args.resolution,
+                                args.testing, args.replace, skip_cleaning,
                                 True, args.min_volume, res_params,
                                 polygon_centroids, args.elevation_scale, args.cleanup_size))
+
+    if not tasks:
+        print(f"[WARNING] No tasks found for location: {location}")
+        return
 
     workers = max(1, multiprocessing.cpu_count() // 4)
     print(f"Launching {len(tasks)} tasks on {workers} workers...\n")
@@ -802,11 +842,11 @@ def main():
     with multiprocessing.Pool(workers) as pool:
         stats_results = [r for r in pool.map(worker, tasks) if r is not None]
 
-    generate_combined_report(args.location, args.resolution, args.threshold,
+    generate_combined_report(location, args.resolution, threshold,
                            args.min_volume, stats_results, base_dir,
-                           args.skip_cleaning, args.skip_filling)
+                           args.skip_filling)
 
-    print(f"Processing complete in {time.time() - start_time:.2f} s")
+    print(f"Processing complete for {location} in {time.time() - start_time:.2f} s")
 
 if __name__ == '__main__':
     main()
