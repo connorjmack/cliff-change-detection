@@ -209,8 +209,8 @@ def plot_fill_vs_original(base_dir, location, resolution, vmax, output_path):
     res_val = get_resolution_value(resolution)
     cmap_grid, norm_grid = get_custom_cmap('magma_r', vmax=vmax)
 
-    filled_grid, filled_used = build_cumulative_grid(base_dir, location, resolution, res_val, True)
     original_grid, original_used = build_cumulative_grid(base_dir, location, resolution, res_val, False)
+    filled_grid, filled_used = build_cumulative_grid(base_dir, location, resolution, res_val, True)
 
     if filled_grid is None and original_grid is None:
         print(f"[Warning] No erosion grids found for {location} at {resolution}. Nothing to plot.")
@@ -220,65 +220,45 @@ def plot_fill_vs_original(base_dir, location, resolution, vmax, output_path):
     axes = axes.ravel()
 
     ims = []
-    if filled_grid is not None:
-        ims.append(
-            plot_cumulative_panel(
-                axes[0],
-                filled_grid,
-                res_val,
-                cmap_grid,
-                norm_grid,
-                "Filled Grids",
-            )
-        )
-        axes[0].text(
-            0.01,
-            0.96,
-            f"{len(filled_used)} surveys",
-            transform=axes[0].transAxes,
-            ha='left',
-            va='top',
-            fontsize=10,
-            bbox=dict(boxstyle='round', facecolor='white', alpha=0.85),
-        )
-    else:
-        axes[0].text(0.5, 0.5, "No filled grids found", ha='center', va='center', fontsize=12)
-        axes[0].set_axis_off()
+    panels = [
+        ("Original / Not Filled", original_grid, original_used),
+        ("Filled Grids", filled_grid, filled_used),
+    ]
 
-    if original_grid is not None:
-        ims.append(
-            plot_cumulative_panel(
-                axes[1],
-                original_grid,
-                res_val,
-                cmap_grid,
-                norm_grid,
-                "Original / Not Filled",
+    for ax, (title, grid_df, used_list) in zip(axes, panels):
+        if grid_df is not None:
+            ims.append(
+                plot_cumulative_panel(
+                    ax,
+                    grid_df,
+                    res_val,
+                    cmap_grid,
+                    norm_grid,
+                    title,
+                )
             )
-        )
-        axes[1].text(
-            0.01,
-            0.96,
-            f"{len(original_used)} surveys",
-            transform=axes[1].transAxes,
-            ha='left',
-            va='top',
-            fontsize=10,
-            bbox=dict(boxstyle='round', facecolor='white', alpha=0.85),
-        )
-    else:
-        axes[1].text(0.5, 0.5, "No original grids found", ha='center', va='center', fontsize=12)
-        axes[1].set_axis_off()
+            ax.text(
+                0.01,
+                0.96,
+                f"{len(used_list)} surveys",
+                transform=ax.transAxes,
+                ha='left',
+                va='top',
+                fontsize=10,
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.85),
+            )
+        else:
+            ax.text(0.5, 0.5, f"No {title.lower()} found", ha='center', va='center', fontsize=12)
+            ax.set_axis_off()
 
     # Shared colorbar if at least one panel plotted
     if ims:
-        cbar = fig.colorbar(
-            ims[-1],
-            ax=axes,
-            orientation='horizontal',
-            fraction=0.05,
-            pad=0.06,
-        )
+        # Place the colorbar beneath the lower panel to keep plots clear
+        bottom_box = axes[-1].get_position()
+        cbar_height = 0.02
+        pad = 0.035
+        cbar_ax = fig.add_axes([bottom_box.x0, bottom_box.y0 - pad, bottom_box.width, cbar_height])
+        cbar = fig.colorbar(ims[-1], cax=cbar_ax, orientation='horizontal')
         cbar.set_label("Cumulative Erosion Depth (m)", fontsize=12)
 
     fig.suptitle(f"{location} | Cumulative Erosion Comparison ({resolution})", fontsize=16, fontweight='bold')
