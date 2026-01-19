@@ -107,6 +107,11 @@ def scan_surveys(target_ranges, start_date, end_date, selected_instruments):
 
             # Construct full path to the beach_cliff_ground.las file
             las_path = os.path.join(subdir, "Beach_And_Backshore", f"{name}_beach_cliff_ground.las")
+
+            # Validate file exists before adding to results
+            if not os.path.isfile(las_path):
+                continue
+
             dem_path = f"{os.path.splitext(las_path)[0]}.tif"
 
             # Add to results
