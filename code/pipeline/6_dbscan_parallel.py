@@ -12,7 +12,7 @@ Arguments:
   --min_samples DBSCAN min_samples parameter (default: 30)
   --n_jobs      Number of parallel workers (default: 5)
   --replace     Overwrite existing output files
-  --min_change  Minimum absolute change threshold in meters (default: 0.0)
+  --min_change  Minimum absolute change threshold in meters (default: 0.25, Torrey: 0.30)
 
 Usage Example:
   python3 run_dbscan_significance.py Encinitas --eps 0.35 --min_samples 30 --replace
@@ -42,11 +42,19 @@ except ImportError:
 
 
 def find_latest_pipeline_run(base_m3c2_dir):
-    """Finds the most recently created pipeline_run folder."""
+    """Finds the most recent pipeline_run folder by parsing date from folder name."""
     runs = glob.glob(os.path.join(base_m3c2_dir, "pipeline_run_*"))
     if not runs:
         return None
-    runs.sort(key=os.path.getctime, reverse=True)
+    # Parse date from folder name (pipeline_run_YYYYMMDD) instead of using filesystem ctime
+    def extract_date(path):
+        folder_name = os.path.basename(path)
+        try:
+            date_str = folder_name.replace("pipeline_run_", "")
+            return int(date_str)
+        except ValueError:
+            return 0
+    runs.sort(key=extract_date, reverse=True)
     return runs[0]
 
 
@@ -69,12 +77,13 @@ def run_dbscan_file(las_path, erosion_dir, deposition_dir, eps, min_samples,
     # Create date-specific subdirectories
     final_ero_dir = os.path.join(erosion_dir, parent_subfolder)
     final_dep_dir = os.path.join(deposition_dir, parent_subfolder)
-    
+
     os.makedirs(final_ero_dir, exist_ok=True)
     os.makedirs(final_dep_dir, exist_ok=True)
-    
-    ero_out = os.path.join(final_ero_dir, f"dbscan.las")
-    dep_out = os.path.join(final_dep_dir, f"dbscan.las")
+
+    # Updated file naming to match pipeline documentation
+    ero_clusters_out = os.path.join(final_ero_dir, "ero_clusters.las")
+    dep_clusters_out = os.path.join(final_dep_dir, "dep_clusters.las")
 
     stats = {
         "filename": base_name,
@@ -93,10 +102,10 @@ def run_dbscan_file(las_path, erosion_dir, deposition_dir, eps, min_samples,
     }
 
     try:
-        # Check if both outputs exist
-        both_exist = os.path.exists(ero_out) and os.path.exists(dep_out)
-        if both_exist and not replace:
-            print(f"[SKIP] {parent_subfolder}: Both outputs exist.")
+        # Check if output files exist
+        all_exist = os.path.exists(ero_clusters_out) and os.path.exists(dep_clusters_out)
+        if all_exist and not replace:
+            print(f"[SKIP] {parent_subfolder}: All outputs exist.")
             stats["status"] = "Skipped"
             return stats
 
@@ -180,27 +189,43 @@ def run_dbscan_file(las_path, erosion_dir, deposition_dir, eps, min_samples,
         # ================================================
         erosion_mask = filtered_mask & (m3c2_dist < 0)
         deposition_mask = filtered_mask & (m3c2_dist > 0)
-        
+
+        # Check for zero-value points that are being excluded
+        zero_mask = filtered_mask & (m3c2_dist == 0)
+        n_zeros = np.sum(zero_mask)
+        if n_zeros > 0:
+            print(f"[WARN] {base_name}: {n_zeros} significant points with M3C2=0 excluded from clustering")
+
         stats["erosion_points"] = np.sum(erosion_mask)
         stats["deposition_points"] = np.sum(deposition_mask)
-        
+
+        # ================================================
+        # Compute XYZ once for efficiency
+        # ================================================
+        xyz = np.vstack((las.x, las.y, las.z)).T
+
         # ================================================
         # 4. CLUSTER EROSION
         # ================================================
         if stats["erosion_points"] >= min_samples:
-            xyz = np.vstack((las.x, las.y, las.z)).T
             erosion_pts = xyz[erosion_mask]
-            
+
             ero_labels = DBSCAN(eps=eps, min_samples=min_samples, n_jobs=-1).fit_predict(erosion_pts)
-            
+
             stats["erosion_clusters"] = len(set(ero_labels)) - (1 if -1 in ero_labels else 0)
             stats["erosion_noise"] = int(np.sum(ero_labels == -1))
-            
+
+            # Split erosion into clusters and outliers
             ero_las = las[erosion_mask]
             ero_las.add_extra_dim(laspy.ExtraBytesParams(name='ClusterID', type=np.int32))
             ero_las.ClusterID = ero_labels.astype(np.int32)
-            
-            ero_las.write(ero_out)
+
+            # Save only clustered points (ClusterID >= 0), skip outliers
+            cluster_mask = ero_labels >= 0
+
+            if np.sum(cluster_mask) > 0:
+                ero_clusters = ero_las[cluster_mask]
+                ero_clusters.write(ero_clusters_out)
         else:
             stats["erosion_clusters"] = 0
         
@@ -208,19 +233,24 @@ def run_dbscan_file(las_path, erosion_dir, deposition_dir, eps, min_samples,
         # 5. CLUSTER DEPOSITION
         # ================================================
         if stats["deposition_points"] >= min_samples:
-            xyz = np.vstack((las.x, las.y, las.z)).T
             deposition_pts = xyz[deposition_mask]
-            
+
             dep_labels = DBSCAN(eps=eps, min_samples=min_samples, n_jobs=-1).fit_predict(deposition_pts)
-            
+
             stats["deposition_clusters"] = len(set(dep_labels)) - (1 if -1 in dep_labels else 0)
             stats["deposition_noise"] = int(np.sum(dep_labels == -1))
-            
+
+            # Split deposition into clusters and outliers
             dep_las = las[deposition_mask]
             dep_las.add_extra_dim(laspy.ExtraBytesParams(name='ClusterID', type=np.int32))
             dep_las.ClusterID = dep_labels.astype(np.int32)
-            
-            dep_las.write(dep_out)
+
+            # Save only clustered points (ClusterID >= 0), skip outliers
+            cluster_mask = dep_labels >= 0
+
+            if np.sum(cluster_mask) > 0:
+                dep_clusters = dep_las[cluster_mask]
+                dep_clusters.write(dep_clusters_out)
         else:
             stats["deposition_clusters"] = 0
         
@@ -575,10 +605,11 @@ def main():
     parser.add_argument("--replace", action="store_true", help="Overwrite existing files")
     args = parser.parse_args()
 
-    
-    # [INSERT THIS LINE] Override threshold to 30cm if location is Torrey
-    if args.location == "Torrey": args.min_change = 0.3
-    else: args.min_change = 0.25
+
+    # Override threshold to location-specific default only if user didn't specify
+    if args.min_change == 0.25:  # Using default value
+        if args.location == "Torrey":
+            args.min_change = 0.3
 
     # Base Paths
     system = platform.system()
@@ -610,7 +641,9 @@ def main():
     # Recursive File Search
     search_pattern = os.path.join(input_dir, "**", "*.las")
     las_files = sorted(glob.glob(search_pattern, recursive=True))
-    las_files = [f for f in las_files if "m3c2" in os.path.basename(f).lower() and "_clustered" not in f]
+    # Filter to only M3C2 files, excluding already-processed DBSCAN outputs
+    las_files = [f for f in las_files if "m3c2" in os.path.basename(f).lower() and
+                 "_clusters" not in f and "_outliers" not in f]
     
     if not las_files:
         print(f"[ERROR] No suitable .las files found in {input_dir}")

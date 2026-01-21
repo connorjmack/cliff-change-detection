@@ -86,6 +86,8 @@ def makeGrid(pathin, pathout_m3c2, pathout_cluster, pathout_stats,
 
     # 2. PREPARE ARRAYS (Numpy extraction)
     # Filter unclustered points (-1) early to save memory
+    # Note: With updated DBSCAN output (ero_clusters.las/dep_clusters.las),
+    # input should only contain clustered points, but this filter is kept as defensive programming
     valid_mask = np.array(las['ClusterID']) != -1
     
     x = np.array(las.x)[valid_mask]
@@ -480,7 +482,7 @@ def main():
     mp.set_start_method('spawn', force=True)
 
     p = argparse.ArgumentParser(
-        description="Grid dbscan.las by polygon (OPTIMIZED PARALLEL VERSION)"
+        description="Grid DBSCAN clustered points by polygon (OPTIMIZED PARALLEL VERSION)"
     )
     p.add_argument("location", help="e.g., SanElijo or Solana")
     p.add_argument("--res", type=float, default=None,
@@ -547,7 +549,8 @@ def main():
             date_dir = os.path.join(mode_dir, dt)
             # Create resolution subdirectory
             out_base = os.path.join(date_dir, args.resolution)
-            las_in   = os.path.join(date_dir, "dbscan.las")
+            # Updated to use new DBSCAN output naming: ero_clusters.las / dep_clusters.las
+            las_in   = os.path.join(date_dir, f"{prefix}_clusters.las")
 
             task = {
                 'mode': mode,
