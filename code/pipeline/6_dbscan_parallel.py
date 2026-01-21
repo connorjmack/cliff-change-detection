@@ -12,7 +12,7 @@ Arguments:
   --min_samples DBSCAN min_samples parameter (default: 30)
   --n_jobs      Number of parallel workers (default: 5)
   --replace     Overwrite existing output files
-  --min_change  Minimum absolute change threshold in meters (default: 0.0)
+  --min_change  Minimum absolute change threshold in meters (default: 0.25, Torrey: 0.30)
 
 Usage Example:
   python3 run_dbscan_significance.py Encinitas --eps 0.35 --min_samples 30 --replace
@@ -42,11 +42,19 @@ except ImportError:
 
 
 def find_latest_pipeline_run(base_m3c2_dir):
-    """Finds the most recently created pipeline_run folder."""
+    """Finds the most recent pipeline_run folder by parsing date from folder name."""
     runs = glob.glob(os.path.join(base_m3c2_dir, "pipeline_run_*"))
     if not runs:
         return None
-    runs.sort(key=os.path.getctime, reverse=True)
+    # Parse date from folder name (pipeline_run_YYYYMMDD) instead of using filesystem ctime
+    def extract_date(path):
+        folder_name = os.path.basename(path)
+        try:
+            date_str = folder_name.replace("pipeline_run_", "")
+            return int(date_str)
+        except ValueError:
+            return 0
+    runs.sort(key=extract_date, reverse=True)
     return runs[0]
 
 
@@ -75,9 +83,7 @@ def run_dbscan_file(las_path, erosion_dir, deposition_dir, eps, min_samples,
 
     # Updated file naming to match pipeline documentation
     ero_clusters_out = os.path.join(final_ero_dir, "ero_clusters.las")
-    ero_outliers_out = os.path.join(final_ero_dir, "ero_outliers.las")
     dep_clusters_out = os.path.join(final_dep_dir, "dep_clusters.las")
-    dep_outliers_out = os.path.join(final_dep_dir, "dep_outliers.las")
 
     stats = {
         "filename": base_name,
@@ -96,9 +102,8 @@ def run_dbscan_file(las_path, erosion_dir, deposition_dir, eps, min_samples,
     }
 
     try:
-        # Check if all output files exist
-        all_exist = (os.path.exists(ero_clusters_out) and os.path.exists(ero_outliers_out) and
-                     os.path.exists(dep_clusters_out) and os.path.exists(dep_outliers_out))
+        # Check if output files exist
+        all_exist = os.path.exists(ero_clusters_out) and os.path.exists(dep_clusters_out)
         if all_exist and not replace:
             print(f"[SKIP] {parent_subfolder}: All outputs exist.")
             stats["status"] = "Skipped"
@@ -215,17 +220,12 @@ def run_dbscan_file(las_path, erosion_dir, deposition_dir, eps, min_samples,
             ero_las.add_extra_dim(laspy.ExtraBytesParams(name='ClusterID', type=np.int32))
             ero_las.ClusterID = ero_labels.astype(np.int32)
 
-            # Separate clusters (ClusterID >= 0) and outliers (ClusterID == -1)
+            # Save only clustered points (ClusterID >= 0), skip outliers
             cluster_mask = ero_labels >= 0
-            outlier_mask = ero_labels == -1
 
             if np.sum(cluster_mask) > 0:
                 ero_clusters = ero_las[cluster_mask]
                 ero_clusters.write(ero_clusters_out)
-
-            if np.sum(outlier_mask) > 0:
-                ero_outliers = ero_las[outlier_mask]
-                ero_outliers.write(ero_outliers_out)
         else:
             stats["erosion_clusters"] = 0
         
@@ -245,17 +245,12 @@ def run_dbscan_file(las_path, erosion_dir, deposition_dir, eps, min_samples,
             dep_las.add_extra_dim(laspy.ExtraBytesParams(name='ClusterID', type=np.int32))
             dep_las.ClusterID = dep_labels.astype(np.int32)
 
-            # Separate clusters (ClusterID >= 0) and outliers (ClusterID == -1)
+            # Save only clustered points (ClusterID >= 0), skip outliers
             cluster_mask = dep_labels >= 0
-            outlier_mask = dep_labels == -1
 
             if np.sum(cluster_mask) > 0:
                 dep_clusters = dep_las[cluster_mask]
                 dep_clusters.write(dep_clusters_out)
-
-            if np.sum(outlier_mask) > 0:
-                dep_outliers = dep_las[outlier_mask]
-                dep_outliers.write(dep_outliers_out)
         else:
             stats["deposition_clusters"] = 0
         
@@ -610,10 +605,11 @@ def main():
     parser.add_argument("--replace", action="store_true", help="Overwrite existing files")
     args = parser.parse_args()
 
-    
-    # [INSERT THIS LINE] Override threshold to 30cm if location is Torrey
-    if args.location == "Torrey": args.min_change = 0.3
-    else: args.min_change = 0.25
+
+    # Override threshold to location-specific default only if user didn't specify
+    if args.min_change == 0.25:  # Using default value
+        if args.location == "Torrey":
+            args.min_change = 0.3
 
     # Base Paths
     system = platform.system()
