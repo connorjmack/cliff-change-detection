@@ -840,8 +840,10 @@ Raw LAS
                  └─> [Step 5: M3C2] ──> m3c2/pipeline_run_*/DATE1_to_DATE2/
                       └─> [Step 6: DBSCAN] ──> erosion/ & deposition/
                            └─> [Step 7: Grid] ──> grid_*.csv & clusters_*.csv
-                                └─> [Step 8: Clean/Fill] ──> *_cleaned.csv & *_filled.csv
+                                └─> [Step 8: Clean/Fill] ──> *_filled.csv (final output only)
 ```
+
+**Note:** Step 8 only saves final `*_filled.csv` outputs (no intermediate `*_cleaned.csv` files).
 
 ---
 

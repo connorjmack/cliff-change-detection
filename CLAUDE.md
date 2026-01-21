@@ -39,12 +39,22 @@ The pipeline expects a specific directory structure on shared storage:
 
 ```
 /LidarProcessing/LidarProcessingCliffs/  (this repo)
-├── code/pipeline/           # Main processing scripts (0-8 sequential)
+├── .github/workflows/       # CI/CD (claude.yml, claude-code-review.yml)
+├── code/
+│   ├── pipeline/            # Main processing scripts (0-8 sequential)
+│   │   └── run_daily.py     # Daily orchestrator script
+│   ├── figure_making/       # Publication visualization scripts
+│   ├── streamlit/           # Survey browser web app
+│   └── training/            # ML model training scripts
+├── figures/                 # Generated output figures
+├── reports/
+│   └── daily/               # Daily update logs from step 1
 ├── results/<Location>/      # Output directories (e.g., DelMar, SanElijo)
 │   ├── cropped/
 │   ├── nobeach/
 │   ├── noveg/
 │   ├── m3c2/
+│   │   └── pipeline_run_YYYYMMDD/  # Timestamped run folders
 │   ├── erosion/
 │   │   └── DATE1_to_DATE2/
 │   │       ├── ero_clusters.las
@@ -52,7 +62,8 @@ The pipeline expects a specific directory structure on shared storage:
 │   │       ├── 10cm/                 # Resolution-specific subdirectory
 │   │       │   ├── DATE1_to_DATE2_ero_grid_10cm.csv
 │   │       │   ├── DATE1_to_DATE2_ero_clusters_10cm.csv
-│   │       │   └── DATE1_to_DATE2_ero_stats_10cm.npz
+│   │       │   ├── DATE1_to_DATE2_ero_stats_10cm.npz
+│   │       │   └── DATE1_to_DATE2_ero_grid_10cm_filled.csv  # Step 8 output
 │   │       ├── 25cm/                 # Alternative resolution
 │   │       └── 1m/                   # Alternative resolution
 │   └── deposition/
@@ -63,11 +74,21 @@ The pipeline expects a specific directory structure on shared storage:
 │           ├── 25cm/
 │           └── 1m/
 ├── survey_lists/            # CSV inventories of surveys
-└── utilities/
-    ├── shape_files/         # Polygons for gridding
-    ├── beach_removal/       # RF Models (.joblib) and Scalers
-    ├── canupo/              # Vegetation classifiers (.prm)
-    └── m3c2_params/         # CloudCompare parameter files
+├── tests/
+│   ├── pytest/              # Unit tests for all pipeline steps
+│   └── audits/              # QC scripts (cropping audit, survey audit)
+├── utilities/
+│   ├── shape_files/         # Polygons for gridding
+│   ├── beach_removal/       # RF Models (.joblib) and Scalers
+│   │   └── classification_reports/  # Beach removal stats
+│   ├── canupo/              # Vegetation classifiers (.prm)
+│   ├── m3c2_params/         # CloudCompare parameter files
+│   ├── cropping_boxes/      # Auto-generated crop polygons (UTM)
+│   ├── cliff_top_cutoffs/   # Visual cutoff CSVs per location
+│   └── dbscan/              # DBSCAN clustering reports
+└── validation/
+    ├── m3c2/                # M3C2 reports (step 5 output)
+    └── hole_filling/        # Step 8 validation reports
 
 /LiDAR/MOPLines/
 └── MOPs_SD_County.kml       # MOP line definitions
@@ -92,13 +113,16 @@ python3 code/pipeline/0_make_survey_lists.py --all
 ```bash
 # Update with new surveys
 python3 code/pipeline/1_update_survey_lists.py --location SanElijo
-# or update all locations
+# or update all locations (default if no --location specified)
 python3 code/pipeline/1_update_survey_lists.py --all
 ```
+Generates daily report at `reports/daily/daily_report_YYYYMMDD.txt`.
 
 ### Step 2: Crop to Study Area
 ```bash
 python3 code/pipeline/2_crop_files_parallel.py --location SanElijo --replace
+# or process all locations
+python3 code/pipeline/2_crop_files_parallel.py --all
 ```
 Uses PDAL to crop raw LAS files to MOP line ranges defined in KML.
 
@@ -191,12 +215,38 @@ For example: `results/DelMar/erosion/20250813_to_20250821/1m/20250813_to_2025082
 # Process all locations
 python3 code/pipeline/8_clean_fill_grids.py --all --resolution 25cm
 
-# Process single location
+# Process single location (erosion only)
 python3 code/pipeline/8_clean_fill_grids.py SanElijo --resolution 10cm --erosion --min_volume 2.0
+
+# Deposition only (cleaning only, no filling)
+python3 code/pipeline/8_clean_fill_grids.py SanElijo --resolution 25cm --deposition
+
+# Skip hole filling (cleaning only)
+python3 code/pipeline/8_clean_fill_grids.py SanElijo --resolution 10cm --erosion --skip_filling
+
+# Testing mode (dry-run, no file writes)
+python3 code/pipeline/8_clean_fill_grids.py SanElijo --resolution 10cm --testing
 ```
 Applies cliff-top cutoffs and fills occlusion holes using Alpha Shapes and interpolation to correct volume estimates.
 
+**Parameters:**
+- `--resolution`: Grid resolution (10cm, 25cm, 1m; default: 10cm)
+- `--erosion`/`--deposition`: Process specific type (default: both)
+- `--min_volume`: Minimum cluster volume for hole filling (default: 2.0 m³)
+- `--threshold`: Minimum cells for cluster retention (resolution-dependent defaults)
+- `--cleanup_size`: Morphological cleanup kernel size (default: 3)
+- `--skip_filling`: Skip hole filling (cleaning only)
+- `--testing`: Dry-run mode without file writes
+- `--replace`: Overwrite existing outputs
+
 **Output:** Saves only final `_filled.csv` files (no intermediate `_cleaned.csv`). For erosion: includes cleaning + hole filling + morphological cleanup. For deposition: includes cleaning only.
+
+### Automated Daily Pipeline
+```bash
+python3 code/pipeline/run_daily.py
+python3 code/pipeline/run_daily.py --force-all  # Force reprocessing
+```
+Orchestrates the full pipeline (steps 2-8) for all locations. On Linux, automatically wraps CloudCompare steps with `xvfb-run`. Runs step 8 with `--resolution 25cm --erosion --deposition`.
 
 ## Location-Specific Configuration
 
@@ -210,7 +260,17 @@ Defined in `code/pipeline/2_crop_files_parallel.py`:
 - Blacks: 520-567
 
 ### Global Coordinate Shifts
-CloudCompare requires coordinate shifts for some locations to handle large coordinate values. These are defined in scripts 5 (vegetation) and 6 (M3C2) in the `shift` dictionary. Check these when adding new locations.
+CloudCompare requires coordinate shifts for some locations to handle large coordinate values. These are defined in scripts 4 (vegetation) and 5 (M3C2) in the `shift` dictionary:
+```python
+shift = {
+    "SanElijo":   ("-473000", "-3653000", "0"),
+    "Encinitas":  ("-472000", "-3655000", "0"),
+    "Solana":     ("-475000", "-3650000", "0"),
+    "Torrey":     ("-475000", "-3650000", "0"),
+    # DelMar and Blacks may not need shifts (verify in scripts)
+}
+```
+**Important:** These shifts must be consistent across steps 4 and 5. Check when adding new locations.
 
 ## Utilities & Supporting Tools
 
@@ -256,10 +316,13 @@ os.environ["MKL_NUM_THREADS"] = str(3)
 
 ### Reporting
 All pipeline steps generate detailed CSV reports and PNG visualizations:
-- `code/pipeline/reports/` - QC reports
-- `utilities/beach_removal/classification_reports/` - Beach removal stats
-- `utilities/dbscan/` - Clustering reports
-- `validation/m3c2/` - Change detection validation
+- `reports/daily/` - Daily update logs (step 1)
+- `results/<Location>/pipeline_reports/` - Cropping reports (step 2)
+- `code/pipeline/reports/QC_Run_*/` - Cropping audit QC reports
+- `utilities/beach_removal/classification_reports/` - Beach removal stats (step 3)
+- `validation/m3c2/` - M3C2 inventory reports (step 5)
+- `utilities/dbscan/` - DBSCAN clustering reports (step 6)
+- `validation/hole_filling/reports/<Location>/` - Hole filling reports (step 8)
 
 ### Data Flow
 Raw Survey → Cropped → (Audit QC, optional) → Beach Removed → Vegetation Removed → M3C2 (`pipeline_run_YYYYMMDD/`) → DBSCAN Clustered → Gridded → Cleaned/Filled
@@ -284,9 +347,27 @@ The pipeline supports multiple grid resolutions (10cm, 25cm, 1m) for sensitivity
 
 ## Testing & Validation
 
+### Unit Tests (pytest)
+Comprehensive test suite in `tests/pytest/`:
+```bash
+# Run all tests
+pytest tests/pytest/
+
+# Run tests for a specific step
+pytest tests/pytest/test_7_dbscan_parallel.py -v
+```
+
+### Partial Pipeline Runs
 Run partial tests using `--test N` flag on most scripts to process only N files:
 ```bash
 python3 code/pipeline/3_remove_beach_parallel.py SanElijo --test 10
+python3 code/pipeline/6_dbscan_parallel.py SanElijo --test 3
 ```
+
+### Audit Scripts
+Additional QC scripts in `tests/audits/`:
+- `2_audit_cropping.py` - QC cropped files (point count vs size analysis)
+- `audit_survey_list.py` - Validate survey inventory CSVs
+- `status_update.py` - Pipeline progress tracking
 
 Always check generated reports and visualizations after each pipeline stage to validate results before proceeding.
