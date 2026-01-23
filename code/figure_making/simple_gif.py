@@ -23,7 +23,6 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import matplotlib.gridspec as gridspec
 from matplotlib.colors import LinearSegmentedColormap, Normalize
-from matplotlib import cm
 from matplotlib.ticker import MultipleLocator, MaxNLocator
 from datetime import datetime, timedelta
 
@@ -107,7 +106,7 @@ def add_winter_shading(ax, start_date, end_date):
 
 def get_custom_cmap(name, vmax=6.0):
     """Creates a custom colormap with White at 0."""
-    base_cmap = cm.get_cmap(name, 256)
+    base_cmap = plt.colormaps.get_cmap(name).resampled(256)
     newcolors = base_cmap(np.linspace(0, 1, 256))
     newcolors[0, :] = np.array([1, 1, 1, 1])
     return LinearSegmentedColormap.from_list(f"White_{name}", newcolors), Normalize(vmin=0, vmax=vmax)
@@ -350,9 +349,6 @@ def plot_simple_frame(stats, grids_list, step_idx, out_dir, location,
     location_display = location.replace('DelMar', 'Del Mar').replace('SanElijo', 'San Elijo')
     fig.suptitle(f'{location_display} Coastal Cliff Erosion  |  {current_date.strftime("%B %d, %Y")}',
                  fontsize=FS_TITLE + 4, fontweight='bold', y=0.98)
-
-    # Tight layout
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
 
     # Save frame
     frame_num = str(step_idx).zfill(4)
