@@ -23,7 +23,6 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import matplotlib.gridspec as gridspec
 from matplotlib.colors import LinearSegmentedColormap, Normalize
-from matplotlib import cm
 from matplotlib.ticker import MultipleLocator, MaxNLocator
 from datetime import datetime, timedelta
 
@@ -32,10 +31,9 @@ RESOLUTION = '25cm'
 RES_VAL = 0.25
 FILE_TAG = '25cm'
 
-# --- COLORS ---
-COLOR_VOLUME = '#2C3E50'      # Dark blue-grey for volume line
-COLOR_UNCERTAINTY = '#5DADE2'  # Blue for uncertainty band
-COLOR_SHADING = '#F8F9FA'     # Very light grey for winter bands
+# --- COLORS (matching original dashboard) ---
+COLOR_MAIN = '#495057'        # Dark grey for volume line and uncertainty
+COLOR_SHADING = '#D5D8DC'     # Medium grey for winter bands
 
 # --- COLORMAPS ---
 CMAP_HEATMAP = 'magma_r'
@@ -103,11 +101,11 @@ def add_winter_shading(ax, start_date, end_date):
         if winter_end < start_date or winter_start > end_date:
             continue
 
-        ax.axvspan(winter_start, winter_end, color=COLOR_SHADING, alpha=0.6, zorder=0, linewidth=0)
+        ax.axvspan(winter_start, winter_end, color=COLOR_SHADING, alpha=0.7, zorder=0, linewidth=0)
 
 def get_custom_cmap(name, vmax=6.0):
     """Creates a custom colormap with White at 0."""
-    base_cmap = cm.get_cmap(name, 256)
+    base_cmap = plt.colormaps.get_cmap(name).resampled(256)
     newcolors = base_cmap(np.linspace(0, 1, 256))
     newcolors[0, :] = np.array([1, 1, 1, 1])
     return LinearSegmentedColormap.from_list(f"White_{name}", newcolors), Normalize(vmin=0, vmax=vmax)
@@ -199,7 +197,8 @@ def collect_data(base_dir, location):
             'start': d1, 'end': d2, 'mid': d1 + (d2 - d1) / 2, 'days': days,
             'volume': vol_main, 'vol_lower': vol_low, 'vol_upper': vol_high
         })
-        print(f"  {interval}: Vol={vol_main:.1f} m3")
+        unc_range = vol_high - vol_low
+        print(f"  {interval}: Vol={vol_main:.1f} m3 (uncertainty range: {unc_range:.1f} m3)")
 
     return stats_list, grids_by_step
 
@@ -229,9 +228,9 @@ def plot_simple_frame(stats, grids_list, step_idx, out_dir, location,
     # Slice data up to current step
     current_stats = stats[:step_idx + 1]
 
-    # Compute metrics
+    # Compute metrics (matching original dashboard logic exactly)
     df_stats = pd.DataFrame(current_stats)
-    ends = df_stats['end']
+    ends = df_stats['end']  # Keep as pandas Series like original
     vols = df_stats['volume']
 
     cum_vol = np.cumsum(vols)
@@ -306,14 +305,12 @@ def plot_simple_frame(stats, grids_list, step_idx, out_dir, location,
     # Winter shading
     add_winter_shading(ax_timeline, global_start, global_end)
 
-    # Uncertainty band (drawn first, behind the line)
-    ax_timeline.fill_between(ends, cum_lower, cum_upper, color=COLOR_UNCERTAINTY, alpha=0.35,
-                             edgecolor=COLOR_UNCERTAINTY, linewidth=1.5, label='Uncertainty', zorder=2)
+    # Uncertainty band (matching original dashboard exactly)
+    ax_timeline.fill_between(ends, cum_lower, cum_upper, color=COLOR_MAIN, alpha=0.3)
 
     # Cumulative volume line (drawn on top)
-    ax_timeline.plot(ends, cum_vol, color=COLOR_VOLUME, linewidth=2.5, marker='o',
-                     markersize=5, markerfacecolor='white', markeredgecolor=COLOR_VOLUME,
-                     markeredgewidth=1.5, label='Cumulative Volume', zorder=5)
+    ax_timeline.plot(ends, cum_vol, color=COLOR_MAIN, marker='o', linestyle='-',
+                     linewidth=2, markersize=4)
 
     # Axis limits (consistent across frames)
     ax_timeline.set_ylim(0, max_cum)
@@ -331,11 +328,7 @@ def plot_simple_frame(stats, grids_list, step_idx, out_dir, location,
     plt.setp(ax_timeline.get_xticklabels(), rotation=0, ha='center')
 
     # Grid
-    ax_timeline.grid(True, linestyle='-', alpha=0.3, which='major')
-    ax_timeline.grid(True, linestyle=':', alpha=0.2, which='minor')
-
-    # Legend
-    ax_timeline.legend(loc='upper left', fontsize=FS_ANNOTATION, framealpha=0.9)
+    ax_timeline.grid(True, linestyle=':', alpha=0.5)
 
     ax_timeline.set_title('Cumulative Erosion Volume',
                           fontsize=FS_TITLE, fontweight='bold', pad=15)
@@ -347,9 +340,6 @@ def plot_simple_frame(stats, grids_list, step_idx, out_dir, location,
     location_display = location.replace('DelMar', 'Del Mar').replace('SanElijo', 'San Elijo')
     fig.suptitle(f'{location_display} Coastal Cliff Erosion  |  {current_date.strftime("%B %d, %Y")}',
                  fontsize=FS_TITLE + 4, fontweight='bold', y=0.98)
-
-    # Tight layout
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
 
     # Save frame
     frame_num = str(step_idx).zfill(4)
@@ -438,8 +428,8 @@ def main():
                         help=f"Available: {', '.join(LOCATIONS_ALL)}")
     parser.add_argument('--make-gif', action='store_true',
                         help="Create animated GIF from frames (requires Pillow)")
-    parser.add_argument('--duration', type=int, default=150,
-                        help="Duration per frame in milliseconds (default: 150)")
+    parser.add_argument('--duration', type=int, default=50,
+                        help="Duration per frame in milliseconds (default: 50)")
     args = parser.parse_args()
 
     base_dir = get_base_dir()
