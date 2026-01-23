@@ -585,8 +585,8 @@ def main():
                         help=f"Available: {', '.join(LOCATIONS_ALL)}")
     parser.add_argument('--make-gif', action='store_true',
                         help="Create animated GIF from frames (requires Pillow)")
-    parser.add_argument('--duration', type=int, default=500,
-                        help="Duration per frame in milliseconds (default: 500)")
+    parser.add_argument('--duration', type=int, default=150,
+                        help="Duration per frame in milliseconds (default: 150)")
     args = parser.parse_args()
 
     base_dir = get_base_dir()
