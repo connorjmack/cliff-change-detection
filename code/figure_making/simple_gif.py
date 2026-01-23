@@ -231,12 +231,12 @@ def plot_simple_frame(stats, grids_list, step_idx, out_dir, location,
 
     # Compute metrics
     df_stats = pd.DataFrame(current_stats)
-    ends = df_stats['end']
-    vols = df_stats['volume']
+    ends = df_stats['end'].values  # Convert to numpy array
+    vols = df_stats['volume'].values
 
     cum_vol = np.cumsum(vols)
-    cum_lower = np.cumsum([s['vol_lower'] for s in current_stats])
-    cum_upper = np.cumsum([s['vol_upper'] for s in current_stats])
+    cum_lower = np.cumsum(np.array([s['vol_lower'] for s in current_stats]))
+    cum_upper = np.cumsum(np.array([s['vol_upper'] for s in current_stats]))
 
     # Current cumulative grid
     cum_grid = compute_cumulative_grid(grids_list, step_idx)
@@ -307,8 +307,11 @@ def plot_simple_frame(stats, grids_list, step_idx, out_dir, location,
     add_winter_shading(ax_timeline, global_start, global_end)
 
     # Uncertainty band (drawn first, behind the line)
-    ax_timeline.fill_between(ends, cum_lower, cum_upper, color=COLOR_UNCERTAINTY, alpha=0.35,
-                             edgecolor=COLOR_UNCERTAINTY, linewidth=1.5, label='Uncertainty', zorder=2)
+    ax_timeline.fill_between(ends, cum_lower, cum_upper, color=COLOR_UNCERTAINTY, alpha=0.3,
+                             label='Uncertainty Bounds', zorder=2)
+    # Upper and lower bound lines for visibility
+    ax_timeline.plot(ends, cum_lower, color=COLOR_UNCERTAINTY, linewidth=1, linestyle='--', alpha=0.7, zorder=3)
+    ax_timeline.plot(ends, cum_upper, color=COLOR_UNCERTAINTY, linewidth=1, linestyle='--', alpha=0.7, zorder=3)
 
     # Cumulative volume line (drawn on top)
     ax_timeline.plot(ends, cum_vol, color=COLOR_VOLUME, linewidth=2.5, marker='o',
