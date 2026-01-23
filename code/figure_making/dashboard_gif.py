@@ -33,7 +33,6 @@ FILE_TAG = '25cm'
 # --- COLORS ---
 COLOR_MAIN = '#495057'       # Dark Grey (Primary Bars, Lines)
 COLOR_SHADING = '#E9ECEF'    # Light Grey for Winter bands
-COLOR_RATE = '#000000'       # Black for Rate Line
 
 # --- COLORMAPS ---
 CMAP_BUBBLES = 'OrRd'
@@ -278,17 +277,12 @@ def plot_dashboard_frame(stats, grids_list, step_idx, out_dir, location,
     # Slice data up to current step
     current_stats = stats[:step_idx + 1]
 
-    # Rolling Rate
     df_stats = pd.DataFrame(current_stats)
-    df_stats['raw_rate'] = df_stats['volume'] / df_stats['days']
-    df_stats['smooth_rate'] = df_stats['raw_rate'].rolling(window=3, center=True, min_periods=1).mean()
-
     starts = df_stats['start']
     ends = df_stats['end']
     mids = df_stats['mid']
     widths = df_stats['days']
     vols = df_stats['volume']
-    rates = df_stats['smooth_rate']
     yerr = [[max(0, s['volume'] - s['vol_lower']) for s in current_stats],
             [max(0, s['vol_upper'] - s['volume']) for s in current_stats]]
 
@@ -346,7 +340,6 @@ def plot_dashboard_frame(stats, grids_list, step_idx, out_dir, location,
     full_df_stats = pd.DataFrame(stats)
     max_vol = full_df_stats['volume'].max() * 1.1
     max_cum = full_df_stats['vol_upper'].cumsum().max() * 1.1
-    max_rate = (full_df_stats['volume'] / full_df_stats['days']).rolling(window=3, min_periods=1).mean().max() * 1.1
 
     # Panel C Y-axis limits (from all large events)
     if not all_large_events_df.empty:
@@ -371,16 +364,10 @@ def plot_dashboard_frame(stats, grids_list, step_idx, out_dir, location,
     ax2.plot(ends, cum_vol_raw, color=COLOR_MAIN, marker='o', linestyle='-', linewidth=2, markersize=4)
     ax2.set_ylabel(r"Volume ($m^3$)", fontsize=FS_LABEL, fontweight='bold', color='black')
     ax2.tick_params(axis='y', labelcolor='black', labelsize=FS_TICK)
-    ax2.set_title(f"B. Cumulative Erosion & Daily Rate (3-Survey Rolling Avg)", loc='left', fontsize=FS_TITLE, fontweight='bold', color='black')
+    ax2.set_title(f"B. Cumulative Erosion Volume", loc='left', fontsize=FS_TITLE, fontweight='bold', color='black')
     ax2.grid(True, linestyle=':', alpha=0.5)
     ax2.tick_params(axis='x', labelsize=FS_TICK, labelcolor='black')
     ax2.set_ylim(0, max_cum)
-
-    ax2_twin = ax2.twinx()
-    ax2_twin.plot(ends, rates, color=COLOR_RATE, marker=None, linestyle='--', linewidth=1.5)
-    ax2_twin.set_ylabel(r"Rate ($m^3/day$)", fontsize=FS_LABEL, fontweight='bold', color='black')
-    ax2_twin.tick_params(axis='y', labelcolor='black', labelsize=FS_TICK)
-    ax2_twin.set_ylim(0, max_rate)
 
     # ==================== PANEL C: COLORED BUBBLES ====================
     add_winter_shading(ax3, global_start, global_end)

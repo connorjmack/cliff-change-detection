@@ -4,7 +4,7 @@ simple_gif.py
 
 Generates a simplified animated dashboard with two panels:
   - Top (2/3): Cumulative erosion heatmap (cliff face view)
-  - Bottom (1/3): Cumulative volume timeline with erosion rate
+  - Bottom (1/3): Cumulative volume timeline
 
 Professional-quality labels and axes for publication/presentation use.
 
@@ -34,8 +34,7 @@ FILE_TAG = '25cm'
 
 # --- COLORS ---
 COLOR_VOLUME = '#2C3E50'      # Dark blue-grey for volume line
-COLOR_VOLUME_FILL = '#85C1E9' # Light blue for uncertainty band
-COLOR_RATE = '#E74C3C'        # Red for rate line
+COLOR_UNCERTAINTY = '#5DADE2'  # Blue for uncertainty band
 COLOR_SHADING = '#F8F9FA'     # Very light grey for winter bands
 
 # --- COLORMAPS ---
@@ -220,7 +219,7 @@ def compute_cumulative_grid(grids_list, up_to_step):
     return cumulative
 
 def plot_simple_frame(stats, grids_list, step_idx, out_dir, location,
-                      global_start, global_end, full_cum_grid, max_cum, max_rate):
+                      global_start, global_end, full_cum_grid, max_cum):
     """
     Plot a simplified two-panel frame at a specific time step.
     """
@@ -232,12 +231,8 @@ def plot_simple_frame(stats, grids_list, step_idx, out_dir, location,
 
     # Compute metrics
     df_stats = pd.DataFrame(current_stats)
-    df_stats['raw_rate'] = df_stats['volume'] / df_stats['days']
-    df_stats['smooth_rate'] = df_stats['raw_rate'].rolling(window=3, center=True, min_periods=1).mean()
-
     ends = df_stats['end']
     vols = df_stats['volume']
-    rates = df_stats['smooth_rate']
 
     cum_vol = np.cumsum(vols)
     cum_lower = np.cumsum([s['vol_lower'] for s in current_stats])
@@ -311,31 +306,23 @@ def plot_simple_frame(stats, grids_list, step_idx, out_dir, location,
     # Winter shading
     add_winter_shading(ax_timeline, global_start, global_end)
 
-    # Uncertainty band
-    ax_timeline.fill_between(ends, cum_lower, cum_upper, color=COLOR_VOLUME_FILL, alpha=0.5, label='Uncertainty')
+    # Uncertainty band (drawn first, behind the line)
+    ax_timeline.fill_between(ends, cum_lower, cum_upper, color=COLOR_UNCERTAINTY, alpha=0.35,
+                             edgecolor=COLOR_UNCERTAINTY, linewidth=1.5, label='Uncertainty', zorder=2)
 
-    # Cumulative volume line
+    # Cumulative volume line (drawn on top)
     ax_timeline.plot(ends, cum_vol, color=COLOR_VOLUME, linewidth=2.5, marker='o',
                      markersize=5, markerfacecolor='white', markeredgecolor=COLOR_VOLUME,
                      markeredgewidth=1.5, label='Cumulative Volume', zorder=5)
 
-    # Rate on twin axis
-    ax_rate = ax_timeline.twinx()
-    ax_rate.plot(ends, rates, color=COLOR_RATE, linewidth=2, linestyle='--',
-                 label='Erosion Rate', zorder=4)
-
     # Axis limits (consistent across frames)
     ax_timeline.set_ylim(0, max_cum)
-    ax_rate.set_ylim(0, max_rate)
 
     # Labels and formatting
     ax_timeline.set_xlabel('Date', fontsize=FS_LABEL, fontweight='bold')
-    ax_timeline.set_ylabel('Cumulative Volume (m$^3$)', fontsize=FS_LABEL, fontweight='bold', color=COLOR_VOLUME)
-    ax_rate.set_ylabel('Erosion Rate (m$^3$/day)', fontsize=FS_LABEL, fontweight='bold', color=COLOR_RATE)
+    ax_timeline.set_ylabel('Cumulative Volume (m$^3$)', fontsize=FS_LABEL, fontweight='bold')
 
     ax_timeline.tick_params(axis='both', labelsize=FS_TICK)
-    ax_timeline.tick_params(axis='y', colors=COLOR_VOLUME)
-    ax_rate.tick_params(axis='y', labelsize=FS_TICK, colors=COLOR_RATE)
 
     # Date formatting
     ax_timeline.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
@@ -347,13 +334,10 @@ def plot_simple_frame(stats, grids_list, step_idx, out_dir, location,
     ax_timeline.grid(True, linestyle='-', alpha=0.3, which='major')
     ax_timeline.grid(True, linestyle=':', alpha=0.2, which='minor')
 
-    # Combined legend
-    lines1, labels1 = ax_timeline.get_legend_handles_labels()
-    lines2, labels2 = ax_rate.get_legend_handles_labels()
-    ax_timeline.legend(lines1 + lines2, labels1 + labels2,
-                       loc='upper left', fontsize=FS_ANNOTATION, framealpha=0.9)
+    # Legend
+    ax_timeline.legend(loc='upper left', fontsize=FS_ANNOTATION, framealpha=0.9)
 
-    ax_timeline.set_title('Cumulative Erosion Volume & Rate (3-Survey Rolling Average)',
+    ax_timeline.set_title('Cumulative Erosion Volume',
                           fontsize=FS_TITLE, fontweight='bold', pad=15)
 
     # Vertical line at current date
@@ -392,7 +376,6 @@ def generate_simple_gif_frames(stats, grids_list, out_dir, location):
     # Compute axis limits from full data
     full_df_stats = pd.DataFrame(stats)
     max_cum = full_df_stats['vol_upper'].cumsum().max() * 1.1
-    max_rate = (full_df_stats['volume'] / full_df_stats['days']).rolling(window=3, min_periods=1).mean().max() * 1.15
 
     # Create output directory
     location_dir = os.path.join(out_dir, location)
@@ -405,7 +388,7 @@ def generate_simple_gif_frames(stats, grids_list, out_dir, location):
     for step_idx in range(n_steps):
         frame_file = plot_simple_frame(
             stats, grids_list, step_idx, location_dir, location,
-            global_start, global_end, full_cum_grid, max_cum, max_rate
+            global_start, global_end, full_cum_grid, max_cum
         )
         if frame_file:
             frame_files.append(frame_file)
