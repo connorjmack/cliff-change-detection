@@ -9,6 +9,9 @@ Arguments:
   --test        Number of survey pairs to process (default: all)
   --replace     Overwrite existing outputs; otherwise skip existing
   --single      Run single-threaded (no parallel processing)
+  --compute-normals   Compute normals with MST orientation before M3C2
+  --normal-radius     Radius for normal computation in meters (default: 0.5 = 1m diameter)
+  --mst-neighbors     Number of MST neighbors for normal orientation (default: 12)
 
 Usage:
   # on Linux/macOS (requires Xvfb)
@@ -36,9 +39,11 @@ def extract_date(path):
     return os.path.splitext(os.path.basename(path))[0].split("_", 1)[0]
 
 
-def compute_m3c2_and_save_all(ref_path, cmp_path, params_file, base_output_dir, shift, cc_path, replace=False):
+def compute_m3c2_and_save_all(ref_path, cmp_path, params_file, base_output_dir, shift, cc_path,
+                               replace=False, compute_normals=False, normal_radius=0.5, mst_neighbors=12):
     """
     Runs CloudCompare CLI to compute M3C2 between ref_path and cmp_path.
+    Optionally computes normals with MST orientation before M3C2.
     Returns a dictionary of detailed performance metrics.
     """
     start_time_epoch = time.time()
@@ -94,9 +99,19 @@ def compute_m3c2_and_save_all(ref_path, cmp_path, params_file, base_output_dir, 
         "-c_export_fmt", "las",
         "-o", "-global_shift", *shift, ref_path,
         "-o", "-global_shift", *shift, cmp_path,
+    ]
+
+    # Add normal computation if requested (applied to both clouds before M3C2)
+    if compute_normals:
+        cmd.extend([
+            "-OCTREE_NORMALS", str(normal_radius),
+            "-ORIENT_NORMS_MST", str(mst_neighbors),
+        ])
+
+    cmd.extend([
         "-M3C2", params_file,
         "-SAVE_CLOUDS", "FILE", save_list
-    ]
+    ])
 
     try:
         subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -186,13 +201,17 @@ def write_robust_report(location, stats, report_dir, args_dict, total_script_tim
 
 
 # --- GLOBAL WRAPPER FUNCTION FOR MULTIPROCESSING ---
-def safe_execute(ref, cmp, params_file, output_dir, shift, cc_path, replace):
+def safe_execute(ref, cmp, params_file, output_dir, shift, cc_path, replace,
+                 compute_normals=False, normal_radius=0.5, mst_neighbors=12):
     """
     Wrapper for compute_m3c2_and_save_all to handle exceptions safely
     and ensure multiprocessing picklability.
     """
     try:
-        return compute_m3c2_and_save_all(ref, cmp, params_file, output_dir, shift, cc_path, replace)
+        return compute_m3c2_and_save_all(
+            ref, cmp, params_file, output_dir, shift, cc_path, replace,
+            compute_normals, normal_radius, mst_neighbors
+        )
     except Exception as e:
         return {
             "pair": f"{extract_date(ref)}_to_{extract_date(cmp)}",
@@ -214,6 +233,12 @@ def main():
     parser.add_argument("--test",    type=int, help="Only process this many pairs")
     parser.add_argument("--replace", action="store_true", help="Overwrite existing outputs")
     parser.add_argument("--single", action="store_true", help="Run single-threaded")
+    parser.add_argument("--compute-normals", action="store_true",
+                        help="Compute normals with MST orientation before M3C2")
+    parser.add_argument("--normal-radius", type=float, default=0.5,
+                        help="Radius for normal computation in meters (default: 0.5 = 1m diameter)")
+    parser.add_argument("--mst-neighbors", type=int, default=12,
+                        help="Number of MST neighbors for normal orientation (default: 12)")
     args = parser.parse_args()
 
     # --- Path Configuration ---
@@ -274,12 +299,23 @@ def main():
     # --- Execution ---
     stats_results = []
 
+    # Normal computation settings
+    compute_normals = args.compute_normals
+    normal_radius = args.normal_radius
+    mst_neighbors = args.mst_neighbors
+
+    if compute_normals:
+        print(f"[CONFIG] Computing normals: radius={normal_radius}m, MST neighbors={mst_neighbors}")
+
     if args.single:
         # Single-threaded
         print("[MODE] Single-threaded execution")
         for ref, cmp in pairs:
             # We can still use the safe_execute wrapper for consistency
-            stats_results.append(safe_execute(ref, cmp, params_file, output_dir, shift, cc_path, args.replace))
+            stats_results.append(safe_execute(
+                ref, cmp, params_file, output_dir, shift, cc_path, args.replace,
+                compute_normals, normal_radius, mst_neighbors
+            ))
     else:
         # Parallel
         n_workers = min(4, os.cpu_count() or 1)
@@ -288,11 +324,12 @@ def main():
             # Use safe_execute (defined at module level) so it can be pickled
             futures = {
                 exe.submit(
-                    safe_execute, 
-                    ref, cmp, params_file, output_dir, shift, cc_path, args.replace
+                    safe_execute,
+                    ref, cmp, params_file, output_dir, shift, cc_path, args.replace,
+                    compute_normals, normal_radius, mst_neighbors
                 ): (ref, cmp) for ref, cmp in pairs
             }
-            
+
             for fut in as_completed(futures):
                 stats_results.append(fut.result())
 
