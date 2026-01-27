@@ -414,44 +414,73 @@ def resample_line(x_data, y_data, resolution):
 
 def detect_plot_bounds(image_array, debug=False):
     """
-    Attempt to detect the plot area bounds by finding axis lines.
+    Detect the plot area bounds by finding where the colored line exists
+    and the transition from white plot background to gray margins.
 
-    This is experimental and may not work for all images.
     Returns (left, right, top, bottom) pixel coordinates or None.
     """
+    h, w = image_array.shape[:2]
+
     # Convert to grayscale
     gray = np.mean(image_array, axis=2)
 
-    h, w = gray.shape
+    # Method 1: Find the bounding box of non-white pixels (the plot area)
+    # Plot backgrounds are typically white (>250), margins have axis labels/ticks
+    white_threshold = 245
 
-    # Look for vertical black lines (y-axis) - scan from left
-    left_bound = None
-    for x in range(w // 4):  # Search left quarter
+    # Find rows and columns that are mostly white (plot area)
+    # vs rows/columns with significant gray content (axis labels)
+
+    # Scan from left to find where plot starts (first mostly-white column)
+    left_bound = 0
+    for x in range(w // 3):
         col = gray[:, x]
-        dark_pixels = np.sum(col < 50)
-        if dark_pixels > h * 0.5:  # More than half the column is dark
+        white_fraction = np.mean(col > white_threshold)
+        if white_fraction > 0.7:  # Mostly white = plot area
             left_bound = x
             break
 
-    # Look for horizontal black lines (x-axis) - scan from bottom
-    bottom_bound = None
-    for y in range(h - 1, h * 3 // 4, -1):  # Search bottom quarter
+    # Scan from right to find where plot ends
+    right_bound = w - 1
+    for x in range(w - 1, 2 * w // 3, -1):
+        col = gray[:, x]
+        white_fraction = np.mean(col > white_threshold)
+        if white_fraction > 0.7:
+            right_bound = x
+            break
+
+    # Scan from top to find where plot starts
+    top_bound = 0
+    for y in range(h // 3):
         row = gray[y, :]
-        dark_pixels = np.sum(row < 50)
-        if dark_pixels > w * 0.5:
+        white_fraction = np.mean(row > white_threshold)
+        if white_fraction > 0.7:
+            top_bound = y
+            break
+
+    # Scan from bottom to find where plot ends
+    bottom_bound = h - 1
+    for y in range(h - 1, 2 * h // 3, -1):
+        row = gray[y, :]
+        white_fraction = np.mean(row > white_threshold)
+        if white_fraction > 0.7:
             bottom_bound = y
             break
 
-    if left_bound is None or bottom_bound is None:
-        return None
-
-    # Estimate right and top bounds (assume some margin)
-    right_bound = w - 50  # Assume 50px margin on right
-    top_bound = 50  # Assume 50px margin on top
+    # Validate bounds make sense
+    if right_bound - left_bound < w * 0.5 or bottom_bound - top_bound < h * 0.5:
+        if debug:
+            print(f"Warning: Detected bounds seem too small, using fallback")
+        # Fallback: assume standard matplotlib margins
+        left_bound = int(w * 0.08)
+        right_bound = int(w * 0.92)
+        top_bound = int(h * 0.08)
+        bottom_bound = int(h * 0.88)
 
     if debug:
         print(f"Detected plot bounds: left={left_bound}, right={right_bound}, "
               f"top={top_bound}, bottom={bottom_bound}")
+        print(f"  Plot size: {right_bound - left_bound} x {bottom_bound - top_bound} pixels")
 
     return (left_bound, right_bound, top_bound, bottom_bound)
 
@@ -536,8 +565,10 @@ Examples:
     parser.add_argument('--plot_right', type=int, help='Right pixel bound of plot area')
     parser.add_argument('--plot_top', type=int, help='Top pixel bound of plot area')
     parser.add_argument('--plot_bottom', type=int, help='Bottom pixel bound of plot area')
-    parser.add_argument('--auto_bounds', action='store_true',
-                        help='Attempt to auto-detect plot bounds (experimental)')
+    parser.add_argument('--auto_bounds', action='store_true', default=True,
+                        help='Auto-detect plot bounds from image (default: True)')
+    parser.add_argument('--no_auto_bounds', action='store_true',
+                        help='Disable auto-detection of plot bounds (use full image)')
 
     # Processing options
     parser.add_argument('--smooth', type=int, default=0,
@@ -617,10 +648,15 @@ Examples:
     if args.plot_left is not None:
         plot_bounds = (args.plot_left, args.plot_right, args.plot_top, args.plot_bottom)
         print(f"Using manual plot bounds: {plot_bounds}")
-    elif args.auto_bounds:
+    elif args.no_auto_bounds:
+        print("Auto-bounds disabled, using full image")
+    else:
+        # Auto-detect by default
         plot_bounds = detect_plot_bounds(image_array, debug=args.debug)
         if plot_bounds:
-            print(f"Auto-detected plot bounds: {plot_bounds}")
+            left, right, top, bottom = plot_bounds
+            print(f"Auto-detected plot bounds: left={left}, right={right}, top={top}, bottom={bottom}")
+            print(f"  Plot area: {right - left} x {bottom - top} pixels")
         else:
             print("Could not auto-detect bounds, using full image")
 
@@ -641,6 +677,19 @@ Examples:
 
     print(f"Data range: X=[{x_data.min():.1f}, {x_data.max():.1f}] m, "
           f"Y=[{y_data.min():.1f}, {y_data.max():.1f}] m")
+
+    # Show what polygon IDs this will produce at each resolution
+    print("\nExpected polygon ID ranges:")
+    for res in RESOLUTIONS:
+        if res == '1m':
+            res_m = 1.0
+        elif res == '25cm':
+            res_m = 0.25
+        else:
+            res_m = 0.10
+        pid_min = int(x_data.min() / res_m)
+        pid_max = int(x_data.max() / res_m)
+        print(f"  {res}: polygon IDs {pid_min} to {pid_max}")
 
     # Optional smoothing
     if args.smooth > 0:
