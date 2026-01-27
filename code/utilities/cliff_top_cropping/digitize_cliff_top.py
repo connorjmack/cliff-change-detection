@@ -266,15 +266,19 @@ def detect_line_pixels(image_array, color_name):
     return mask
 
 
-def extract_line_coordinates(mask, method='top'):
+def extract_line_coordinates(mask, method='top', plot_bounds=None):
     """
     Extract line coordinates from binary mask.
 
-    For each column (x position), finds the line pixel using the specified method.
+    For each column (x position) within the plot area, finds the line pixel
+    using the specified method. Columns outside the plot bounds are ignored
+    to avoid picking up noise from axis labels and margins.
 
     Args:
         mask: Binary mask (H, W) where True = line pixel
         method: 'top' (highest y), 'bottom' (lowest y), 'center' (centroid)
+        plot_bounds: Optional (left, right, top, bottom) pixel bounds of plot area.
+                     If provided, only columns within [left, right] are processed.
 
     Returns:
         Arrays of (x_pixels, y_pixels) for the line
@@ -283,7 +287,13 @@ def extract_line_coordinates(mask, method='top'):
     x_pixels = []
     y_pixels = []
 
-    for x in range(w):
+    # Restrict to plot area columns if bounds are provided
+    if plot_bounds:
+        col_start, col_end = plot_bounds[0], plot_bounds[1]
+    else:
+        col_start, col_end = 0, w
+
+    for x in range(col_start, col_end):
         col = mask[:, x]
         indices = np.where(col)[0]
 
@@ -390,17 +400,21 @@ def smooth_line(x_data, y_data, window=5):
     return x_smooth, y_smooth
 
 
-def resample_line(x_data, y_data, resolution):
+def resample_line(x_data, y_data, resolution, x_min=None, x_max=None):
     """
     Resample line to have one point per polygon ID at the given resolution.
 
-    Interpolates to fill every polygon ID in the range, ensuring complete
-    alongshore coverage even when the source line has pixel-level gaps.
+    Interpolates to fill every polygon ID in the full expected range,
+    ensuring complete alongshore coverage. If x_min/x_max are provided,
+    the output covers the entire extent (using nearest-neighbor extrapolation
+    at the edges). Otherwise, it covers only the detected range.
 
     Args:
         x_data: Alongshore meters
         y_data: Elevation meters
         resolution: Target resolution
+        x_min: Minimum alongshore extent in meters (for full coverage)
+        x_max: Maximum alongshore extent in meters (for full coverage)
 
     Returns:
         DataFrame with Polygon_ID and CliffTop_Z columns
@@ -412,8 +426,25 @@ def resample_line(x_data, y_data, resolution):
     df = df.groupby('Polygon_ID').agg({'CliffTop_Z': 'mean'}).reset_index()
     df = df.sort_values('Polygon_ID')
 
-    # Interpolate to fill every polygon ID across the full range
-    all_ids = np.arange(df['Polygon_ID'].min(), df['Polygon_ID'].max() + 1)
+    # Determine the full polygon ID range
+    if x_min is not None and x_max is not None:
+        if resolution == '1m' or resolution == '100cm':
+            res_m = 1.0
+        elif resolution == '25cm':
+            res_m = 0.25
+        elif resolution == '10cm':
+            res_m = 0.10
+        else:
+            raise ValueError(f"Unknown resolution: {resolution}")
+        id_min = int(x_min / res_m)
+        id_max = int(x_max / res_m)
+    else:
+        id_min = df['Polygon_ID'].min()
+        id_max = df['Polygon_ID'].max()
+
+    # Interpolate across the full range (np.interp extrapolates edges
+    # with the boundary values by default, giving constant extension)
+    all_ids = np.arange(id_min, id_max + 1)
     interp_z = np.interp(all_ids, df['Polygon_ID'].values, df['CliffTop_Z'].values)
     df = pd.DataFrame({'Polygon_ID': all_ids, 'CliffTop_Z': interp_z})
 
@@ -493,7 +524,7 @@ def detect_plot_bounds(image_array, debug=False):
     return (left_bound, right_bound, top_bound, bottom_bound)
 
 
-def plot_verification(location, output_dir, alongshore_m, elevation_m):
+def plot_verification(location, output_dir, alongshore_m, elevation_m, x_min=None, x_max=None):
     """
     Generate verification plot showing extracted line at all resolutions.
     Uses alongshore meters on x-axis (same as testing visualization).
@@ -502,7 +533,7 @@ def plot_verification(location, output_dir, alongshore_m, elevation_m):
 
     for i, resolution in enumerate(RESOLUTIONS):
         ax = axes[i]
-        df = resample_line(alongshore_m, elevation_m, resolution)
+        df = resample_line(alongshore_m, elevation_m, resolution, x_min=x_min, x_max=x_max)
 
         # Convert polygon IDs back to meters for plotting
         if resolution == '1m':
@@ -678,9 +709,10 @@ Examples:
         else:
             print("Could not auto-detect bounds, using full image")
 
-    # Extract line coordinates
+    # Extract line coordinates (only within plot bounds to avoid margin noise)
     print(f"Extracting line using '{args.line_method}' method...")
-    x_pixels, y_pixels = extract_line_coordinates(mask, method=args.line_method)
+    x_pixels, y_pixels = extract_line_coordinates(mask, method=args.line_method,
+                                                   plot_bounds=plot_bounds)
     print(f"Extracted {len(x_pixels)} points")
 
     # Convert to data coordinates
@@ -740,7 +772,7 @@ Examples:
     if args.dry_run:
         print("\n[DRY RUN] Would save to:")
         for resolution in RESOLUTIONS:
-            df = resample_line(x_data, y_data, resolution)
+            df = resample_line(x_data, y_data, resolution, x_min=args.x_min, x_max=args.x_max)
             filename = f"{args.location}_Visual_CliffTop_{resolution}.csv"
             print(f"  {filename}: {len(df)} points")
         return
@@ -752,14 +784,15 @@ Examples:
     # Save CSVs for each resolution
     # Naming convention matches what step 8 expects: {location}_Visual_CliffTop_{resolution}.csv
     for resolution in RESOLUTIONS:
-        df = resample_line(x_data, y_data, resolution)
+        df = resample_line(x_data, y_data, resolution, x_min=args.x_min, x_max=args.x_max)
         filename = f"{args.location}_Visual_CliffTop_{resolution}.csv"
         filepath = os.path.join(output_dir, filename)
         df.to_csv(filepath, index=False)
         print(f"Saved {filename}: {len(df)} points")
 
     # Generate verification plot
-    verify_path = plot_verification(args.location, output_dir, x_data, y_data)
+    verify_path = plot_verification(args.location, output_dir, x_data, y_data,
+                                    x_min=args.x_min, x_max=args.x_max)
     print(f"Saved verification plot: {verify_path}")
 
     print("\nDone!")
