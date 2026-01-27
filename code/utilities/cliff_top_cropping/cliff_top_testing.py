@@ -5,6 +5,9 @@ cliff_top_testing.py
 Visualizes cumulative erosion at 25cm resolution,
 overlaid with the visually digitized cliff top cutoff.
 
+Output matches simple_gif.py heatmap styling for direct
+visual comparison with the source annotated images.
+
 Usage:
     python3 cliff_top_testing.py --location DelMar
     python3 cliff_top_testing.py --location SanElijo
@@ -17,21 +20,37 @@ import argparse
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+from matplotlib.colors import LinearSegmentedColormap, Normalize
+from matplotlib.ticker import MaxNLocator
 import platform
 import re
 from datetime import datetime
-from PIL import Image
 
 # Import shared config from digitize_cliff_top (same directory)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from digitize_cliff_top import (
-    find_image_for_location,
-    HEIGHTS,
-)
+from digitize_cliff_top import HEIGHTS
 
-# Plotting Style
+# --- Plotting style (matching simple_gif.py) ---
 plt.rcParams['font.family'] = 'sans-serif'
 plt.rcParams['font.sans-serif'] = ['Arial', 'DejaVu Sans']
+
+CMAP_HEATMAP = 'magma_r'
+VMAX_GRID = 6.0
+DPI = 150
+
+FS_TITLE = 22
+FS_LABEL = 16
+FS_TICK = 14
+
+
+def get_custom_cmap(name, vmax=6.0):
+    """Creates a custom colormap with White at 0 (matching simple_gif.py)."""
+    base_cmap = plt.colormaps.get_cmap(name).resampled(256)
+    newcolors = base_cmap(np.linspace(0, 1, 256))
+    newcolors[0, :] = np.array([1, 1, 1, 1])
+    return LinearSegmentedColormap.from_list(f"White_{name}", newcolors), Normalize(vmin=0, vmax=vmax)
+
 
 # --- PATHS ---
 def get_base_path():
@@ -138,7 +157,7 @@ def calculate_final_cumulative(grid_files, res_val):
 
 # --- PLOTTING ---
 def process_location(location):
-    """Generate cliff top testing visualization for a single location."""
+    """Generate cliff top testing visualization matching simple_gif.py style."""
     cutoff_dir = os.path.join(BASE_PATH, "utilities", "cliff_top_cutoffs", location)
     output_fig = os.path.join(cutoff_dir, f"{location}_Visual_CliffTop_test.png")
     os.makedirs(cutoff_dir, exist_ok=True)
@@ -172,71 +191,66 @@ def process_location(location):
     else:
         print(f"    [WARNING] Cutoff file not found: {cutoff_path}")
 
-    # 3. Compute axis extents from the grid data itself
+    # 3. Compute extent from grid data (matching simple_gif.py exactly)
     plot_df = cumulative_df.T
     polygon_ids = plot_df.columns.astype(float).values
-    x_coords_meters = polygon_ids * res_val
+    x_meters = polygon_ids * res_val
 
     n_bins = len(plot_df.index)
     max_elevation = n_bins * res_val
-    extent = [x_coords_meters.min(), x_coords_meters.max(), 0, max_elevation]
+    extent = [x_meters.min(), x_meters.max(), 0, max_elevation]
 
     print(f"    Grid extent: X=[{extent[0]:.1f}, {extent[1]:.1f}], Y=[0, {max_elevation:.1f}]")
 
-    # 4. Match figure dimensions to source cliff top image
-    try:
-        source_path = find_image_for_location(location)
-        img = Image.open(source_path)
-        img_w, img_h = img.size
-        dpi = 150
-        fig_w = img_w / dpi
-        fig_h = img_h / dpi
-        print(f"    Source image: {img_w}x{img_h} px -> figure {fig_w:.1f}x{fig_h:.1f} in")
-    except FileNotFoundError:
-        print(f"    [WARNING] Source image not found, using default dimensions")
-        fig_w, fig_h, dpi = 15, 4, 150
+    # 4. Figure setup (matching simple_gif.py heatmap panel)
+    fig = plt.figure(figsize=(20, 7))
+    gs = gridspec.GridSpec(2, 1, height_ratios=[1, 0.04], hspace=0.25)
+    ax = fig.add_subplot(gs[0])
+    cbar_ax = fig.add_subplot(gs[1])
 
-    fig, ax = plt.subplots(1, 1, figsize=(fig_w, fig_h))
+    # 5. Colormap (matching simple_gif.py: magma_r with white at 0)
+    cmap_grid, norm_grid = get_custom_cmap(CMAP_HEATMAP, vmax=VMAX_GRID)
 
-    # 5. Plot heatmap
-    vals = plot_df.values.flatten()
-    vals = vals[vals > 0]
-    if len(vals) > 0:
-        vmin, vmax = np.percentile(vals, [2, 98])
-    else:
-        vmin, vmax = 0, 1
-
+    # 6. Plot heatmap
     im = ax.imshow(plot_df.values, origin='lower', extent=extent,
-                   cmap='Reds', vmin=vmin, vmax=vmax, aspect='auto', interpolation='none')
+                   cmap=cmap_grid, norm=norm_grid, aspect='auto', interpolation='none')
 
-    cbar = plt.colorbar(im, ax=ax, fraction=0.02, pad=0.02)
-    cbar.set_label('Cumulative Erosion (m)')
+    # Horizontal colorbar (matching simple_gif.py layout)
+    cbar = plt.colorbar(im, cax=cbar_ax, orientation='horizontal')
+    cbar.set_label('Cumulative Erosion Depth (m)', fontsize=FS_LABEL, fontweight='bold')
+    cbar.ax.tick_params(labelsize=FS_TICK)
 
-    # 6. Overlay cutoff line
+    # 7. Overlay cutoff line
     if cutoff_df is not None:
         cutoff_df = cutoff_df.sort_values('Polygon_ID')
         cutoff_meters = cutoff_df['Polygon_ID'].values * res_val
 
-        mask = (cutoff_meters >= x_coords_meters.min()) & (cutoff_meters <= x_coords_meters.max())
+        mask = (cutoff_meters >= x_meters.min()) & (cutoff_meters <= x_meters.max())
         subset_meters = cutoff_meters[mask]
         subset_z = cutoff_df['CliffTop_Z'].values[mask]
 
         ax.plot(subset_meters, subset_z,
-                color='blue', linewidth=1.5, linestyle='--', label='Visual Cutoff')
-        ax.legend(loc='upper right', fontsize='small')
+                color='green', linewidth=2, linestyle='-', label='Visual Cutoff')
+        ax.legend(loc='upper right', fontsize=FS_TICK)
 
-    # 7. Formatting - use grid data extent, NOT HEIGHTS
-    ax.set_title(f"{resolution} Resolution", fontsize=12, fontweight='bold')
-    ax.set_xlabel("Alongshore Position (m)")
-    ax.set_ylabel("Elevation (m)")
-    ax.invert_xaxis()
+    # 8. Axis formatting (matching simple_gif.py)
+    ax.set_xlim(x_meters.max(), x_meters.min())  # Inverted for cliff-facing view
     ax.set_ylim(0, max_elevation)
+    ax.set_xlabel('Alongshore Position (m)', fontsize=FS_LABEL, fontweight='bold')
+    ax.set_ylabel('Elevation (m NAVD88)', fontsize=FS_LABEL, fontweight='bold')
+    ax.tick_params(axis='both', labelsize=FS_TICK)
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=10, integer=True))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=8))
 
-    fig.suptitle(f"{location}: Cumulative Erosion & Visual Cutoff Check",
-                 fontsize=14, fontweight='bold')
+    ax.set_title('Cumulative Cliff Erosion (Cliff-Facing View)',
+                 fontsize=FS_TITLE, fontweight='bold', pad=15)
+
+    location_display = location.replace('DelMar', 'Del Mar').replace('SanElijo', 'San Elijo')
+    fig.suptitle(f'{location_display}: Cumulative Erosion & Visual Cutoff Check',
+                 fontsize=FS_TITLE + 4, fontweight='bold', y=0.98)
+
     plt.tight_layout(rect=[0, 0, 1, 0.95])
-
-    plt.savefig(output_fig, dpi=dpi, bbox_inches='tight')
+    plt.savefig(output_fig, dpi=DPI, bbox_inches='tight', facecolor='white')
     plt.close()
     print(f"Done. Saved to {output_fig}")
 
