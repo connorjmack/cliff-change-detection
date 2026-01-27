@@ -451,66 +451,78 @@ def resample_line(x_data, y_data, resolution, x_min=None, x_max=None):
     return df
 
 
+def _longest_run_per_row(dark_mask):
+    """Find the longest continuous True run in each row."""
+    h, w = dark_mask.shape
+    result = np.zeros(h, dtype=int)
+    for y in range(h):
+        row = dark_mask[y]
+        if not np.any(row):
+            continue
+        padded = np.concatenate([[False], row, [False]])
+        diffs = np.diff(padded.astype(int))
+        starts = np.where(diffs == 1)[0]
+        ends = np.where(diffs == -1)[0]
+        if len(starts) > 0 and len(ends) > 0:
+            result[y] = np.max(ends[:len(starts)] - starts[:len(ends)])
+    return result
+
+
+def _longest_run_per_col(dark_mask):
+    """Find the longest continuous True run in each column."""
+    return _longest_run_per_row(dark_mask.T)
+
+
 def detect_plot_bounds(image_array, debug=False):
     """
-    Detect the plot area bounds by finding where the colored line exists
-    and the transition from white plot background to gray margins.
+    Detect the plot area bounds by finding the axis frame border lines.
 
-    Returns (left, right, top, bottom) pixel coordinates or None.
+    Looks for long continuous runs of dark pixels that form the rectangular
+    axis frame. This is more robust than scanning for white space, which
+    can accidentally include title text or margin areas.
+
+    Returns (left, right, top, bottom) pixel coordinates.
     """
     h, w = image_array.shape[:2]
-
-    # Convert to grayscale
     gray = np.mean(image_array, axis=2)
 
-    # Method 1: Find the bounding box of non-white pixels (the plot area)
-    # Plot backgrounds are typically white (>250), margins have axis labels/ticks
-    white_threshold = 245
+    dark_threshold = 100
+    dark_mask = gray < dark_threshold
 
-    # Find rows and columns that are mostly white (plot area)
-    # vs rows/columns with significant gray content (axis labels)
+    # Find rows with long horizontal dark runs (top/bottom axis borders)
+    # A border line spans most of the plot width (at least 40% of image width)
+    min_h_span = int(w * 0.4)
+    row_runs = _longest_run_per_row(dark_mask)
+    border_rows = np.where(row_runs >= min_h_span)[0]
 
-    # Scan from left to find where plot starts (first mostly-white column)
-    left_bound = 0
-    for x in range(w // 3):
-        col = gray[:, x]
-        white_fraction = np.mean(col > white_threshold)
-        if white_fraction > 0.7:  # Mostly white = plot area
-            left_bound = x
-            break
+    # Find columns with long vertical dark runs (left/right axis borders)
+    min_v_span = int(h * 0.3)
+    col_runs = _longest_run_per_col(dark_mask)
+    border_cols = np.where(col_runs >= min_v_span)[0]
 
-    # Scan from right to find where plot ends
-    right_bound = w - 1
-    for x in range(w - 1, 2 * w // 3, -1):
-        col = gray[:, x]
-        white_fraction = np.mean(col > white_threshold)
-        if white_fraction > 0.7:
-            right_bound = x
-            break
+    # Extract bounds from detected border lines
+    if len(border_rows) >= 2:
+        top_bound = border_rows[0]
+        bottom_bound = border_rows[-1]
+    else:
+        if debug:
+            print("Warning: Could not detect horizontal borders, using fallback")
+        top_bound = int(h * 0.08)
+        bottom_bound = int(h * 0.88)
 
-    # Scan from top to find where plot starts
-    top_bound = 0
-    for y in range(h // 3):
-        row = gray[y, :]
-        white_fraction = np.mean(row > white_threshold)
-        if white_fraction > 0.7:
-            top_bound = y
-            break
-
-    # Scan from bottom to find where plot ends
-    bottom_bound = h - 1
-    for y in range(h - 1, 2 * h // 3, -1):
-        row = gray[y, :]
-        white_fraction = np.mean(row > white_threshold)
-        if white_fraction > 0.7:
-            bottom_bound = y
-            break
+    if len(border_cols) >= 2:
+        left_bound = border_cols[0]
+        right_bound = border_cols[-1]
+    else:
+        if debug:
+            print("Warning: Could not detect vertical borders, using fallback")
+        left_bound = int(w * 0.08)
+        right_bound = int(w * 0.92)
 
     # Validate bounds make sense
-    if right_bound - left_bound < w * 0.5 or bottom_bound - top_bound < h * 0.5:
+    if right_bound - left_bound < w * 0.3 or bottom_bound - top_bound < h * 0.3:
         if debug:
             print(f"Warning: Detected bounds seem too small, using fallback")
-        # Fallback: assume standard matplotlib margins
         left_bound = int(w * 0.08)
         right_bound = int(w * 0.92)
         top_bound = int(h * 0.08)
