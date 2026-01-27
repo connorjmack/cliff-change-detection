@@ -205,12 +205,14 @@ def plot_resolution(ax, resolution, base_dir, location):
 
     # 3. Plot Heatmap
     plot_df = cumulative_df.T
-    x_coords = plot_df.columns.astype(float).values
+    # Convert polygon IDs to alongshore meters for x-axis
+    polygon_ids = plot_df.columns.astype(float).values
+    x_coords_meters = polygon_ids * res_val  # Convert to meters
 
     # Y-Axis Logic from reference:
     n_bins = len(plot_df.index)
     max_elevation = n_bins * res_val
-    extent = [x_coords.min(), x_coords.max(), 0, max_elevation]
+    extent = [x_coords_meters.min(), x_coords_meters.max(), 0, max_elevation]
 
     vals = plot_df.values.flatten()
     vals = vals[vals > 0] # Ignore zeros for scaling
@@ -230,17 +232,21 @@ def plot_resolution(ax, resolution, base_dir, location):
         # Sort by Polygon ID just in case
         cutoff_df = cutoff_df.sort_values('Polygon_ID')
 
-        # Filter cutoff to match grid extent
-        mask = (cutoff_df['Polygon_ID'] >= x_coords.min()) & (cutoff_df['Polygon_ID'] <= x_coords.max())
-        subset = cutoff_df[mask]
+        # Convert polygon IDs to meters for plotting
+        cutoff_meters = cutoff_df['Polygon_ID'].values * res_val
 
-        ax.plot(subset['Polygon_ID'], subset['CliffTop_Z'],
+        # Filter cutoff to match grid extent (in meters)
+        mask = (cutoff_meters >= x_coords_meters.min()) & (cutoff_meters <= x_coords_meters.max())
+        subset_meters = cutoff_meters[mask]
+        subset_z = cutoff_df['CliffTop_Z'].values[mask]
+
+        ax.plot(subset_meters, subset_z,
                 color='blue', linewidth=1.5, linestyle='--', label='Visual Cutoff')
         ax.legend(loc='upper right', fontsize='small')
 
     # Formatting
     ax.set_title(f"{resolution} Resolution", fontsize=12, fontweight='bold')
-    ax.set_xlabel("Polygon ID (Alongshore Index)")
+    ax.set_xlabel("Alongshore Position (m)")
     ax.set_ylabel("Elevation (m)")
     ax.invert_xaxis()
     # Use location-specific height for y-axis
