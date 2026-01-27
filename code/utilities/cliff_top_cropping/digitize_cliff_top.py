@@ -84,6 +84,54 @@ def get_output_dir(location):
     return os.path.join(base, "utilities", "cliff_top_cutoffs", location)
 
 
+def find_image_for_location(location):
+    """
+    Auto-detect the cliff top image for a given location.
+
+    Expected naming pattern: {location}_clifftop.png (lowercase)
+    Location: code/utilities/cliff_top_cropping/figures/manual_lines/
+
+    Args:
+        location: Location name (e.g., 'Torrey', 'DelMar')
+
+    Returns:
+        Path to the image file
+    """
+    # Get the script directory to find the figures folder
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    figures_dir = os.path.join(script_dir, "figures", "manual_lines")
+
+    # Try lowercase location name
+    image_name = f"{location.lower()}_clifftop.png"
+    image_path = os.path.join(figures_dir, image_name)
+
+    if os.path.exists(image_path):
+        return image_path
+
+    # Try other common patterns
+    patterns = [
+        f"{location}_clifftop.png",
+        f"{location.lower()}_cliftop.png",  # Common typo
+        f"{location}_CliffTop.png",
+    ]
+
+    for pattern in patterns:
+        candidate = os.path.join(figures_dir, pattern)
+        if os.path.exists(candidate):
+            return candidate
+
+    # List available images
+    available = []
+    if os.path.isdir(figures_dir):
+        available = [f for f in os.listdir(figures_dir) if f.endswith('.png')]
+
+    raise FileNotFoundError(
+        f"Could not find cliff top image for '{location}'.\n"
+        f"Expected: {image_path}\n"
+        f"Available images in {figures_dir}:\n  " + "\n  ".join(available) if available else "(none)"
+    )
+
+
 def find_shapefile(location, resolution='1m'):
     """
     Locate the shapefile for a given location and resolution.
@@ -444,24 +492,25 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    # Auto-detect extents from shapefile and elevation cutoffs:
+    # Auto-detect image and extents from location:
+    python3 digitize_cliff_top.py --location DelMar --line_color green --x_inverted
+
+    # Override with manual image path:
     python3 digitize_cliff_top.py --image annotated.png --location DelMar \\
         --line_color green --x_inverted
 
     # Override with manual extents if needed:
-    python3 digitize_cliff_top.py --image annotated.png --location DelMar \\
+    python3 digitize_cliff_top.py --location DelMar \\
         --x_min 0 --x_max 1400 --y_min 0 --y_max 70 --line_color green --x_inverted
-
-    # Specify plot area bounds manually (pixels):
-    python3 digitize_cliff_top.py --image annotated.png --location DelMar \\
-        --line_color green --x_inverted \\
-        --plot_left 100 --plot_right 1800 --plot_top 50 --plot_bottom 400
         """
     )
 
     # Required arguments
-    parser.add_argument('--image', required=True, help='Path to annotated PNG image')
     parser.add_argument('--location', required=True, help='Location name (e.g., DelMar, SanElijo)')
+
+    # Image path (optional - auto-detected from location if not provided)
+    parser.add_argument('--image', default=None,
+                        help='Path to annotated PNG image. Auto-detected from location if not provided.')
 
     # Axis extent arguments (optional - auto-detected from shapefile/HEIGHTS if not provided)
     parser.add_argument('--x_min', type=float, default=None,
@@ -502,6 +551,12 @@ Examples:
     parser.add_argument('--debug', action='store_true', help='Show debug visualizations')
 
     args = parser.parse_args()
+
+    # Auto-detect image path if not provided
+    if args.image is None:
+        print(f"\nAuto-detecting image for location '{args.location}'...")
+        args.image = find_image_for_location(args.location)
+        print(f"  Found: {args.image}")
 
     # Validate image exists
     if not os.path.exists(args.image):
