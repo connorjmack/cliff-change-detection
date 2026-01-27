@@ -12,30 +12,26 @@ The input image should have:
 - A colored line drawn to mark the cliff top
 
 Usage:
-    # Auto-detect x/y extents from location shapefile and elevation cutoffs:
-    python3 digitize_cliff_top.py --image annotated.png --location DelMar \
-        --line_color green --x_inverted
+    # Auto-detect image, read axis extents from grid data:
+    python3 digitize_cliff_top.py --location DelMar --line_color green --x_inverted
 
-    # Override with manual extents if needed:
-    python3 digitize_cliff_top.py --image annotated.png --location DelMar \
-        --x_min 0 --x_max 1400 --y_min 0 --y_max 70 \
-        --line_color green --x_inverted
+    # Specify axis extents manually (read from the image tick labels):
+    python3 digitize_cliff_top.py --location DelMar \
+        --x_min 0 --x_max 2800 --y_max 48 --line_color green --x_inverted
 
     # Specify plot area bounds manually (pixels):
-    python3 digitize_cliff_top.py --image annotated.png --location DelMar \
-        --line_color green --x_inverted \
+    python3 digitize_cliff_top.py --location DelMar --line_color green --x_inverted \
         --plot_left 100 --plot_right 1800 --plot_top 50 --plot_bottom 400
 """
 
 import os
+import re
 import argparse
 import platform
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from PIL import Image
-from scipy.ndimage import binary_dilation
-from collections import defaultdict
 
 try:
     import geopandas as gpd
@@ -70,6 +66,14 @@ COLOR_RANGES = {
 }
 
 
+def _resolution_to_meters(resolution):
+    """Convert resolution string to meters."""
+    mapping = {'1m': 1.0, '100cm': 1.0, '25cm': 0.25, '10cm': 0.10}
+    if resolution not in mapping:
+        raise ValueError(f"Unknown resolution: {resolution}")
+    return mapping[resolution]
+
+
 def get_base_path():
     """Return base path based on OS."""
     if platform.system() == "Darwin":
@@ -80,7 +84,6 @@ def get_base_path():
 def get_output_dir(location):
     """Return output directory for cliff top cutoff CSVs."""
     base = get_base_path()
-    # Output to location-specific subdirectory
     return os.path.join(base, "utilities", "cliff_top_cutoffs", location)
 
 
@@ -90,28 +93,14 @@ def find_image_for_location(location):
 
     Expected naming pattern: {location}_clifftop.png (lowercase)
     Location: code/utilities/cliff_top_cropping/figures/manual_lines/
-
-    Args:
-        location: Location name (e.g., 'Torrey', 'DelMar')
-
-    Returns:
-        Path to the image file
     """
-    # Get the script directory to find the figures folder
     script_dir = os.path.dirname(os.path.abspath(__file__))
     figures_dir = os.path.join(script_dir, "figures", "manual_lines")
 
-    # Try lowercase location name
-    image_name = f"{location.lower()}_clifftop.png"
-    image_path = os.path.join(figures_dir, image_name)
-
-    if os.path.exists(image_path):
-        return image_path
-
-    # Try other common patterns
     patterns = [
+        f"{location.lower()}_clifftop.png",
         f"{location}_clifftop.png",
-        f"{location.lower()}_cliftop.png",  # Common typo
+        f"{location.lower()}_cliftop.png",
         f"{location}_CliffTop.png",
     ]
 
@@ -120,39 +109,25 @@ def find_image_for_location(location):
         if os.path.exists(candidate):
             return candidate
 
-    # List available images
     available = []
     if os.path.isdir(figures_dir):
         available = [f for f in os.listdir(figures_dir) if f.endswith('.png')]
 
     raise FileNotFoundError(
         f"Could not find cliff top image for '{location}'.\n"
-        f"Expected: {image_path}\n"
-        f"Available images in {figures_dir}:\n  " + "\n  ".join(available) if available else "(none)"
+        f"Searched in: {figures_dir}\n"
+        f"Available images:\n  " + "\n  ".join(available) if available else "(none)"
     )
 
 
 def find_shapefile(location, resolution='1m'):
-    """
-    Locate the shapefile for a given location and resolution.
-
-    Expected naming pattern: {Location}Polygon[e]s{MOP1}to{MOP2}at{resolution}
-    Example: SanElijoPolygones683to708at25cm
-
-    Args:
-        location: Location name (e.g., 'SanElijo')
-        resolution: Resolution string ('1m', '25cm', '10cm')
-
-    Returns:
-        Path to the .shp file
-    """
+    """Locate the shapefile for a given location and resolution."""
     base = get_base_path()
     sf_root = os.path.join(base, 'utilities', 'shape_files')
 
     if not os.path.isdir(sf_root):
         raise FileNotFoundError(f"Shape files directory not found: {sf_root}")
 
-    # Pattern: location name + "Polygon" (may have 'e' or 's') + MOP range + "at" + resolution
     candidates = [
         d for d in os.listdir(sf_root)
         if d.lower().startswith(location.lower())
@@ -164,14 +139,13 @@ def find_shapefile(location, resolution='1m'):
     if not candidates:
         available = [d for d in os.listdir(sf_root) if os.path.isdir(os.path.join(sf_root, d))]
         raise FileNotFoundError(
-            f"No shapefile folder found for location='{location}' resolution='{resolution}'.\n"
+            f"No shapefile folder for location='{location}' resolution='{resolution}'.\n"
             f"Searched in: {sf_root}\n"
             f"Available folders: {available}"
         )
 
     if len(candidates) > 1:
-        print(f"Warning: Multiple shapefile folders found: {candidates}")
-        print(f"Using first match: {candidates[0]}")
+        print(f"Warning: Multiple shapefile folders found: {candidates}, using {candidates[0]}")
 
     fld = candidates[0]
     shp_path = os.path.join(sf_root, fld, fld + '.shp')
@@ -182,64 +156,89 @@ def find_shapefile(location, resolution='1m'):
     return shp_path
 
 
-def get_extent_from_shapefile(location, resolution='1m'):
+def get_n_meters_from_shapefile(location):
     """
-    Get the alongshore extent (x_min, x_max) from the location's shapefile.
+    Get the number of alongshore meters from the 1m shapefile.
 
-    Reads the shapefile and converts polygon IDs back to alongshore meters.
-
-    Args:
-        location: Location name
-        resolution: Resolution to use for shapefile lookup
-
-    Returns:
-        (x_min, x_max) in alongshore meters
+    The number of features in the 1m shapefile equals the number of
+    alongshore meters in the study area.
     """
     if not GEOPANDAS_AVAILABLE:
         raise ImportError("geopandas is required for auto-detecting extent from shapefile")
 
-    shp_path = find_shapefile(location, resolution)
-    print(f"Reading shapefile: {shp_path}")
+    shp_path = find_shapefile(location, '1m')
+    print(f"  Reading shapefile: {shp_path}")
 
     gdf = gpd.read_file(shp_path)
+    n_meters = len(gdf)
+    print(f"  Alongshore meters from shapefile: {n_meters}")
 
-    # Get polygon IDs - they're the row indices
-    polygon_ids = gdf.index.values
-
-    # Convert resolution string to meters
-    if resolution == '1m' or resolution == '100cm':
-        res_m = 1.0
-    elif resolution == '25cm':
-        res_m = 0.25
-    elif resolution == '10cm':
-        res_m = 0.10
-    else:
-        raise ValueError(f"Unknown resolution: {resolution}")
-
-    # Convert polygon IDs to alongshore meters
-    # polygon_id = alongshore_m / resolution_m
-    # so: alongshore_m = polygon_id * resolution_m
-    alongshore_min = polygon_ids.min() * res_m
-    alongshore_max = (polygon_ids.max() + 1) * res_m  # +1 to include the full extent
-
-    return alongshore_min, alongshore_max
+    return n_meters
 
 
-def get_elevation_extent(location):
+def get_image_extent_from_grids(location):
     """
-    Get the elevation extent (y_min, y_max) for a location.
+    Get the exact axis extent used by cliff_top_testing.py to create the image.
 
-    Args:
-        location: Location name
+    Reads one 25cm erosion grid file and computes the extent from the
+    polygon IDs (rows) and elevation bins (columns), matching exactly how
+    cliff_top_testing.py creates its images.
 
     Returns:
-        (y_min, y_max) in meters
+        (x_min, x_max, y_min, y_max) in meters, or None if grids unavailable
     """
-    if location not in HEIGHTS:
-        available = list(HEIGHTS.keys())
-        raise ValueError(f"Unknown location '{location}'. Available: {available}")
+    base = get_base_path()
+    resolution = '25cm'
+    res_val = 0.25
 
-    return 0.0, float(HEIGHTS[location])
+    erosion_dir = os.path.join(base, 'results', location, 'erosion')
+    if not os.path.isdir(erosion_dir):
+        return None
+
+    # Find first valid grid file (same search as cliff_top_testing.py)
+    for date_folder in sorted(os.listdir(erosion_dir)):
+        folder_path = os.path.join(erosion_dir, date_folder)
+        if not os.path.isdir(folder_path):
+            continue
+
+        # Check resolution subdirectory, then the folder itself
+        for search_dir in [os.path.join(folder_path, resolution), folder_path]:
+            if not os.path.isdir(search_dir):
+                continue
+            for f in os.listdir(search_dir):
+                if not (f.endswith('.csv') and 'grid' in f.lower()):
+                    continue
+                filepath = os.path.join(search_dir, f)
+                try:
+                    df = pd.read_csv(filepath, index_col=0)
+                    df = df.apply(pd.to_numeric, errors='coerce')
+
+                    # Polygon IDs are the row index (alongshore positions)
+                    polygon_ids = df.index.astype(float).values
+
+                    # Columns are elevation bin headers like "M3C2_0.25m"
+                    # Strip letters/underscores to get the float values
+                    cleaned_cols = df.columns.astype(str).str.replace(
+                        r'[a-zA-Z_]', '', regex=True)
+                    col_floats = cleaned_cols.astype(float)
+                    # Scale to bin indices (same as clean_and_snap_grid)
+                    scale = 1.0 / res_val
+                    bin_indices = (col_floats * scale).round().astype(int)
+                    n_bins = len(bin_indices)
+
+                    # Compute extent exactly as testing script does
+                    x_coords = polygon_ids * res_val
+                    x_min = float(x_coords.min())
+                    x_max = float(x_coords.max())
+                    y_min = 0.0
+                    y_max = float(n_bins * res_val)
+
+                    return (x_min, x_max, y_min, y_max)
+                except Exception as e:
+                    print(f"  Warning: Could not read grid {f}: {e}")
+                    continue
+
+    return None
 
 
 def detect_line_pixels(image_array, color_name):
@@ -260,9 +259,7 @@ def detect_line_pixels(image_array, color_name):
     min_rgb = np.array(color_range['min'])
     max_rgb = np.array(color_range['max'])
 
-    # Create mask for pixels within color range
     mask = np.all((image_array >= min_rgb) & (image_array <= max_rgb), axis=2)
-
     return mask
 
 
@@ -270,15 +267,13 @@ def extract_line_coordinates(mask, method='top', plot_bounds=None):
     """
     Extract line coordinates from binary mask.
 
-    For each column (x position) within the plot area, finds the line pixel
-    using the specified method. Columns outside the plot bounds are ignored
-    to avoid picking up noise from axis labels and margins.
+    For each pixel column within the plot area, finds the line pixel
+    using the specified method.
 
     Args:
         mask: Binary mask (H, W) where True = line pixel
         method: 'top' (highest y), 'bottom' (lowest y), 'center' (centroid)
-        plot_bounds: Optional (left, right, top, bottom) pixel bounds of plot area.
-                     If provided, only columns within [left, right] are processed.
+        plot_bounds: Optional (left, right, top, bottom) pixel bounds of plot area
 
     Returns:
         Arrays of (x_pixels, y_pixels) for the line
@@ -287,26 +282,26 @@ def extract_line_coordinates(mask, method='top', plot_bounds=None):
     x_pixels = []
     y_pixels = []
 
-    # Restrict to plot area columns if bounds are provided
     if plot_bounds:
         col_start, col_end = plot_bounds[0], plot_bounds[1]
+        row_start, row_end = plot_bounds[2], plot_bounds[3]
     else:
         col_start, col_end = 0, w
+        row_start, row_end = 0, h
 
     for x in range(col_start, col_end):
-        col = mask[:, x]
+        col = mask[row_start:row_end, x]
         indices = np.where(col)[0]
 
         if len(indices) == 0:
             continue
 
         if method == 'top':
-            # In image coordinates, top = smaller y value
-            y = indices.min()
+            y = indices.min() + row_start
         elif method == 'bottom':
-            y = indices.max()
+            y = indices.max() + row_start
         else:  # center
-            y = indices.mean()
+            y = indices.mean() + row_start
 
         x_pixels.append(x)
         y_pixels.append(y)
@@ -314,30 +309,26 @@ def extract_line_coordinates(mask, method='top', plot_bounds=None):
     return np.array(x_pixels), np.array(y_pixels)
 
 
-def pixels_to_data_coords(x_pixels, y_pixels, image_shape,
-                          x_min, x_max, y_min, y_max,
-                          x_inverted=False, plot_bounds=None):
+def pixels_to_data_coords(x_pixels, y_pixels, x_min, x_max, y_min, y_max,
+                          x_inverted=False, plot_bounds=None, image_shape=None):
     """
     Convert pixel coordinates to data coordinates.
 
     Args:
         x_pixels, y_pixels: Pixel coordinates
-        image_shape: (height, width) of image
         x_min, x_max: Data extent in x (alongshore meters)
         y_min, y_max: Data extent in y (elevation meters)
         x_inverted: If True, x-axis runs right-to-left (decreasing)
-        plot_bounds: Optional (left, right, top, bottom) pixel bounds of plot area
-                     If None, assumes entire image is the plot
+        plot_bounds: (left, right, top, bottom) pixel bounds of plot area
+        image_shape: (height, width) - used only if plot_bounds is None
 
     Returns:
         x_data, y_data: Arrays of data coordinates
     """
-    h, w = image_shape
-
-    # Use plot bounds if provided, otherwise use full image
     if plot_bounds:
         px_left, px_right, px_top, px_bottom = plot_bounds
     else:
+        h, w = image_shape
         px_left, px_right, px_top, px_bottom = 0, w, 0, h
 
     plot_width = px_right - px_left
@@ -359,143 +350,125 @@ def pixels_to_data_coords(x_pixels, y_pixels, image_shape,
     return x_data, y_data
 
 
-def alongshore_to_polygon_id(alongshore_m, resolution):
-    """
-    Convert alongshore meters to polygon ID for a given resolution.
-
-    The polygon ID is essentially the bin index at that resolution.
-
-    Args:
-        alongshore_m: Alongshore distance in meters
-        resolution: Resolution string ('1m', '25cm', '10cm')
-
-    Returns:
-        Polygon ID (integer index)
-    """
-    if resolution == '1m' or resolution == '100cm':
-        res_m = 1.0
-    elif resolution == '25cm':
-        res_m = 0.25
-    elif resolution == '10cm':
-        res_m = 0.10
-    else:
-        raise ValueError(f"Unknown resolution: {resolution}")
-
-    return (alongshore_m / res_m).astype(int)
-
-
 def smooth_line(x_data, y_data, window=5):
     """Apply simple moving average smoothing to the line."""
     if len(y_data) < window:
         return x_data, y_data
 
-    # Use convolution for smoothing
     kernel = np.ones(window) / window
     y_smooth = np.convolve(y_data, kernel, mode='valid')
 
-    # Trim x to match
     trim = (len(y_data) - len(y_smooth)) // 2
     x_smooth = x_data[trim:trim + len(y_smooth)]
 
     return x_smooth, y_smooth
 
 
-def resample_line(x_data, y_data, resolution, x_min=None, x_max=None):
+def resample_line(x_data, y_data, resolution, n_meters):
     """
-    Resample line to have one point per polygon ID at the given resolution.
+    Resample line to produce one elevation value per polygon ID.
 
-    Interpolates to fill every polygon ID in the full expected range,
-    ensuring complete alongshore coverage. If x_min/x_max are provided,
-    the output covers the entire extent (using nearest-neighbor extrapolation
-    at the edges). Otherwise, it covers only the detected range.
+    For each polygon ID at the given resolution, computes the corresponding
+    alongshore meter position and interpolates the green line's elevation.
 
     Args:
-        x_data: Alongshore meters
-        y_data: Elevation meters
-        resolution: Target resolution
-        x_min: Minimum alongshore extent in meters (for full coverage)
-        x_max: Maximum alongshore extent in meters (for full coverage)
+        x_data: Alongshore positions in meters (from green line extraction)
+        y_data: Elevation values in meters (from green line extraction)
+        resolution: Target resolution string ('1m', '25cm', '10cm')
+        n_meters: Total number of alongshore meters (from shapefile).
 
     Returns:
         DataFrame with Polygon_ID and CliffTop_Z columns
     """
-    polygon_ids = alongshore_to_polygon_id(x_data, resolution)
+    res_m = _resolution_to_meters(resolution)
 
-    # Group by polygon ID and take mean elevation
-    df = pd.DataFrame({'Polygon_ID': polygon_ids, 'CliffTop_Z': y_data})
-    df = df.groupby('Polygon_ID').agg({'CliffTop_Z': 'mean'}).reset_index()
-    df = df.sort_values('Polygon_ID')
+    n_polygons = int(n_meters / res_m)
+    all_ids = np.arange(n_polygons)
+    meter_positions = all_ids * res_m
 
-    # Determine the full polygon ID range
-    if x_min is not None and x_max is not None:
-        if resolution == '1m' or resolution == '100cm':
-            res_m = 1.0
-        elif resolution == '25cm':
-            res_m = 0.25
-        elif resolution == '10cm':
-            res_m = 0.10
-        else:
-            raise ValueError(f"Unknown resolution: {resolution}")
-        id_min = int(x_min / res_m)
-        id_max = int(x_max / res_m)
-    else:
-        id_min = df['Polygon_ID'].min()
-        id_max = df['Polygon_ID'].max()
+    # Sort extracted data by alongshore position for interpolation
+    sort_idx = np.argsort(x_data)
+    x_sorted = x_data[sort_idx]
+    y_sorted = y_data[sort_idx]
 
-    # Interpolate across the full range (np.interp extrapolates edges
-    # with the boundary values by default, giving constant extension)
-    all_ids = np.arange(id_min, id_max + 1)
-    interp_z = np.interp(all_ids, df['Polygon_ID'].values, df['CliffTop_Z'].values)
-    df = pd.DataFrame({'Polygon_ID': all_ids, 'CliffTop_Z': interp_z})
+    # np.interp clamps to boundary values outside the extracted range
+    elevations = np.interp(meter_positions, x_sorted, y_sorted)
 
-    return df
+    return pd.DataFrame({'Polygon_ID': all_ids, 'CliffTop_Z': elevations})
+
+
+def _group_indices(indices, min_gap=15):
+    """
+    Group consecutive indices, splitting at gaps > min_gap pixels.
+
+    Returns list of lists, where each inner list is a group of adjacent indices.
+    """
+    if len(indices) == 0:
+        return []
+    groups = [[indices[0]]]
+    for i in range(1, len(indices)):
+        if indices[i] - indices[i - 1] > min_gap:
+            groups.append([])
+        groups[-1].append(indices[i])
+    return groups
 
 
 def detect_plot_bounds(image_array, debug=False):
     """
     Detect the plot area bounds by finding the axis frame border lines.
 
-    Uses near-black pixel detection (all RGB channels < 60) to isolate the
-    axis frame from colored data (green lines, red/orange heatmap, etc.).
-    Counts near-black pixels per row/column -- axis border rows/columns have
-    far more near-black pixels than text or tick mark rows.
+    Groups border lines to distinguish the plot frame from the colorbar frame
+    and axis labels. The plot spines are the first two vertical border groups
+    (left and right), and the first/last horizontal border groups (top/bottom).
 
     Returns (left, right, top, bottom) pixel coordinates.
     """
     h, w = image_array.shape[:2]
 
-    # Near-black mask: all RGB channels below threshold.
-    # This isolates axis frame borders and text from colored elements
-    # (green drawn line, orange/red/yellow data) which have at least one
-    # high channel.
+    # Near-black mask: all RGB channels below threshold
     near_black = np.all(image_array < 60, axis=2)
 
-    # Count near-black pixels per row and column
     row_counts = np.sum(near_black, axis=1)
     col_counts = np.sum(near_black, axis=0)
 
-    # Axis border rows have many near-black pixels (the border line spans
-    # the full plot width). Text rows have far fewer (individual characters).
-    # Threshold at 30% of image width for horizontal borders.
+    # --- Horizontal borders (top/bottom spines) ---
+    # Axis spines span the full plot width, so they have many near-black pixels.
+    # Text rows (title, labels) have far fewer.
     h_threshold = w * 0.3
     border_rows = np.where(row_counts > h_threshold)[0]
+    row_groups = _group_indices(border_rows)
 
-    # Threshold at 20% of image height for vertical borders.
-    v_threshold = h * 0.2
-    border_cols = np.where(col_counts > v_threshold)[0]
-
-    if len(border_rows) >= 2:
-        top_bound = border_rows[0]
-        bottom_bound = border_rows[-1]
+    if len(row_groups) >= 2:
+        # First group = top spine, last group = bottom spine
+        top_bound = row_groups[0][0]
+        bottom_bound = row_groups[-1][-1]
+    elif len(row_groups) == 1:
+        top_bound = row_groups[0][0]
+        bottom_bound = row_groups[0][-1]
     else:
         if debug:
             print("Warning: Could not detect horizontal borders, using fallback")
         top_bound = int(h * 0.10)
         bottom_bound = int(h * 0.85)
 
-    if len(border_cols) >= 2:
-        left_bound = border_cols[0]
-        right_bound = border_cols[-1]
+    # --- Vertical borders (left/right spines, excluding colorbar) ---
+    # The colorbar also has vertical border lines. By grouping border columns,
+    # the first two groups correspond to the plot's left and right spines.
+    # Additional groups are colorbar borders and are ignored.
+    v_threshold = h * 0.2
+    border_cols = np.where(col_counts > v_threshold)[0]
+    col_groups = _group_indices(border_cols, min_gap=max(15, int(w * 0.02)))
+
+    if len(col_groups) >= 2:
+        # First group = left spine, second group = right spine
+        left_bound = col_groups[0][0]
+        right_bound = col_groups[1][-1]
+        if debug and len(col_groups) > 2:
+            print(f"  Found {len(col_groups)} vertical border groups "
+                  f"(using first 2, ignoring {len(col_groups) - 2} colorbar groups)")
+    elif len(col_groups) == 1:
+        left_bound = col_groups[0][0]
+        right_bound = col_groups[0][-1]
     else:
         if debug:
             print("Warning: Could not detect vertical borders, using fallback")
@@ -515,32 +488,25 @@ def detect_plot_bounds(image_array, debug=False):
         print(f"Detected plot bounds: left={left_bound}, right={right_bound}, "
               f"top={top_bound}, bottom={bottom_bound}")
         print(f"  Plot size: {right_bound - left_bound} x {bottom_bound - top_bound} pixels")
-        print(f"  Row counts range: {row_counts.min()}-{row_counts.max()}, "
-              f"threshold={h_threshold:.0f}")
-        print(f"  Col counts range: {col_counts.min()}-{col_counts.max()}, "
-              f"threshold={v_threshold:.0f}")
+        if row_groups:
+            print(f"  Horizontal border groups: {len(row_groups)} "
+                  f"(rows: {[g[0] for g in row_groups]})")
+        if col_groups:
+            print(f"  Vertical border groups: {len(col_groups)} "
+                  f"(cols: {[g[0] for g in col_groups]})")
 
     return (left_bound, right_bound, top_bound, bottom_bound)
 
 
-def plot_verification(location, output_dir, alongshore_m, elevation_m, x_min=None, x_max=None):
-    """
-    Generate verification plot showing extracted line at all resolutions.
-    Uses alongshore meters on x-axis (same as testing visualization).
-    """
+def plot_verification(location, output_dir, alongshore_m, elevation_m, n_meters):
+    """Generate verification plot showing extracted line at all resolutions."""
     fig, axes = plt.subplots(len(RESOLUTIONS), 1, figsize=(14, 10))
 
     for i, resolution in enumerate(RESOLUTIONS):
         ax = axes[i]
-        df = resample_line(alongshore_m, elevation_m, resolution, x_min=x_min, x_max=x_max)
+        df = resample_line(alongshore_m, elevation_m, resolution, n_meters=n_meters)
 
-        # Convert polygon IDs back to meters for plotting
-        if resolution == '1m':
-            res_m = 1.0
-        elif resolution == '25cm':
-            res_m = 0.25
-        else:
-            res_m = 0.10
+        res_m = _resolution_to_meters(resolution)
         x_meters = df['Polygon_ID'].values * res_m
 
         ax.plot(x_meters, df['CliffTop_Z'], 'b-', linewidth=1.5)
@@ -569,37 +535,40 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    # Auto-detect image and extents from location:
+    # Auto-detect everything from grid data and shapefile:
     python3 digitize_cliff_top.py --location DelMar --line_color green --x_inverted
 
-    # Override with manual image path:
-    python3 digitize_cliff_top.py --image annotated.png --location DelMar \\
-        --line_color green --x_inverted
-
-    # Override with manual extents if needed:
+    # Specify image axis ranges manually (read from tick labels):
     python3 digitize_cliff_top.py --location DelMar \\
-        --x_min 0 --x_max 1400 --y_min 0 --y_max 70 --line_color green --x_inverted
+        --x_min 0 --x_max 2800 --y_max 48 --line_color green --x_inverted
+
+    # Specify plot area bounds manually (pixel coordinates):
+    python3 digitize_cliff_top.py --location DelMar --line_color green --x_inverted \\
+        --plot_left 100 --plot_right 1800 --plot_top 50 --plot_bottom 400
         """
     )
 
     # Required arguments
     parser.add_argument('--location', required=True, help='Location name (e.g., DelMar, SanElijo)')
 
-    # Image path (optional - auto-detected from location if not provided)
+    # Image path (optional - auto-detected from location)
     parser.add_argument('--image', default=None,
-                        help='Path to annotated PNG image. Auto-detected from location if not provided.')
+                        help='Path to annotated PNG image. Auto-detected if not provided.')
 
-    # Axis extent arguments (optional - auto-detected from shapefile/HEIGHTS if not provided)
+    # Image axis extent (optional - auto-detected from grid data)
+    # These define what data coordinates the image axes represent.
     parser.add_argument('--x_min', type=float, default=None,
-                        help='Minimum x value (alongshore meters). Auto-detected from shapefile if not provided.')
+                        help='Image x-axis minimum (alongshore meters). Read from image tick labels.')
     parser.add_argument('--x_max', type=float, default=None,
-                        help='Maximum x value (alongshore meters). Auto-detected from shapefile if not provided.')
-    parser.add_argument('--y_min', type=float, default=None,
-                        help='Minimum y value (elevation meters). Defaults to 0.')
+                        help='Image x-axis maximum (alongshore meters). Read from image tick labels.')
+    parser.add_argument('--y_min', type=float, default=0.0,
+                        help='Image y-axis minimum (elevation meters). Default: 0.')
     parser.add_argument('--y_max', type=float, default=None,
-                        help='Maximum y value (elevation meters). Auto-detected from HEIGHTS if not provided.')
-    parser.add_argument('--shp_resolution', default='1m', choices=['1m', '25cm', '10cm'],
-                        help='Resolution of shapefile to use for auto-detecting x extent (default: 1m)')
+                        help='Image y-axis maximum (elevation meters). Read from image tick labels.')
+
+    # Output polygon ID count (optional - auto-detected from shapefile)
+    parser.add_argument('--n_meters', type=int, default=None,
+                        help='Number of alongshore meters for output. Auto-detected from 1m shapefile.')
 
     # Line detection options
     parser.add_argument('--line_color', default='green',
@@ -608,13 +577,11 @@ Examples:
     parser.add_argument('--x_inverted', action='store_true',
                         help='X-axis is inverted (decreasing left to right)')
 
-    # Plot bounds (optional - for when axis labels/margins need to be excluded)
+    # Plot bounds (optional - for when auto-detection fails)
     parser.add_argument('--plot_left', type=int, help='Left pixel bound of plot area')
     parser.add_argument('--plot_right', type=int, help='Right pixel bound of plot area')
     parser.add_argument('--plot_top', type=int, help='Top pixel bound of plot area')
     parser.add_argument('--plot_bottom', type=int, help='Bottom pixel bound of plot area')
-    parser.add_argument('--auto_bounds', action='store_true', default=True,
-                        help='Auto-detect plot bounds from image (default: True)')
     parser.add_argument('--no_auto_bounds', action='store_true',
                         help='Disable auto-detection of plot bounds (use full image)')
 
@@ -631,58 +598,97 @@ Examples:
 
     args = parser.parse_args()
 
-    # Auto-detect image path if not provided
+    # --- 1. Find image ---
     if args.image is None:
         print(f"\nAuto-detecting image for location '{args.location}'...")
         args.image = find_image_for_location(args.location)
         print(f"  Found: {args.image}")
 
-    # Validate image exists
     if not os.path.exists(args.image):
         raise FileNotFoundError(f"Image not found: {args.image}")
 
-    # Auto-detect x extent from shapefile if not provided
-    if args.x_min is None or args.x_max is None:
-        print(f"\nAuto-detecting x extent from shapefile (resolution={args.shp_resolution})...")
+    # --- 2. Determine image axis extents ---
+    # Priority: user CLI args > grid data auto-detect > shapefile/HEIGHTS fallback
+    x_min = args.x_min
+    x_max = args.x_max
+    y_min = args.y_min
+    y_max = args.y_max
+    n_meters = args.n_meters
+
+    # Try auto-detecting from grid data (matches cliff_top_testing.py exactly)
+    need_auto = (x_min is None or x_max is None or y_max is None)
+    grid_extent = None
+    if need_auto:
+        print(f"\nAuto-detecting image axis extent from grid data...")
         try:
-            auto_x_min, auto_x_max = get_extent_from_shapefile(args.location, args.shp_resolution)
-            if args.x_min is None:
-                args.x_min = auto_x_min
-                print(f"  x_min = {args.x_min:.1f} m (from shapefile)")
-            if args.x_max is None:
-                args.x_max = auto_x_max
-                print(f"  x_max = {args.x_max:.1f} m (from shapefile)")
+            grid_extent = get_image_extent_from_grids(args.location)
+        except Exception as e:
+            print(f"  Warning: Could not read grid data: {e}")
+
+    if grid_extent is not None:
+        gx_min, gx_max, gy_min, gy_max = grid_extent
+        if x_min is None:
+            x_min = gx_min
+        if x_max is None:
+            x_max = gx_max
+        if y_max is None:
+            y_max = gy_max
+        print(f"  From grid data: X=[{gx_min:.1f}, {gx_max:.1f}], Y=[{gy_min:.1f}, {gy_max:.1f}]")
+    else:
+        # Fallback: shapefile for x, HEIGHTS for y
+        if x_min is None or x_max is None:
+            print(f"\nFalling back to shapefile for x extent...")
+            try:
+                sf_n_meters = get_n_meters_from_shapefile(args.location)
+                if x_min is None:
+                    x_min = 0.0
+                if x_max is None:
+                    x_max = float(sf_n_meters)
+            except (FileNotFoundError, ImportError) as e:
+                raise ValueError(
+                    f"Could not determine x extent: {e}\n"
+                    "Please provide --x_min and --x_max manually."
+                )
+
+        if y_max is None:
+            if args.location in HEIGHTS:
+                # Compute y_max the same way cliff_top_testing.py does:
+                # n_bins * res_val, where n_bins = height / res + 1
+                height = HEIGHTS[args.location]
+                res_val = 0.25  # images are generated at 25cm
+                n_bins = len(np.arange(0, height + res_val, res_val)) - 1
+                y_max = n_bins * res_val
+                print(f"  y_max = {y_max:.2f} m (from HEIGHTS[{args.location}]={height}, "
+                      f"{n_bins} bins at 25cm)")
+            else:
+                raise ValueError(
+                    f"Unknown location '{args.location}'. "
+                    "Please provide --y_max manually."
+                )
+
+    if y_min is None:
+        y_min = 0.0
+
+    # Get n_meters for output polygon IDs (from shapefile)
+    if n_meters is None:
+        try:
+            n_meters = get_n_meters_from_shapefile(args.location)
         except (FileNotFoundError, ImportError) as e:
-            raise ValueError(
-                f"Could not auto-detect x extent: {e}\n"
-                "Please provide --x_min and --x_max manually."
-            )
+            # Fall back to x_max if shapefile unavailable
+            n_meters = int(x_max)
+            print(f"  Using x_max={x_max:.0f} as n_meters (shapefile unavailable: {e})")
 
-    # Auto-detect y extent from HEIGHTS if not provided
-    if args.y_min is None:
-        args.y_min = 0.0
-        print(f"  y_min = {args.y_min:.1f} m (default)")
-    if args.y_max is None:
-        try:
-            _, auto_y_max = get_elevation_extent(args.location)
-            args.y_max = auto_y_max
-            print(f"  y_max = {args.y_max:.1f} m (from HEIGHTS[{args.location}])")
-        except ValueError as e:
-            raise ValueError(
-                f"Could not auto-detect y extent: {e}\n"
-                "Please provide --y_max manually."
-            )
+    print(f"\nImage axis extent: X=[{x_min:.1f}, {x_max:.1f}] m, Y=[{y_min:.1f}, {y_max:.2f}] m")
+    print(f"Output polygon IDs: {n_meters} alongshore meters")
 
-    print(f"\nUsing extents: X=[{args.x_min:.1f}, {args.x_max:.1f}] m, Y=[{args.y_min:.1f}, {args.y_max:.1f}] m")
-
-    # Load image
+    # --- 3. Load image ---
     print(f"\nLoading image: {args.image}")
     img = Image.open(args.image).convert('RGB')
     image_array = np.array(img)
     h, w = image_array.shape[:2]
     print(f"Image size: {w} x {h} pixels")
 
-    # Detect line pixels
+    # --- 4. Detect line pixels ---
     print(f"Detecting {args.line_color} line pixels...")
     mask = detect_line_pixels(image_array, args.line_color)
     n_pixels = np.sum(mask)
@@ -691,7 +697,7 @@ Examples:
     if n_pixels == 0:
         raise ValueError(f"No {args.line_color} pixels found. Try a different --line_color")
 
-    # Determine plot bounds
+    # --- 5. Determine plot bounds ---
     plot_bounds = None
     if args.plot_left is not None:
         plot_bounds = (args.plot_left, args.plot_right, args.plot_top, args.plot_bottom)
@@ -699,58 +705,58 @@ Examples:
     elif args.no_auto_bounds:
         print("Auto-bounds disabled, using full image")
     else:
-        # Auto-detect by default
         plot_bounds = detect_plot_bounds(image_array, debug=args.debug)
         if plot_bounds:
             left, right, top, bottom = plot_bounds
-            print(f"Auto-detected plot bounds: left={left}, right={right}, top={top}, bottom={bottom}")
+            print(f"Auto-detected plot bounds: left={left}, right={right}, "
+                  f"top={top}, bottom={bottom}")
             print(f"  Plot area: {right - left} x {bottom - top} pixels")
         else:
             print("Could not auto-detect bounds, using full image")
 
-    # Extract line coordinates (only within plot bounds to avoid margin noise)
+    # --- 6. Extract line coordinates ---
     print(f"Extracting line using '{args.line_method}' method...")
     x_pixels, y_pixels = extract_line_coordinates(mask, method=args.line_method,
                                                    plot_bounds=plot_bounds)
     print(f"Extracted {len(x_pixels)} points")
 
-    # Convert to data coordinates
+    # --- 7. Convert pixels to data coordinates ---
     x_data, y_data = pixels_to_data_coords(
         x_pixels, y_pixels,
-        image_shape=(h, w),
-        x_min=args.x_min, x_max=args.x_max,
-        y_min=args.y_min, y_max=args.y_max,
+        x_min=x_min, x_max=x_max,
+        y_min=y_min, y_max=y_max,
         x_inverted=args.x_inverted,
-        plot_bounds=plot_bounds
+        plot_bounds=plot_bounds,
+        image_shape=(h, w)
     )
 
     print(f"Data range: X=[{x_data.min():.1f}, {x_data.max():.1f}] m, "
           f"Y=[{y_data.min():.1f}, {y_data.max():.1f}] m")
 
-    # Show what polygon IDs this will produce at each resolution
-    print("\nExpected polygon ID ranges:")
+    # Show expected polygon IDs at each resolution
+    print(f"\nExpected output (from {n_meters} alongshore meters):")
     for res in RESOLUTIONS:
-        if res == '1m':
-            res_m = 1.0
-        elif res == '25cm':
-            res_m = 0.25
-        else:
-            res_m = 0.10
-        pid_min = int(x_data.min() / res_m)
-        pid_max = int(x_data.max() / res_m)
-        print(f"  {res}: polygon IDs {pid_min} to {pid_max}")
+        res_m = _resolution_to_meters(res)
+        n_polygons = int(n_meters / res_m)
+        print(f"  {res}: polygon IDs 0 to {n_polygons - 1} ({n_polygons} polygons)")
 
-    # Optional smoothing
+    # --- 8. Optional smoothing ---
     if args.smooth > 0:
         print(f"Applying smoothing (window={args.smooth})...")
         x_data, y_data = smooth_line(x_data, y_data, window=args.smooth)
 
-    # Debug visualization
+    # --- 9. Debug visualization ---
     if args.debug:
         fig, axes = plt.subplots(1, 3, figsize=(15, 5))
 
         axes[0].imshow(image_array)
-        axes[0].set_title("Original Image")
+        if plot_bounds:
+            left, right, top, bottom = plot_bounds
+            from matplotlib.patches import Rectangle
+            rect = Rectangle((left, top), right - left, bottom - top,
+                              linewidth=2, edgecolor='red', facecolor='none')
+            axes[0].add_patch(rect)
+        axes[0].set_title("Original Image + Detected Bounds")
 
         axes[1].imshow(mask, cmap='gray')
         axes[1].set_title(f"Detected {args.line_color} pixels")
@@ -765,33 +771,32 @@ Examples:
         plt.tight_layout()
         plt.show()
 
-    # Set output directory
+    # --- 10. Save outputs ---
     output_dir = args.output_dir or get_output_dir(args.location)
 
     if args.dry_run:
         print("\n[DRY RUN] Would save to:")
         for resolution in RESOLUTIONS:
-            df = resample_line(x_data, y_data, resolution, x_min=args.x_min, x_max=args.x_max)
+            df = resample_line(x_data, y_data, resolution, n_meters=n_meters)
             filename = f"{args.location}_Visual_CliffTop_{resolution}.csv"
-            print(f"  {filename}: {len(df)} points")
+            print(f"  {filename}: {len(df)} points, "
+                  f"Z range [{df['CliffTop_Z'].min():.1f}, {df['CliffTop_Z'].max():.1f}] m")
         return
 
-    # Create output directory
     os.makedirs(output_dir, exist_ok=True)
     print(f"\nOutput directory: {output_dir}")
 
-    # Save CSVs for each resolution
-    # Naming convention matches what step 8 expects: {location}_Visual_CliffTop_{resolution}.csv
     for resolution in RESOLUTIONS:
-        df = resample_line(x_data, y_data, resolution, x_min=args.x_min, x_max=args.x_max)
+        df = resample_line(x_data, y_data, resolution, n_meters=n_meters)
         filename = f"{args.location}_Visual_CliffTop_{resolution}.csv"
         filepath = os.path.join(output_dir, filename)
         df.to_csv(filepath, index=False)
-        print(f"Saved {filename}: {len(df)} points")
+        print(f"Saved {filename}: {len(df)} points, "
+              f"Z range [{df['CliffTop_Z'].min():.1f}, {df['CliffTop_Z'].max():.1f}] m")
 
     # Generate verification plot
     verify_path = plot_verification(args.location, output_dir, x_data, y_data,
-                                    x_min=args.x_min, x_max=args.x_max)
+                                    n_meters=n_meters)
     print(f"Saved verification plot: {verify_path}")
 
     print("\nDone!")
