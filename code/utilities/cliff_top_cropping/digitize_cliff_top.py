@@ -451,64 +451,47 @@ def resample_line(x_data, y_data, resolution, x_min=None, x_max=None):
     return df
 
 
-def _longest_run_per_row(dark_mask):
-    """Find the longest continuous True run in each row."""
-    h, w = dark_mask.shape
-    result = np.zeros(h, dtype=int)
-    for y in range(h):
-        row = dark_mask[y]
-        if not np.any(row):
-            continue
-        padded = np.concatenate([[False], row, [False]])
-        diffs = np.diff(padded.astype(int))
-        starts = np.where(diffs == 1)[0]
-        ends = np.where(diffs == -1)[0]
-        if len(starts) > 0 and len(ends) > 0:
-            result[y] = np.max(ends[:len(starts)] - starts[:len(ends)])
-    return result
-
-
-def _longest_run_per_col(dark_mask):
-    """Find the longest continuous True run in each column."""
-    return _longest_run_per_row(dark_mask.T)
-
-
 def detect_plot_bounds(image_array, debug=False):
     """
     Detect the plot area bounds by finding the axis frame border lines.
 
-    Looks for long continuous runs of dark pixels that form the rectangular
-    axis frame. This is more robust than scanning for white space, which
-    can accidentally include title text or margin areas.
+    Uses near-black pixel detection (all RGB channels < 60) to isolate the
+    axis frame from colored data (green lines, red/orange heatmap, etc.).
+    Counts near-black pixels per row/column -- axis border rows/columns have
+    far more near-black pixels than text or tick mark rows.
 
     Returns (left, right, top, bottom) pixel coordinates.
     """
     h, w = image_array.shape[:2]
-    gray = np.mean(image_array, axis=2)
 
-    dark_threshold = 100
-    dark_mask = gray < dark_threshold
+    # Near-black mask: all RGB channels below threshold.
+    # This isolates axis frame borders and text from colored elements
+    # (green drawn line, orange/red/yellow data) which have at least one
+    # high channel.
+    near_black = np.all(image_array < 60, axis=2)
 
-    # Find rows with long horizontal dark runs (top/bottom axis borders)
-    # A border line spans most of the plot width (at least 40% of image width)
-    min_h_span = int(w * 0.4)
-    row_runs = _longest_run_per_row(dark_mask)
-    border_rows = np.where(row_runs >= min_h_span)[0]
+    # Count near-black pixels per row and column
+    row_counts = np.sum(near_black, axis=1)
+    col_counts = np.sum(near_black, axis=0)
 
-    # Find columns with long vertical dark runs (left/right axis borders)
-    min_v_span = int(h * 0.3)
-    col_runs = _longest_run_per_col(dark_mask)
-    border_cols = np.where(col_runs >= min_v_span)[0]
+    # Axis border rows have many near-black pixels (the border line spans
+    # the full plot width). Text rows have far fewer (individual characters).
+    # Threshold at 30% of image width for horizontal borders.
+    h_threshold = w * 0.3
+    border_rows = np.where(row_counts > h_threshold)[0]
 
-    # Extract bounds from detected border lines
+    # Threshold at 20% of image height for vertical borders.
+    v_threshold = h * 0.2
+    border_cols = np.where(col_counts > v_threshold)[0]
+
     if len(border_rows) >= 2:
         top_bound = border_rows[0]
         bottom_bound = border_rows[-1]
     else:
         if debug:
             print("Warning: Could not detect horizontal borders, using fallback")
-        top_bound = int(h * 0.08)
-        bottom_bound = int(h * 0.88)
+        top_bound = int(h * 0.10)
+        bottom_bound = int(h * 0.85)
 
     if len(border_cols) >= 2:
         left_bound = border_cols[0]
@@ -522,16 +505,20 @@ def detect_plot_bounds(image_array, debug=False):
     # Validate bounds make sense
     if right_bound - left_bound < w * 0.3 or bottom_bound - top_bound < h * 0.3:
         if debug:
-            print(f"Warning: Detected bounds seem too small, using fallback")
+            print("Warning: Detected bounds seem too small, using fallback")
         left_bound = int(w * 0.08)
         right_bound = int(w * 0.92)
-        top_bound = int(h * 0.08)
-        bottom_bound = int(h * 0.88)
+        top_bound = int(h * 0.10)
+        bottom_bound = int(h * 0.85)
 
     if debug:
         print(f"Detected plot bounds: left={left_bound}, right={right_bound}, "
               f"top={top_bound}, bottom={bottom_bound}")
         print(f"  Plot size: {right_bound - left_bound} x {bottom_bound - top_bound} pixels")
+        print(f"  Row counts range: {row_counts.min()}-{row_counts.max()}, "
+              f"threshold={h_threshold:.0f}")
+        print(f"  Col counts range: {col_counts.min()}-{col_counts.max()}, "
+              f"threshold={v_threshold:.0f}")
 
     return (left_bound, right_bound, top_bound, bottom_bound)
 
