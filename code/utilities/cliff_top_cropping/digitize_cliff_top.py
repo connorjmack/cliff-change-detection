@@ -12,18 +12,15 @@ The input image should have:
 - A colored line drawn to mark the cliff top
 
 Usage:
-    # Auto-detect x/y extents from location shapefile and elevation cutoffs:
-    python3 digitize_cliff_top.py --image annotated.png --location DelMar \
-        --line_color green --x_inverted
+    # Auto-detect alongshore meters from shapefile and elevation from HEIGHTS:
+    python3 digitize_cliff_top.py --location DelMar --line_color green --x_inverted
 
-    # Override with manual extents if needed:
-    python3 digitize_cliff_top.py --image annotated.png --location DelMar \
-        --x_min 0 --x_max 1400 --y_min 0 --y_max 70 \
-        --line_color green --x_inverted
+    # Override with manual alongshore meter count if needed:
+    python3 digitize_cliff_top.py --location DelMar --n_meters 1400 \
+        --y_min 0 --y_max 70 --line_color green --x_inverted
 
     # Specify plot area bounds manually (pixels):
-    python3 digitize_cliff_top.py --image annotated.png --location DelMar \
-        --line_color green --x_inverted \
+    python3 digitize_cliff_top.py --location DelMar --line_color green --x_inverted \
         --plot_left 100 --plot_right 1800 --plot_top 50 --plot_bottom 400
 """
 
@@ -34,8 +31,6 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from PIL import Image
-from scipy.ndimage import binary_dilation
-from collections import defaultdict
 
 try:
     import geopandas as gpd
@@ -182,47 +177,30 @@ def find_shapefile(location, resolution='1m'):
     return shp_path
 
 
-def get_extent_from_shapefile(location, resolution='1m'):
+def get_n_meters_from_shapefile(location):
     """
-    Get the alongshore extent (x_min, x_max) from the location's shapefile.
+    Get the number of alongshore meters from the 1m shapefile.
 
-    Reads the shapefile and converts polygon IDs back to alongshore meters.
+    The number of features in the 1m shapefile equals the number of
+    alongshore meters in the study area.
 
     Args:
         location: Location name
-        resolution: Resolution to use for shapefile lookup
 
     Returns:
-        (x_min, x_max) in alongshore meters
+        Number of alongshore meters (int)
     """
     if not GEOPANDAS_AVAILABLE:
         raise ImportError("geopandas is required for auto-detecting extent from shapefile")
 
-    shp_path = find_shapefile(location, resolution)
+    shp_path = find_shapefile(location, '1m')
     print(f"Reading shapefile: {shp_path}")
 
     gdf = gpd.read_file(shp_path)
+    n_meters = len(gdf)
+    print(f"  Number of alongshore meters: {n_meters}")
 
-    # Get polygon IDs - they're the row indices
-    polygon_ids = gdf.index.values
-
-    # Convert resolution string to meters
-    if resolution == '1m' or resolution == '100cm':
-        res_m = 1.0
-    elif resolution == '25cm':
-        res_m = 0.25
-    elif resolution == '10cm':
-        res_m = 0.10
-    else:
-        raise ValueError(f"Unknown resolution: {resolution}")
-
-    # Convert polygon IDs to alongshore meters
-    # polygon_id = alongshore_m / resolution_m
-    # so: alongshore_m = polygon_id * resolution_m
-    alongshore_min = polygon_ids.min() * res_m
-    alongshore_max = (polygon_ids.max() + 1) * res_m  # +1 to include the full extent
-
-    return alongshore_min, alongshore_max
+    return n_meters
 
 
 def get_elevation_extent(location):
@@ -359,31 +337,6 @@ def pixels_to_data_coords(x_pixels, y_pixels, image_shape,
     return x_data, y_data
 
 
-def alongshore_to_polygon_id(alongshore_m, resolution):
-    """
-    Convert alongshore meters to polygon ID for a given resolution.
-
-    The polygon ID is essentially the bin index at that resolution.
-
-    Args:
-        alongshore_m: Alongshore distance in meters
-        resolution: Resolution string ('1m', '25cm', '10cm')
-
-    Returns:
-        Polygon ID (integer index)
-    """
-    if resolution == '1m' or resolution == '100cm':
-        res_m = 1.0
-    elif resolution == '25cm':
-        res_m = 0.25
-    elif resolution == '10cm':
-        res_m = 0.10
-    else:
-        raise ValueError(f"Unknown resolution: {resolution}")
-
-    return (alongshore_m / res_m).astype(int)
-
-
 def smooth_line(x_data, y_data, window=5):
     """Apply simple moving average smoothing to the line."""
     if len(y_data) < window:
@@ -400,55 +353,52 @@ def smooth_line(x_data, y_data, window=5):
     return x_smooth, y_smooth
 
 
-def resample_line(x_data, y_data, resolution, x_min=None, x_max=None):
+def resample_line(x_data, y_data, resolution, n_meters=None):
     """
-    Resample line to have one point per polygon ID at the given resolution.
+    Resample line to produce one elevation value per polygon ID.
 
-    Interpolates to fill every polygon ID in the full expected range,
-    ensuring complete alongshore coverage. If x_min/x_max are provided,
-    the output covers the entire extent (using nearest-neighbor extrapolation
-    at the edges). Otherwise, it covers only the detected range.
+    For each polygon ID at the given resolution, computes the corresponding
+    alongshore meter position and interpolates the green line's elevation.
+    The number of polygon IDs is derived from n_meters (the total alongshore
+    meters from the shapefile).
 
     Args:
-        x_data: Alongshore meters
-        y_data: Elevation meters
-        resolution: Target resolution
-        x_min: Minimum alongshore extent in meters (for full coverage)
-        x_max: Maximum alongshore extent in meters (for full coverage)
+        x_data: Alongshore positions in meters (from green line extraction)
+        y_data: Elevation values in meters (from green line extraction)
+        resolution: Target resolution string ('1m', '25cm', '10cm')
+        n_meters: Total number of alongshore meters (from shapefile).
+                  Determines the number of output polygon IDs.
 
     Returns:
         DataFrame with Polygon_ID and CliffTop_Z columns
     """
-    polygon_ids = alongshore_to_polygon_id(x_data, resolution)
-
-    # Group by polygon ID and take mean elevation
-    df = pd.DataFrame({'Polygon_ID': polygon_ids, 'CliffTop_Z': y_data})
-    df = df.groupby('Polygon_ID').agg({'CliffTop_Z': 'mean'}).reset_index()
-    df = df.sort_values('Polygon_ID')
-
-    # Determine the full polygon ID range
-    if x_min is not None and x_max is not None:
-        if resolution == '1m' or resolution == '100cm':
-            res_m = 1.0
-        elif resolution == '25cm':
-            res_m = 0.25
-        elif resolution == '10cm':
-            res_m = 0.10
-        else:
-            raise ValueError(f"Unknown resolution: {resolution}")
-        id_min = int(x_min / res_m)
-        id_max = int(x_max / res_m)
+    if resolution == '1m' or resolution == '100cm':
+        res_m = 1.0
+    elif resolution == '25cm':
+        res_m = 0.25
+    elif resolution == '10cm':
+        res_m = 0.10
     else:
-        id_min = df['Polygon_ID'].min()
-        id_max = df['Polygon_ID'].max()
+        raise ValueError(f"Unknown resolution: {resolution}")
 
-    # Interpolate across the full range (np.interp extrapolates edges
-    # with the boundary values by default, giving constant extension)
-    all_ids = np.arange(id_min, id_max + 1)
-    interp_z = np.interp(all_ids, df['Polygon_ID'].values, df['CliffTop_Z'].values)
-    df = pd.DataFrame({'Polygon_ID': all_ids, 'CliffTop_Z': interp_z})
+    # Number of polygon IDs for this resolution
+    n_polygons = int(n_meters / res_m)
+    all_ids = np.arange(n_polygons)
 
-    return df
+    # Meter position for each polygon ID
+    meter_positions = all_ids * res_m
+
+    # Sort extracted data by alongshore position for interpolation
+    sort_idx = np.argsort(x_data)
+    x_sorted = x_data[sort_idx]
+    y_sorted = y_data[sort_idx]
+
+    # Interpolate green line elevation at each polygon's meter position.
+    # np.interp clamps to boundary values outside the extracted range,
+    # giving constant extension at the edges.
+    elevations = np.interp(meter_positions, x_sorted, y_sorted)
+
+    return pd.DataFrame({'Polygon_ID': all_ids, 'CliffTop_Z': elevations})
 
 
 def detect_plot_bounds(image_array, debug=False):
@@ -523,7 +473,7 @@ def detect_plot_bounds(image_array, debug=False):
     return (left_bound, right_bound, top_bound, bottom_bound)
 
 
-def plot_verification(location, output_dir, alongshore_m, elevation_m, x_min=None, x_max=None):
+def plot_verification(location, output_dir, alongshore_m, elevation_m, n_meters=None):
     """
     Generate verification plot showing extracted line at all resolutions.
     Uses alongshore meters on x-axis (same as testing visualization).
@@ -532,7 +482,7 @@ def plot_verification(location, output_dir, alongshore_m, elevation_m, x_min=Non
 
     for i, resolution in enumerate(RESOLUTIONS):
         ax = axes[i]
-        df = resample_line(alongshore_m, elevation_m, resolution, x_min=x_min, x_max=x_max)
+        df = resample_line(alongshore_m, elevation_m, resolution, n_meters=n_meters)
 
         # Convert polygon IDs back to meters for plotting
         if resolution == '1m':
@@ -576,9 +526,9 @@ Examples:
     python3 digitize_cliff_top.py --image annotated.png --location DelMar \\
         --line_color green --x_inverted
 
-    # Override with manual extents if needed:
-    python3 digitize_cliff_top.py --location DelMar \\
-        --x_min 0 --x_max 1400 --y_min 0 --y_max 70 --line_color green --x_inverted
+    # Override alongshore meters manually:
+    python3 digitize_cliff_top.py --location DelMar --n_meters 1400 \\
+        --y_min 0 --y_max 70 --line_color green --x_inverted
         """
     )
 
@@ -590,16 +540,12 @@ Examples:
                         help='Path to annotated PNG image. Auto-detected from location if not provided.')
 
     # Axis extent arguments (optional - auto-detected from shapefile/HEIGHTS if not provided)
-    parser.add_argument('--x_min', type=float, default=None,
-                        help='Minimum x value (alongshore meters). Auto-detected from shapefile if not provided.')
-    parser.add_argument('--x_max', type=float, default=None,
-                        help='Maximum x value (alongshore meters). Auto-detected from shapefile if not provided.')
+    parser.add_argument('--n_meters', type=int, default=None,
+                        help='Number of alongshore meters. Auto-detected from 1m shapefile if not provided.')
     parser.add_argument('--y_min', type=float, default=None,
                         help='Minimum y value (elevation meters). Defaults to 0.')
     parser.add_argument('--y_max', type=float, default=None,
                         help='Maximum y value (elevation meters). Auto-detected from HEIGHTS if not provided.')
-    parser.add_argument('--shp_resolution', default='1m', choices=['1m', '25cm', '10cm'],
-                        help='Resolution of shapefile to use for auto-detecting x extent (default: 1m)')
 
     # Line detection options
     parser.add_argument('--line_color', default='green',
@@ -641,22 +587,20 @@ Examples:
     if not os.path.exists(args.image):
         raise FileNotFoundError(f"Image not found: {args.image}")
 
-    # Auto-detect x extent from shapefile if not provided
-    if args.x_min is None or args.x_max is None:
-        print(f"\nAuto-detecting x extent from shapefile (resolution={args.shp_resolution})...")
+    # Get number of alongshore meters from the 1m shapefile
+    if args.n_meters is None:
+        print(f"\nGetting alongshore extent from 1m shapefile...")
         try:
-            auto_x_min, auto_x_max = get_extent_from_shapefile(args.location, args.shp_resolution)
-            if args.x_min is None:
-                args.x_min = auto_x_min
-                print(f"  x_min = {args.x_min:.1f} m (from shapefile)")
-            if args.x_max is None:
-                args.x_max = auto_x_max
-                print(f"  x_max = {args.x_max:.1f} m (from shapefile)")
+            args.n_meters = get_n_meters_from_shapefile(args.location)
         except (FileNotFoundError, ImportError) as e:
             raise ValueError(
-                f"Could not auto-detect x extent: {e}\n"
-                "Please provide --x_min and --x_max manually."
+                f"Could not read shapefile: {e}\n"
+                "Please provide --n_meters manually."
             )
+
+    # Image x-axis goes from 0 to n_meters
+    x_min = 0.0
+    x_max = float(args.n_meters)
 
     # Auto-detect y extent from HEIGHTS if not provided
     if args.y_min is None:
@@ -673,7 +617,8 @@ Examples:
                 "Please provide --y_max manually."
             )
 
-    print(f"\nUsing extents: X=[{args.x_min:.1f}, {args.x_max:.1f}] m, Y=[{args.y_min:.1f}, {args.y_max:.1f}] m")
+    print(f"\nUsing extents: X=[{x_min:.1f}, {x_max:.1f}] m ({args.n_meters} meters), "
+          f"Y=[{args.y_min:.1f}, {args.y_max:.1f}] m")
 
     # Load image
     print(f"\nLoading image: {args.image}")
@@ -718,7 +663,7 @@ Examples:
     x_data, y_data = pixels_to_data_coords(
         x_pixels, y_pixels,
         image_shape=(h, w),
-        x_min=args.x_min, x_max=args.x_max,
+        x_min=x_min, x_max=x_max,
         y_min=args.y_min, y_max=args.y_max,
         x_inverted=args.x_inverted,
         plot_bounds=plot_bounds
@@ -728,7 +673,8 @@ Examples:
           f"Y=[{y_data.min():.1f}, {y_data.max():.1f}] m")
 
     # Show what polygon IDs this will produce at each resolution
-    print("\nExpected polygon ID ranges:")
+    n_meters = args.n_meters
+    print(f"\nExpected polygon ID ranges (from {n_meters} alongshore meters):")
     for res in RESOLUTIONS:
         if res == '1m':
             res_m = 1.0
@@ -736,9 +682,8 @@ Examples:
             res_m = 0.25
         else:
             res_m = 0.10
-        pid_min = int(x_data.min() / res_m)
-        pid_max = int(x_data.max() / res_m)
-        print(f"  {res}: polygon IDs {pid_min} to {pid_max}")
+        n_polygons = int(n_meters / res_m)
+        print(f"  {res}: polygon IDs 0 to {n_polygons - 1} ({n_polygons} polygons)")
 
     # Optional smoothing
     if args.smooth > 0:
@@ -771,7 +716,7 @@ Examples:
     if args.dry_run:
         print("\n[DRY RUN] Would save to:")
         for resolution in RESOLUTIONS:
-            df = resample_line(x_data, y_data, resolution, x_min=args.x_min, x_max=args.x_max)
+            df = resample_line(x_data, y_data, resolution, n_meters=n_meters)
             filename = f"{args.location}_Visual_CliffTop_{resolution}.csv"
             print(f"  {filename}: {len(df)} points")
         return
@@ -783,7 +728,7 @@ Examples:
     # Save CSVs for each resolution
     # Naming convention matches what step 8 expects: {location}_Visual_CliffTop_{resolution}.csv
     for resolution in RESOLUTIONS:
-        df = resample_line(x_data, y_data, resolution, x_min=args.x_min, x_max=args.x_max)
+        df = resample_line(x_data, y_data, resolution, n_meters=n_meters)
         filename = f"{args.location}_Visual_CliffTop_{resolution}.csv"
         filepath = os.path.join(output_dir, filename)
         df.to_csv(filepath, index=False)
@@ -791,7 +736,7 @@ Examples:
 
     # Generate verification plot
     verify_path = plot_verification(args.location, output_dir, x_data, y_data,
-                                    x_min=args.x_min, x_max=args.x_max)
+                                    n_meters=n_meters)
     print(f"Saved verification plot: {verify_path}")
 
     print("\nDone!")
