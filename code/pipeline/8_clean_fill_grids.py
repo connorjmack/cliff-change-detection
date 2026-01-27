@@ -194,6 +194,7 @@ def load_cutoff_dataframe(base_dir, location, resolution):
     filename = f"{location}_Visual_CliffTop_{resolution}.csv"
 
     paths = [
+        os.path.join(base_dir, "utilities", "cliff_top_cutoffs", location, filename),
         os.path.join(base_dir, "utilities", "cliff_top_cutoffs", filename),
         os.path.join(base_dir, "utilities", "cliff_top_cutoffs", "computer_vision", location, filename),
         os.path.join("utilities", "cliff_top_cutoffs", filename)

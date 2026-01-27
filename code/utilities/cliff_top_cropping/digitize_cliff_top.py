@@ -80,9 +80,8 @@ def get_base_path():
 def get_output_dir(location):
     """Return output directory for cliff top cutoff CSVs."""
     base = get_base_path()
-    # Output to main cliff_top_cutoffs directory (not location subdirectory)
-    # This matches what step 8 expects
-    return os.path.join(base, "utilities", "cliff_top_cutoffs")
+    # Output to location-specific subdirectory
+    return os.path.join(base, "utilities", "cliff_top_cutoffs", location)
 
 
 def find_shapefile(location, resolution='1m'):
