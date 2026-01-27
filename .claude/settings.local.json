@@ -5,7 +5,8 @@
       "Bash(grep:*)",
       "Bash(xargs:*)",
       "Bash(git -C /Users/cjmack/Documents/GitHub/cliff-change-detection log --oneline -30)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(head:*)"
     ]
   }
 }

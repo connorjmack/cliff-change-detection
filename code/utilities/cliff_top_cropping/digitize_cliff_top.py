@@ -394,6 +394,9 @@ def resample_line(x_data, y_data, resolution):
     """
     Resample line to have one point per polygon ID at the given resolution.
 
+    Interpolates to fill every polygon ID in the range, ensuring complete
+    alongshore coverage even when the source line has pixel-level gaps.
+
     Args:
         x_data: Alongshore meters
         y_data: Elevation meters
@@ -408,6 +411,11 @@ def resample_line(x_data, y_data, resolution):
     df = pd.DataFrame({'Polygon_ID': polygon_ids, 'CliffTop_Z': y_data})
     df = df.groupby('Polygon_ID').agg({'CliffTop_Z': 'mean'}).reset_index()
     df = df.sort_values('Polygon_ID')
+
+    # Interpolate to fill every polygon ID across the full range
+    all_ids = np.arange(df['Polygon_ID'].min(), df['Polygon_ID'].max() + 1)
+    interp_z = np.interp(all_ids, df['Polygon_ID'].values, df['CliffTop_Z'].values)
+    df = pd.DataFrame({'Polygon_ID': all_ids, 'CliffTop_Z': interp_z})
 
     return df
 
