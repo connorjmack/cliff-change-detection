@@ -12,14 +12,19 @@ The input image should have:
 - A colored line drawn to mark the cliff top
 
 Usage:
-    python3 digitize_cliff_top.py --image path/to/annotated.png \
-        --location DelMar \
-        --x_min 0 --x_max 1400 \
-        --y_min 0 --y_max 70 \
-        --line_color green \
-        --x_inverted
+    # Auto-detect x/y extents from location shapefile and elevation cutoffs:
+    python3 digitize_cliff_top.py --image annotated.png --location DelMar \
+        --line_color green --x_inverted
 
-    # Or use --detect_extent to attempt automatic axis detection (experimental)
+    # Override with manual extents if needed:
+    python3 digitize_cliff_top.py --image annotated.png --location DelMar \
+        --x_min 0 --x_max 1400 --y_min 0 --y_max 70 \
+        --line_color green --x_inverted
+
+    # Specify plot area bounds manually (pixels):
+    python3 digitize_cliff_top.py --image annotated.png --location DelMar \
+        --line_color green --x_inverted \
+        --plot_left 100 --plot_right 1800 --plot_top 50 --plot_bottom 400
 """
 
 import os
@@ -32,9 +37,25 @@ from PIL import Image
 from scipy.ndimage import binary_dilation
 from collections import defaultdict
 
+try:
+    import geopandas as gpd
+    GEOPANDAS_AVAILABLE = True
+except ImportError:
+    GEOPANDAS_AVAILABLE = False
+
 
 # --- CONFIGURATION ---
 RESOLUTIONS = ['1m', '25cm', '10cm']
+
+# Elevation cutoffs per location (from 7_make_grids.py)
+HEIGHTS = {
+    'DelMar': 30,
+    'SanElijo': 40,
+    'Solana': 50,
+    'Encinitas': 50,
+    'Torrey': 75,
+    'Blacks': 100
+}
 
 # Color definitions (RGB ranges for line detection)
 COLOR_RANGES = {
@@ -59,7 +80,119 @@ def get_base_path():
 def get_output_dir(location):
     """Return output directory for cliff top cutoff CSVs."""
     base = get_base_path()
-    return os.path.join(base, "utilities", "cliff_top_cutoffs", location)
+    # Output to main cliff_top_cutoffs directory (not location subdirectory)
+    # This matches what step 8 expects
+    return os.path.join(base, "utilities", "cliff_top_cutoffs")
+
+
+def find_shapefile(location, resolution='1m'):
+    """
+    Locate the shapefile for a given location and resolution.
+
+    Expected naming pattern: {Location}Polygon[e]s{MOP1}to{MOP2}at{resolution}
+    Example: SanElijoPolygones683to708at25cm
+
+    Args:
+        location: Location name (e.g., 'SanElijo')
+        resolution: Resolution string ('1m', '25cm', '10cm')
+
+    Returns:
+        Path to the .shp file
+    """
+    base = get_base_path()
+    sf_root = os.path.join(base, 'utilities', 'shape_files')
+
+    if not os.path.isdir(sf_root):
+        raise FileNotFoundError(f"Shape files directory not found: {sf_root}")
+
+    # Pattern: location name + "Polygon" (may have 'e' or 's') + MOP range + "at" + resolution
+    candidates = [
+        d for d in os.listdir(sf_root)
+        if d.lower().startswith(location.lower())
+           and 'polygon' in d.lower()
+           and f'at{resolution}'.lower() in d.lower()
+           and os.path.isdir(os.path.join(sf_root, d))
+    ]
+
+    if not candidates:
+        available = [d for d in os.listdir(sf_root) if os.path.isdir(os.path.join(sf_root, d))]
+        raise FileNotFoundError(
+            f"No shapefile folder found for location='{location}' resolution='{resolution}'.\n"
+            f"Searched in: {sf_root}\n"
+            f"Available folders: {available}"
+        )
+
+    if len(candidates) > 1:
+        print(f"Warning: Multiple shapefile folders found: {candidates}")
+        print(f"Using first match: {candidates[0]}")
+
+    fld = candidates[0]
+    shp_path = os.path.join(sf_root, fld, fld + '.shp')
+
+    if not os.path.isfile(shp_path):
+        raise FileNotFoundError(f"Shapefile not found: {shp_path}")
+
+    return shp_path
+
+
+def get_extent_from_shapefile(location, resolution='1m'):
+    """
+    Get the alongshore extent (x_min, x_max) from the location's shapefile.
+
+    Reads the shapefile and converts polygon IDs back to alongshore meters.
+
+    Args:
+        location: Location name
+        resolution: Resolution to use for shapefile lookup
+
+    Returns:
+        (x_min, x_max) in alongshore meters
+    """
+    if not GEOPANDAS_AVAILABLE:
+        raise ImportError("geopandas is required for auto-detecting extent from shapefile")
+
+    shp_path = find_shapefile(location, resolution)
+    print(f"Reading shapefile: {shp_path}")
+
+    gdf = gpd.read_file(shp_path)
+
+    # Get polygon IDs - they're the row indices
+    polygon_ids = gdf.index.values
+
+    # Convert resolution string to meters
+    if resolution == '1m' or resolution == '100cm':
+        res_m = 1.0
+    elif resolution == '25cm':
+        res_m = 0.25
+    elif resolution == '10cm':
+        res_m = 0.10
+    else:
+        raise ValueError(f"Unknown resolution: {resolution}")
+
+    # Convert polygon IDs to alongshore meters
+    # polygon_id = alongshore_m / resolution_m
+    # so: alongshore_m = polygon_id * resolution_m
+    alongshore_min = polygon_ids.min() * res_m
+    alongshore_max = (polygon_ids.max() + 1) * res_m  # +1 to include the full extent
+
+    return alongshore_min, alongshore_max
+
+
+def get_elevation_extent(location):
+    """
+    Get the elevation extent (y_min, y_max) for a location.
+
+    Args:
+        location: Location name
+
+    Returns:
+        (y_min, y_max) in meters
+    """
+    if location not in HEIGHTS:
+        available = list(HEIGHTS.keys())
+        raise ValueError(f"Unknown location '{location}'. Available: {available}")
+
+    return 0.0, float(HEIGHTS[location])
 
 
 def detect_line_pixels(image_array, color_name):
@@ -299,7 +432,7 @@ def plot_verification(location, output_dir, alongshore_m, elevation_m):
     fig.suptitle(f"{location}: Digitized Cliff Top Line", fontsize=14, fontweight='bold')
     plt.tight_layout()
 
-    output_path = os.path.join(output_dir, f"{location}_digitized_verification.png")
+    output_path = os.path.join(output_dir, f"{location}_Visual_CliffTop_verification.png")
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
 
@@ -312,13 +445,17 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    # Basic usage with known axis extents:
+    # Auto-detect extents from shapefile and elevation cutoffs:
+    python3 digitize_cliff_top.py --image annotated.png --location DelMar \\
+        --line_color green --x_inverted
+
+    # Override with manual extents if needed:
     python3 digitize_cliff_top.py --image annotated.png --location DelMar \\
         --x_min 0 --x_max 1400 --y_min 0 --y_max 70 --line_color green --x_inverted
 
     # Specify plot area bounds manually (pixels):
     python3 digitize_cliff_top.py --image annotated.png --location DelMar \\
-        --x_min 0 --x_max 1400 --y_min 0 --y_max 70 --line_color green --x_inverted \\
+        --line_color green --x_inverted \\
         --plot_left 100 --plot_right 1800 --plot_top 50 --plot_bottom 400
         """
     )
@@ -327,11 +464,17 @@ Examples:
     parser.add_argument('--image', required=True, help='Path to annotated PNG image')
     parser.add_argument('--location', required=True, help='Location name (e.g., DelMar, SanElijo)')
 
-    # Axis extent arguments
-    parser.add_argument('--x_min', type=float, required=True, help='Minimum x value (alongshore meters)')
-    parser.add_argument('--x_max', type=float, required=True, help='Maximum x value (alongshore meters)')
-    parser.add_argument('--y_min', type=float, required=True, help='Minimum y value (elevation meters)')
-    parser.add_argument('--y_max', type=float, required=True, help='Maximum y value (elevation meters)')
+    # Axis extent arguments (optional - auto-detected from shapefile/HEIGHTS if not provided)
+    parser.add_argument('--x_min', type=float, default=None,
+                        help='Minimum x value (alongshore meters). Auto-detected from shapefile if not provided.')
+    parser.add_argument('--x_max', type=float, default=None,
+                        help='Maximum x value (alongshore meters). Auto-detected from shapefile if not provided.')
+    parser.add_argument('--y_min', type=float, default=None,
+                        help='Minimum y value (elevation meters). Defaults to 0.')
+    parser.add_argument('--y_max', type=float, default=None,
+                        help='Maximum y value (elevation meters). Auto-detected from HEIGHTS if not provided.')
+    parser.add_argument('--shp_resolution', default='1m', choices=['1m', '25cm', '10cm'],
+                        help='Resolution of shapefile to use for auto-detecting x extent (default: 1m)')
 
     # Line detection options
     parser.add_argument('--line_color', default='green',
@@ -365,8 +508,42 @@ Examples:
     if not os.path.exists(args.image):
         raise FileNotFoundError(f"Image not found: {args.image}")
 
+    # Auto-detect x extent from shapefile if not provided
+    if args.x_min is None or args.x_max is None:
+        print(f"\nAuto-detecting x extent from shapefile (resolution={args.shp_resolution})...")
+        try:
+            auto_x_min, auto_x_max = get_extent_from_shapefile(args.location, args.shp_resolution)
+            if args.x_min is None:
+                args.x_min = auto_x_min
+                print(f"  x_min = {args.x_min:.1f} m (from shapefile)")
+            if args.x_max is None:
+                args.x_max = auto_x_max
+                print(f"  x_max = {args.x_max:.1f} m (from shapefile)")
+        except (FileNotFoundError, ImportError) as e:
+            raise ValueError(
+                f"Could not auto-detect x extent: {e}\n"
+                "Please provide --x_min and --x_max manually."
+            )
+
+    # Auto-detect y extent from HEIGHTS if not provided
+    if args.y_min is None:
+        args.y_min = 0.0
+        print(f"  y_min = {args.y_min:.1f} m (default)")
+    if args.y_max is None:
+        try:
+            _, auto_y_max = get_elevation_extent(args.location)
+            args.y_max = auto_y_max
+            print(f"  y_max = {args.y_max:.1f} m (from HEIGHTS[{args.location}])")
+        except ValueError as e:
+            raise ValueError(
+                f"Could not auto-detect y extent: {e}\n"
+                "Please provide --y_max manually."
+            )
+
+    print(f"\nUsing extents: X=[{args.x_min:.1f}, {args.x_max:.1f}] m, Y=[{args.y_min:.1f}, {args.y_max:.1f}] m")
+
     # Load image
-    print(f"Loading image: {args.image}")
+    print(f"\nLoading image: {args.image}")
     img = Image.open(args.image).convert('RGB')
     image_array = np.array(img)
     h, w = image_array.shape[:2]
@@ -443,7 +620,7 @@ Examples:
         print("\n[DRY RUN] Would save to:")
         for resolution in RESOLUTIONS:
             df = resample_line(x_data, y_data, resolution)
-            filename = f"{args.location}_CliffTop_{resolution}.csv"
+            filename = f"{args.location}_Visual_CliffTop_{resolution}.csv"
             print(f"  {filename}: {len(df)} points")
         return
 
@@ -452,9 +629,10 @@ Examples:
     print(f"\nOutput directory: {output_dir}")
 
     # Save CSVs for each resolution
+    # Naming convention matches what step 8 expects: {location}_Visual_CliffTop_{resolution}.csv
     for resolution in RESOLUTIONS:
         df = resample_line(x_data, y_data, resolution)
-        filename = f"{args.location}_CliffTop_{resolution}.csv"
+        filename = f"{args.location}_Visual_CliffTop_{resolution}.csv"
         filepath = os.path.join(output_dir, filename)
         df.to_csv(filepath, index=False)
         print(f"Saved {filename}: {len(df)} points")
