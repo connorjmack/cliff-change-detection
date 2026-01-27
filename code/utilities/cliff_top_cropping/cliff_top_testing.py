@@ -2,8 +2,9 @@
 """
 cliff_top_testing.py
 
-Visualizes cumulative erosion at 1m, 25cm, and 10cm resolutions,
-overlaid with the visually digitized cliff top cutoffs.
+Visualizes cumulative erosion at 25cm resolution,
+overlaid with the visually digitized cliff top cutoff.
+Figure dimensions match the source cliff top image for direct comparison.
 
 Usage:
     python3 cliff_top_testing.py --location DelMar
@@ -20,6 +21,7 @@ import matplotlib.pyplot as plt
 import platform
 import re
 from datetime import datetime
+from PIL import Image
 
 # --- CONFIGURATION ---
 RESOLUTIONS = ['1m', '25cm', '10cm']
@@ -253,6 +255,20 @@ def plot_resolution(ax, resolution, base_dir, location):
     max_y = HEIGHTS.get(location, 50)
     ax.set_ylim(0, max_y)
 
+def find_source_image(location):
+    """Find the source cliff top image to match its dimensions."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    figures_dir = os.path.join(script_dir, "figures", "manual_lines")
+
+    for pattern in [f"{location.lower()}_clifftop.png",
+                    f"{location}_clifftop.png",
+                    f"{location}_CliffTop.png"]:
+        candidate = os.path.join(figures_dir, pattern)
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
 def process_location(location):
     """Generate cliff top testing visualization for a single location."""
     cutoff_dir = os.path.join(BASE_PATH, "utilities", "cliff_top_cutoffs", location)
@@ -264,16 +280,29 @@ def process_location(location):
     print(f"--- {location}: Plotting Visual Check ---")
     print(f"Output: {output_fig}")
 
-    fig, axes = plt.subplots(3, 1, figsize=(15, 12))
+    # Match figure dimensions to source cliff top image
+    source_img = find_source_image(location)
+    if source_img:
+        img = Image.open(source_img)
+        img_w, img_h = img.size
+        dpi = 150
+        fig_w = img_w / dpi
+        fig_h = img_h / dpi
+        print(f"    Source image: {img_w}x{img_h} px -> figure {fig_w:.1f}x{fig_h:.1f} in")
+    else:
+        print(f"    [WARNING] Source image not found, using default dimensions")
+        fig_w, fig_h = 15, 4
+        dpi = 150
 
-    plot_resolution(axes[0], '1m', BASE_PATH, location)
-    plot_resolution(axes[1], '25cm', BASE_PATH, location)
-    plot_resolution(axes[2], '10cm', BASE_PATH, location)
+    fig, ax = plt.subplots(1, 1, figsize=(fig_w, fig_h))
 
-    fig.suptitle(f"{location}: Cumulative Erosion & Visual Cutoff Check", fontsize=16, fontweight='bold')
-    plt.tight_layout(rect=[0, 0, 1, 0.98])
+    plot_resolution(ax, '25cm', BASE_PATH, location)
 
-    plt.savefig(output_fig, dpi=300, bbox_inches='tight')
+    fig.suptitle(f"{location}: Cumulative Erosion & Visual Cutoff Check",
+                 fontsize=14, fontweight='bold')
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+
+    plt.savefig(output_fig, dpi=dpi, bbox_inches='tight')
     plt.close()
     print(f"Done. Saved to {output_fig}")
 
