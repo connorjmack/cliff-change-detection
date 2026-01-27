@@ -10,13 +10,15 @@ Professional-quality labels and axes for publication/presentation use.
 
 Usage:
     python3 simple_gif.py --location SanElijo
-    python3 simple_gif.py --location all --make-gif
+    python3 simple_gif.py --location all
+    python3 simple_gif.py --location DelMar --save-frames  # Also save individual PNGs
 """
 
 import os
 import re
 import platform
 import argparse
+from io import BytesIO
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -25,6 +27,12 @@ import matplotlib.gridspec as gridspec
 from matplotlib.colors import LinearSegmentedColormap, Normalize
 from matplotlib.ticker import MultipleLocator, MaxNLocator
 from datetime import datetime, timedelta
+
+try:
+    from PIL import Image
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
 
 # --- Configuration ---
 RESOLUTION = '25cm'
@@ -218,9 +226,13 @@ def compute_cumulative_grid(grids_list, up_to_step):
     return cumulative
 
 def plot_simple_frame(stats, grids_list, step_idx, out_dir, location,
-                      global_start, global_end, full_cum_grid, max_cum):
+                      global_start, global_end, full_cum_grid, max_cum,
+                      save_to_disk=False):
     """
     Plot a simplified two-panel frame at a specific time step.
+
+    Returns:
+        PIL Image if save_to_disk=False, filepath string if save_to_disk=True
     """
     if not stats or step_idx < 0:
         return None
@@ -341,15 +353,38 @@ def plot_simple_frame(stats, grids_list, step_idx, out_dir, location,
     fig.suptitle(f'{location_display} Coastal Cliff Erosion  |  {current_date.strftime("%B %d, %Y")}',
                  fontsize=FS_TITLE + 4, fontweight='bold', y=0.98)
 
-    # Save frame
-    frame_num = str(step_idx).zfill(4)
-    out_file = os.path.join(out_dir, f"{location}_simple_frame_{frame_num}.png")
-    plt.savefig(out_file, dpi=DPI, bbox_inches='tight', facecolor='white')
-    plt.close()
-    return out_file
+    # Save frame or return in-memory image
+    if save_to_disk:
+        frame_num = str(step_idx).zfill(4)
+        out_file = os.path.join(out_dir, f"{location}_simple_frame_{frame_num}.png")
+        plt.savefig(out_file, dpi=DPI, bbox_inches='tight', facecolor='white')
+        plt.close()
+        return out_file
+    else:
+        # Return PIL Image in memory
+        buf = BytesIO()
+        plt.savefig(buf, dpi=GIF_DPI, bbox_inches='tight', facecolor='white', format='png')
+        plt.close()
+        buf.seek(0)
+        img = Image.open(buf).convert('RGB')
+        # Copy to new image so we can close the buffer
+        img_copy = img.copy()
+        buf.close()
+        return img_copy
 
-def generate_simple_gif_frames(stats, grids_list, out_dir, location):
-    """Generate all frames for the simplified animated dashboard."""
+def generate_simple_gif_frames(stats, grids_list, out_dir, location, save_frames=False):
+    """Generate all frames for the simplified animated dashboard.
+
+    Args:
+        stats: List of interval statistics
+        grids_list: List of grid DataFrames
+        out_dir: Output directory
+        location: Location name
+        save_frames: If True, save individual PNG files; if False, return PIL Images in memory
+
+    Returns:
+        List of file paths (if save_frames=True) or PIL Images (if save_frames=False)
+    """
     if not stats:
         print(f"  [Warning] No stats data for {location}")
         return []
@@ -367,45 +402,57 @@ def generate_simple_gif_frames(stats, grids_list, out_dir, location):
     full_df_stats = pd.DataFrame(stats)
     max_cum = full_df_stats['vol_upper'].cumsum().max() * 1.1
 
-    # Create output directory
+    # Create output directory (needed for GIF output even if not saving frames)
     location_dir = os.path.join(out_dir, location)
     os.makedirs(location_dir, exist_ok=True)
 
-    frame_files = []
+    frames = []
     n_steps = len(stats)
     print(f"\n  Generating {n_steps} simplified frames for {location}...")
 
     for step_idx in range(n_steps):
-        frame_file = plot_simple_frame(
+        frame = plot_simple_frame(
             stats, grids_list, step_idx, location_dir, location,
-            global_start, global_end, full_cum_grid, max_cum
+            global_start, global_end, full_cum_grid, max_cum,
+            save_to_disk=save_frames
         )
-        if frame_file:
-            frame_files.append(frame_file)
-            print(f"    Frame {step_idx + 1}/{n_steps}: {os.path.basename(frame_file)}")
+        if frame:
+            frames.append(frame)
+            if save_frames:
+                print(f"    Frame {step_idx + 1}/{n_steps}: {os.path.basename(frame)}")
+            else:
+                print(f"    Frame {step_idx + 1}/{n_steps}")
 
-    return frame_files
+    return frames
 
-def create_gif(frame_files, out_path, duration=500):
-    """Create animated GIF from frame files using PIL."""
-    try:
-        from PIL import Image
-    except ImportError:
-        print("  [Warning] PIL not available. Install with: pip install Pillow")
-        print("  Frames saved but GIF not created.")
+def create_gif(frames, out_path, duration=500):
+    """Create animated GIF from frames.
+
+    Args:
+        frames: List of file paths (strings) or PIL Images
+        out_path: Output GIF path
+        duration: Duration per frame in milliseconds
+    """
+    if not PIL_AVAILABLE:
+        print("  [Error] PIL not available. Install with: pip install Pillow")
         return False
 
-    if not frame_files:
+    if not frames:
         print("  [Warning] No frames to create GIF")
         return False
 
-    print(f"  Creating GIF with {len(frame_files)} frames...")
+    print(f"  Creating GIF with {len(frames)} frames...")
     images = []
-    for f in frame_files:
-        img = Image.open(f)
-        if img.mode != 'RGB':
-            img = img.convert('RGB')
-        images.append(img)
+    for f in frames:
+        if isinstance(f, str):
+            # Load from file path
+            img = Image.open(f)
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            images.append(img)
+        else:
+            # Already a PIL Image
+            images.append(f)
 
     # Save as GIF
     images[0].save(
@@ -426,11 +473,15 @@ def main():
     parser = argparse.ArgumentParser(description="Generate Simplified Animated Dashboard")
     parser.add_argument('--location', type=str, default='all',
                         help=f"Available: {', '.join(LOCATIONS_ALL)}")
-    parser.add_argument('--make-gif', action='store_true',
-                        help="Create animated GIF from frames (requires Pillow)")
+    parser.add_argument('--save-frames', action='store_true',
+                        help="Also save individual PNG frames (default: only save GIF)")
     parser.add_argument('--duration', type=int, default=50,
                         help="Duration per frame in milliseconds (default: 50)")
     args = parser.parse_args()
+
+    if not PIL_AVAILABLE:
+        print("[Error] Pillow is required. Install with: pip install Pillow")
+        return
 
     base_dir = get_base_dir()
     out_dir = get_output_dir(base_dir)
@@ -438,6 +489,8 @@ def main():
 
     print(f"--- Generating simplified animated dashboard ---")
     print(f"Output directory: {out_dir}")
+    if args.save_frames:
+        print("  (Also saving individual frames)")
 
     for loc in locations:
         print(f"\nProcessing: {loc}")
@@ -447,11 +500,11 @@ def main():
             print(f"  [Warning] No data found for {loc}")
             continue
 
-        frame_files = generate_simple_gif_frames(stats, grids_list, out_dir, loc)
+        frames = generate_simple_gif_frames(stats, grids_list, out_dir, loc, save_frames=args.save_frames)
 
-        if args.make_gif and frame_files:
-            gif_path = os.path.join(out_dir, f"{loc}_SimpleTimelapse_{RESOLUTION}.gif")
-            create_gif(frame_files, gif_path, duration=args.duration)
+        if frames:
+            gif_path = os.path.join(out_dir, loc, f"{loc}_SimpleTimelapse_{RESOLUTION}.gif")
+            create_gif(frames, gif_path, duration=args.duration)
 
     print("\n--- Done ---")
 
