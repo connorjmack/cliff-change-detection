@@ -48,9 +48,8 @@ BASE_PATH = get_base_path()
 
 # --- GRID LOADING LOGIC (From Reference) ---
 def normalize_resolution_for_files(resolution):
-    if resolution == '1m': return '100cm'
-    elif resolution == '100cm': return '100cm'
-    else: return resolution
+    """Resolution strings are now used directly (1m, 25cm, 10cm)."""
+    return resolution
 
 def get_resolution_value(res_str):
     if 'cm' in res_str: return float(res_str.replace('cm', '')) / 100.0
@@ -88,28 +87,48 @@ def parse_date_from_folder(folder_name):
     return None
 
 def find_grid_files(base_dir, location, resolution, data_type, use_filled=True):
-    type_dir = os.path.join(base_dir, 'results', location, data_type)
-    if not os.path.isdir(type_dir): return []
+    """
+    Find grid files for a location/resolution.
 
-    file_resolution = normalize_resolution_for_files(resolution)
+    New directory structure: results/{location}/{data_type}/{date_folder}/{resolution}/*.csv
+    """
+    type_dir = os.path.join(base_dir, 'results', location, data_type)
+    if not os.path.isdir(type_dir):
+        return []
+
     grid_files = []
-    
-    patterns = [f"_ero_grid_{file_resolution}_filled.csv", f"grid_{file_resolution}_filled.csv"]
-    
+
+    # Patterns to match grid files
+    suffix = "_filled.csv" if use_filled else ".csv"
+    patterns = [f"_ero_grid_{resolution}{suffix}", f"_dep_grid_{resolution}{suffix}", f"grid_{resolution}{suffix}"]
+
     for date_folder in sorted(os.listdir(type_dir)):
         folder_path = os.path.join(type_dir, date_folder)
-        if not os.path.isdir(folder_path): continue
-        files_in_folder = os.listdir(folder_path)
+        if not os.path.isdir(folder_path):
+            continue
+
+        # Look in resolution subdirectory first (new structure)
+        res_subdir = os.path.join(folder_path, resolution)
+        if os.path.isdir(res_subdir):
+            search_dir = res_subdir
+            files_in_folder = os.listdir(res_subdir)
+        else:
+            # Fall back to date folder directly (old structure)
+            search_dir = folder_path
+            files_in_folder = os.listdir(folder_path)
+
         grid_file = None
         for pattern in patterns:
-            match = [f for f in files_in_folder if pattern in f and f.endswith('.csv')]
-            if match:
-                grid_file = os.path.join(folder_path, match[0])
+            matches = [f for f in files_in_folder if pattern in f and f.endswith('.csv')]
+            if matches:
+                grid_file = os.path.join(search_dir, matches[0])
                 break
+
         if grid_file:
             d = parse_date_from_folder(date_folder)
-            if d: grid_files.append((d, grid_file))
-            
+            if d:
+                grid_files.append((d, grid_file))
+
     grid_files.sort(key=lambda x: x[0])
     return grid_files
 
@@ -136,27 +155,51 @@ def calculate_final_cumulative(grid_files, res_val):
 # --- PLOTTING ---
 def plot_resolution(ax, resolution, base_dir, location):
     print(f"\nProcessing {resolution}...")
-    res_val = get_resolution_value(resolution)
 
-    # 1. Load Cumulative Erosion Grid
-    grid_files = find_grid_files(base_dir, location, resolution, 'erosion', use_filled=True)
-    if not grid_files:
-        ax.text(0.5, 0.5, f"No erosion data found for {resolution}", ha='center', va='center')
+    try:
+        res_val = get_resolution_value(resolution)
+
+        # 1. Load Cumulative Erosion Grid
+        grid_files = find_grid_files(base_dir, location, resolution, 'erosion', use_filled=True)
+        if not grid_files:
+            ax.text(0.5, 0.5, f"No {resolution} erosion data found\n(files may not exist yet)",
+                    ha='center', va='center', fontsize=12, color='gray',
+                    transform=ax.transAxes)
+            ax.set_title(f"{resolution} Resolution (No Data)", fontsize=12, fontweight='bold')
+            ax.set_xticks([])
+            ax.set_yticks([])
+            print(f"    [SKIP] No grid files found for {resolution}")
+            return
+
+        print(f"    Found {len(grid_files)} grid files")
+        cumulative_df = calculate_final_cumulative(grid_files, res_val)
+        if cumulative_df is None:
+            ax.text(0.5, 0.5, f"Error loading {resolution} grid data",
+                    ha='center', va='center', fontsize=12, color='red',
+                    transform=ax.transAxes)
+            ax.set_title(f"{resolution} Resolution (Load Error)", fontsize=12, fontweight='bold')
+            ax.set_xticks([])
+            ax.set_yticks([])
+            return
+    except Exception as e:
+        ax.text(0.5, 0.5, f"Error: {str(e)[:50]}...",
+                ha='center', va='center', fontsize=10, color='red',
+                transform=ax.transAxes)
+        ax.set_title(f"{resolution} Resolution (Error)", fontsize=12, fontweight='bold')
+        print(f"    [ERROR] {resolution}: {e}")
         return
 
-    cumulative_df = calculate_final_cumulative(grid_files, res_val)
-    if cumulative_df is None:
-        ax.text(0.5, 0.5, f"Error loading grid for {resolution}", ha='center', va='center')
-        return
-
-    # 2. Load Cutoff Line
-    cutoff_dir = os.path.join(base_dir, "utilities", "cliff_top_cutoffs")
+    # 2. Load Cutoff Line (in location subfolder)
+    cutoff_dir = os.path.join(base_dir, "utilities", "cliff_top_cutoffs", location)
     cutoff_filename = f"{location}_Visual_CliffTop_{resolution}.csv"
     cutoff_path = os.path.join(cutoff_dir, cutoff_filename)
     cutoff_df = None
     if os.path.exists(cutoff_path):
         print(f"    Loading cutoff: {cutoff_path}")
-        cutoff_df = pd.read_csv(cutoff_path)
+        try:
+            cutoff_df = pd.read_csv(cutoff_path)
+        except Exception as e:
+            print(f"    [WARNING] Failed to read cutoff file: {e}")
     else:
         print(f"    [WARNING] Cutoff file not found: {cutoff_path}")
 
@@ -206,7 +249,7 @@ def plot_resolution(ax, resolution, base_dir, location):
 
 def process_location(location):
     """Generate cliff top testing visualization for a single location."""
-    cutoff_dir = os.path.join(BASE_PATH, "utilities", "cliff_top_cutoffs")
+    cutoff_dir = os.path.join(BASE_PATH, "utilities", "cliff_top_cutoffs", location)
     output_fig = os.path.join(cutoff_dir, f"{location}_Visual_CliffTop_test.png")
 
     os.makedirs(cutoff_dir, exist_ok=True)
