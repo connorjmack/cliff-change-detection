@@ -488,6 +488,7 @@ def detect_plot_bounds(image_array, debug=False):
 def plot_verification(location, output_dir, alongshore_m, elevation_m):
     """
     Generate verification plot showing extracted line at all resolutions.
+    Uses alongshore meters on x-axis (same as testing visualization).
     """
     fig, axes = plt.subplots(len(RESOLUTIONS), 1, figsize=(14, 10))
 
@@ -495,11 +496,20 @@ def plot_verification(location, output_dir, alongshore_m, elevation_m):
         ax = axes[i]
         df = resample_line(alongshore_m, elevation_m, resolution)
 
-        ax.plot(df['Polygon_ID'], df['CliffTop_Z'], 'b-', linewidth=1.5)
-        ax.scatter(df['Polygon_ID'], df['CliffTop_Z'], s=2, c='blue', alpha=0.5)
+        # Convert polygon IDs back to meters for plotting
+        if resolution == '1m':
+            res_m = 1.0
+        elif resolution == '25cm':
+            res_m = 0.25
+        else:
+            res_m = 0.10
+        x_meters = df['Polygon_ID'].values * res_m
+
+        ax.plot(x_meters, df['CliffTop_Z'], 'b-', linewidth=1.5)
+        ax.scatter(x_meters, df['CliffTop_Z'], s=2, c='blue', alpha=0.5)
 
         ax.set_title(f"{resolution} Resolution ({len(df)} points)", fontsize=12, fontweight='bold')
-        ax.set_xlabel("Polygon ID")
+        ax.set_xlabel("Alongshore Position (m)")
         ax.set_ylabel("Elevation (m)")
         ax.set_ylim(0, max(elevation_m) * 1.1)
         ax.invert_xaxis()
