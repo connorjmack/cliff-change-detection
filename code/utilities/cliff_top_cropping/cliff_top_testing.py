@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """
-plot_cumulative_with_cutoffs.py
+cliff_top_testing.py
 
-Visualizes cumulative erosion for Del Mar at 1m, 25cm, and 10cm resolutions,
+Visualizes cumulative erosion at 1m, 25cm, and 10cm resolutions,
 overlaid with the visually digitized cliff top cutoffs.
 
 Usage:
-    python3 plot_cumulative_with_cutoffs.py
+    python3 cliff_top_testing.py --location DelMar
+    python3 cliff_top_testing.py --location SanElijo
+    python3 cliff_top_testing.py --all
 """
 
 import os
 import glob
+import argparse
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -19,8 +22,17 @@ import re
 from datetime import datetime
 
 # --- CONFIGURATION ---
-LOCATION = "DelMar"
 RESOLUTIONS = ['1m', '25cm', '10cm']
+
+# Elevation cutoffs per location (for y-axis scaling)
+HEIGHTS = {
+    'DelMar': 30,
+    'SanElijo': 40,
+    'Solana': 50,
+    'Encinitas': 50,
+    'Torrey': 75,
+    'Blacks': 100
+}
 
 # Plotting Style
 plt.rcParams['font.family'] = 'sans-serif'
@@ -33,8 +45,6 @@ def get_base_path():
     return "/project/group/LiDAR/LidarProcessing/LidarProcessingCliffs"
 
 BASE_PATH = get_base_path()
-CUTOFF_DIR = os.path.join(BASE_PATH, "utilities", "cliff_top_cutoffs", "computer_vision", "DelMar")
-OUTPUT_FIG = os.path.join(CUTOFF_DIR, "test.png")
 
 # --- GRID LOADING LOGIC (From Reference) ---
 def normalize_resolution_for_files(resolution):
@@ -124,12 +134,12 @@ def calculate_final_cumulative(grid_files, res_val):
     return cumulative_df
 
 # --- PLOTTING ---
-def plot_resolution(ax, resolution, base_dir):
+def plot_resolution(ax, resolution, base_dir, location):
     print(f"\nProcessing {resolution}...")
     res_val = get_resolution_value(resolution)
-    
+
     # 1. Load Cumulative Erosion Grid
-    grid_files = find_grid_files(base_dir, LOCATION, resolution, 'erosion', use_filled=True)
+    grid_files = find_grid_files(base_dir, location, resolution, 'erosion', use_filled=True)
     if not grid_files:
         ax.text(0.5, 0.5, f"No erosion data found for {resolution}", ha='center', va='center')
         return
@@ -140,8 +150,9 @@ def plot_resolution(ax, resolution, base_dir):
         return
 
     # 2. Load Cutoff Line
-    cutoff_filename = f"DelMar_Visual_CliffTop_{resolution}.csv"
-    cutoff_path = os.path.join(CUTOFF_DIR, cutoff_filename)
+    cutoff_dir = os.path.join(base_dir, "utilities", "cliff_top_cutoffs")
+    cutoff_filename = f"{location}_Visual_CliffTop_{resolution}.csv"
+    cutoff_path = os.path.join(cutoff_dir, cutoff_filename)
     cutoff_df = None
     if os.path.exists(cutoff_path):
         print(f"    Loading cutoff: {cutoff_path}")
@@ -152,12 +163,12 @@ def plot_resolution(ax, resolution, base_dir):
     # 3. Plot Heatmap
     plot_df = cumulative_df.T
     x_coords = plot_df.columns.astype(float).values
-    
+
     # Y-Axis Logic from reference:
     n_bins = len(plot_df.index)
     max_elevation = n_bins * res_val
     extent = [x_coords.min(), x_coords.max(), 0, max_elevation]
-    
+
     vals = plot_df.values.flatten()
     vals = vals[vals > 0] # Ignore zeros for scaling
     if len(vals) > 0:
@@ -165,9 +176,9 @@ def plot_resolution(ax, resolution, base_dir):
     else:
         vmin, vmax = 0, 1
 
-    im = ax.imshow(plot_df.values, origin='lower', extent=extent, 
+    im = ax.imshow(plot_df.values, origin='lower', extent=extent,
                    cmap='Reds', vmin=vmin, vmax=vmax, aspect='auto', interpolation='none')
-    
+
     cbar = plt.colorbar(im, ax=ax, fraction=0.02, pad=0.02)
     cbar.set_label('Cumulative Erosion (m)')
 
@@ -175,12 +186,12 @@ def plot_resolution(ax, resolution, base_dir):
     if cutoff_df is not None:
         # Sort by Polygon ID just in case
         cutoff_df = cutoff_df.sort_values('Polygon_ID')
-        
+
         # Filter cutoff to match grid extent
         mask = (cutoff_df['Polygon_ID'] >= x_coords.min()) & (cutoff_df['Polygon_ID'] <= x_coords.max())
         subset = cutoff_df[mask]
-        
-        ax.plot(subset['Polygon_ID'], subset['CliffTop_Z'], 
+
+        ax.plot(subset['Polygon_ID'], subset['CliffTop_Z'],
                 color='blue', linewidth=1.5, linestyle='--', label='Visual Cutoff')
         ax.legend(loc='upper right', fontsize='small')
 
@@ -189,25 +200,65 @@ def plot_resolution(ax, resolution, base_dir):
     ax.set_xlabel("Polygon ID (Alongshore Index)")
     ax.set_ylabel("Elevation (m)")
     ax.invert_xaxis()
-    ax.set_ylim(0, 40) # Standardize height
+    # Use location-specific height for y-axis
+    max_y = HEIGHTS.get(location, 50)
+    ax.set_ylim(0, max_y)
+
+def process_location(location):
+    """Generate cliff top testing visualization for a single location."""
+    cutoff_dir = os.path.join(BASE_PATH, "utilities", "cliff_top_cutoffs")
+    output_fig = os.path.join(cutoff_dir, f"{location}_Visual_CliffTop_test.png")
+
+    os.makedirs(cutoff_dir, exist_ok=True)
+
+    print(f"\n{'='*60}")
+    print(f"--- {location}: Plotting Visual Check ---")
+    print(f"Output: {output_fig}")
+
+    fig, axes = plt.subplots(3, 1, figsize=(15, 12))
+
+    plot_resolution(axes[0], '1m', BASE_PATH, location)
+    plot_resolution(axes[1], '25cm', BASE_PATH, location)
+    plot_resolution(axes[2], '10cm', BASE_PATH, location)
+
+    fig.suptitle(f"{location}: Cumulative Erosion & Visual Cutoff Check", fontsize=16, fontweight='bold')
+    plt.tight_layout(rect=[0, 0, 1, 0.98])
+
+    plt.savefig(output_fig, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Done. Saved to {output_fig}")
+
+    return output_fig
+
 
 def main():
-    os.makedirs(os.path.dirname(OUTPUT_FIG), exist_ok=True)
-    
-    print(f"--- Plotting Visual Check ---")
-    print(f"Output: {OUTPUT_FIG}")
-    
-    fig, axes = plt.subplots(3, 1, figsize=(15, 12))
-    
-    plot_resolution(axes[0], '1m', BASE_PATH)
-    plot_resolution(axes[1], '25cm', BASE_PATH)
-    plot_resolution(axes[2], '10cm', BASE_PATH)
-    
-    fig.suptitle(f"{LOCATION}: Cumulative Erosion & Visual Cutoff Check", fontsize=16, fontweight='bold')
-    plt.tight_layout(rect=[0, 0, 1, 0.98])
-    
-    plt.savefig(OUTPUT_FIG, dpi=300, bbox_inches='tight')
-    print(f"Done. Saved to {OUTPUT_FIG}")
+    parser = argparse.ArgumentParser(
+        description="Visualize cumulative erosion with cliff top cutoffs."
+    )
+    parser.add_argument('--location', type=str, default=None,
+                        help='Location name (e.g., DelMar, SanElijo)')
+    parser.add_argument('--all', action='store_true',
+                        help='Process all locations')
+
+    args = parser.parse_args()
+
+    if args.all:
+        locations = list(HEIGHTS.keys())
+        print(f"Processing all locations: {locations}")
+        for loc in locations:
+            try:
+                process_location(loc)
+            except Exception as e:
+                print(f"[ERROR] {loc}: {e}")
+    elif args.location:
+        if args.location not in HEIGHTS:
+            print(f"Unknown location '{args.location}'. Available: {list(HEIGHTS.keys())}")
+            return
+        process_location(args.location)
+    else:
+        parser.print_help()
+        print(f"\nAvailable locations: {list(HEIGHTS.keys())}")
+
 
 if __name__ == "__main__":
     main()
