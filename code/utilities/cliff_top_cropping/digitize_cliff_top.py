@@ -248,6 +248,10 @@ def detect_line_pixels(image_array, color_name):
     """
     Detect pixels matching the specified color.
 
+    For green, uses relative-channel detection instead of strict RGB ranges.
+    This robustly detects green lines drawn over colored heatmap backgrounds
+    where anti-aliasing and blending shift pixel values outside fixed ranges.
+
     Args:
         image_array: RGB numpy array (H, W, 3)
         color_name: Name of color to detect (e.g., 'green', 'blue')
@@ -258,6 +262,17 @@ def detect_line_pixels(image_array, color_name):
     if color_name not in COLOR_RANGES:
         raise ValueError(f"Unknown color '{color_name}'. Available: {list(COLOR_RANGES.keys())}")
 
+    if color_name == 'green':
+        # Relative-channel detection: green must dominate both red and blue.
+        # This catches anti-aliased pixels and lines drawn over colored
+        # backgrounds (yellow/orange heatmap data, dark erosion pixels, etc.)
+        # where strict RGB ranges fail.
+        r = image_array[:, :, 0].astype(np.int16)
+        g = image_array[:, :, 1].astype(np.int16)
+        b = image_array[:, :, 2].astype(np.int16)
+        mask = (g > 80) & ((g - r) > 30) & ((g - b) > 30)
+        return mask
+
     color_range = COLOR_RANGES[color_name]
     min_rgb = np.array(color_range['min'])
     max_rgb = np.array(color_range['max'])
@@ -266,17 +281,20 @@ def detect_line_pixels(image_array, color_name):
     return mask
 
 
-def extract_line_coordinates(mask, method='top', plot_bounds=None):
+def extract_line_coordinates(mask, method='top', plot_bounds=None, min_pixels=2):
     """
     Extract line coordinates from binary mask.
 
     For each pixel column within the plot area, finds the line pixel
-    using the specified method.
+    using the specified method. Columns with fewer than min_pixels
+    detected are skipped to filter noise. A median filter pass removes
+    remaining outliers from anti-aliasing artifacts.
 
     Args:
         mask: Binary mask (H, W) where True = line pixel
         method: 'top' (highest y), 'bottom' (lowest y), 'center' (centroid)
         plot_bounds: Optional (left, right, top, bottom) pixel bounds of plot area
+        min_pixels: Minimum detected pixels per column to count (default 2)
 
     Returns:
         Arrays of (x_pixels, y_pixels) for the line
@@ -296,7 +314,7 @@ def extract_line_coordinates(mask, method='top', plot_bounds=None):
         col = mask[row_start:row_end, x]
         indices = np.where(col)[0]
 
-        if len(indices) == 0:
+        if len(indices) < min_pixels:
             continue
 
         if method == 'top':
@@ -309,7 +327,21 @@ def extract_line_coordinates(mask, method='top', plot_bounds=None):
         x_pixels.append(x)
         y_pixels.append(y)
 
-    return np.array(x_pixels), np.array(y_pixels)
+    x_pixels = np.array(x_pixels)
+    y_pixels = np.array(y_pixels)
+
+    # Median filter to remove outliers from anti-aliasing or stray pixels
+    if len(y_pixels) > 5:
+        kernel_size = 5
+        pad = kernel_size // 2
+        y_padded = np.pad(y_pixels, pad, mode='edge')
+        y_filtered = np.array([
+            np.median(y_padded[i:i + kernel_size])
+            for i in range(len(y_pixels))
+        ])
+        y_pixels = y_filtered
+
+    return x_pixels, y_pixels
 
 
 def pixels_to_data_coords(x_pixels, y_pixels, x_min, x_max, y_min, y_max,
