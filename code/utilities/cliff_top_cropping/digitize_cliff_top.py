@@ -397,103 +397,130 @@ def resample_line(x_data, y_data, resolution, n_meters):
     return pd.DataFrame({'Polygon_ID': all_ids, 'CliffTop_Z': elevations})
 
 
-def _group_indices(indices, min_gap=15):
+def _longest_run_per_line(binary_2d):
     """
-    Group consecutive indices, splitting at gaps > min_gap pixels.
+    For each row of a 2D boolean array, find the longest consecutive True run.
 
-    Returns list of lists, where each inner list is a group of adjacent indices.
+    Returns:
+        lengths: array of longest run length per row
+        starts: array of start column of longest run per row
+        ends: array of end column (exclusive) of longest run per row
     """
-    if len(indices) == 0:
-        return []
-    groups = [[indices[0]]]
-    for i in range(1, len(indices)):
-        if indices[i] - indices[i - 1] > min_gap:
-            groups.append([])
-        groups[-1].append(indices[i])
-    return groups
+    nrows, ncols = binary_2d.shape
+    lengths = np.zeros(nrows, dtype=int)
+    starts = np.zeros(nrows, dtype=int)
+    ends = np.zeros(nrows, dtype=int)
+
+    for r in range(nrows):
+        row = binary_2d[r]
+        # Pad with False so diff catches runs at edges
+        padded = np.concatenate([[False], row, [False]])
+        diffs = np.diff(padded.astype(np.int8))
+        run_starts = np.where(diffs == 1)[0]
+        run_ends = np.where(diffs == -1)[0]
+        if len(run_starts) == 0:
+            continue
+        run_lengths = run_ends - run_starts
+        max_idx = np.argmax(run_lengths)
+        lengths[r] = run_lengths[max_idx]
+        starts[r] = run_starts[max_idx]
+        ends[r] = run_ends[max_idx]
+
+    return lengths, starts, ends
 
 
 def detect_plot_bounds(image_array, debug=False):
     """
-    Detect the plot area bounds by finding the axis frame border lines.
+    Detect the plot area by finding the axis frame as actual straight lines.
 
-    Groups border lines to distinguish the plot frame from the colorbar frame
-    and axis labels. The plot spines are the first two vertical border groups
-    (left and right), and the first/last horizontal border groups (top/bottom).
+    Strategy: the matplotlib axis frame is a rectangle of thin black lines.
+    Each horizontal spine (top/bottom) is a continuous run of black pixels
+    spanning the full plot width — far longer than any scattered data pixels
+    or text. We find these two lines, and their horizontal extent directly
+    gives us left and right bounds too (since they connect the vertical spines).
+
+    This avoids the colorbar problem entirely: the colorbar has no horizontal
+    line spanning the plot width.
 
     Returns (left, right, top, bottom) pixel coordinates.
     """
     h, w = image_array.shape[:2]
 
-    # Near-black mask: all RGB channels below threshold
-    near_black = np.all(image_array < 60, axis=2)
+    # Tight threshold: actual axis lines are pure black.
+    # Using < 40 avoids false matches on dark (but not black) data pixels.
+    near_black = np.all(image_array < 40, axis=2)
 
-    row_counts = np.sum(near_black, axis=1)
-    col_counts = np.sum(near_black, axis=0)
+    # --- Find horizontal axis lines ---
+    # For each row, get the longest continuous run of black pixels.
+    # Axis spines produce runs spanning the full plot width (40%+ of image).
+    # Text, tick marks, and scattered data produce much shorter runs.
+    row_lengths, row_starts, row_ends = _longest_run_per_line(near_black)
 
-    # --- Horizontal borders (top/bottom spines) ---
-    # Axis spines span the full plot width, so they have many near-black pixels.
-    # Text rows (title, labels) have far fewer.
-    h_threshold = w * 0.3
-    border_rows = np.where(row_counts > h_threshold)[0]
-    row_groups = _group_indices(border_rows)
+    min_run_h = w * 0.4
+    spine_rows = np.where(row_lengths >= min_run_h)[0]
 
-    if len(row_groups) >= 2:
-        # First group = top spine, last group = bottom spine
-        top_bound = row_groups[0][0]
-        bottom_bound = row_groups[-1][-1]
-    elif len(row_groups) == 1:
-        top_bound = row_groups[0][0]
-        bottom_bound = row_groups[0][-1]
-    else:
+    if debug:
+        print(f"  Rows with continuous black runs >= {min_run_h:.0f}px: {len(spine_rows)}")
+        if len(spine_rows) > 0:
+            print(f"  Top candidate rows: {spine_rows[:5]}, "
+                  f"run lengths: {row_lengths[spine_rows[:5]]}")
+            print(f"  Bottom candidate rows: {spine_rows[-5:]}, "
+                  f"run lengths: {row_lengths[spine_rows[-5:]]}")
+
+    if len(spine_rows) >= 2:
+        # Top spine = first qualifying row, bottom spine = last qualifying row
+        top_bound = int(spine_rows[0])
+        bottom_bound = int(spine_rows[-1])
+
+        # The horizontal spines run from left spine to right spine.
+        # Use the median start/end of all spine rows for robustness.
+        left_bound = int(np.median(row_starts[spine_rows]))
+        right_bound = int(np.median(row_ends[spine_rows]))
+
+    elif len(spine_rows) == 1:
         if debug:
-            print("Warning: Could not detect horizontal borders, using fallback")
-        top_bound = int(h * 0.10)
+            print("Warning: Only one horizontal spine found, falling back for vertical")
+        # One spine found — use it for top or bottom, estimate the other
+        top_bound = int(spine_rows[0])
         bottom_bound = int(h * 0.85)
+        left_bound = int(row_starts[spine_rows[0]])
+        right_bound = int(row_ends[spine_rows[0]])
 
-    # --- Vertical borders (left/right spines, excluding colorbar) ---
-    # The colorbar also has vertical border lines. By grouping border columns,
-    # the first two groups correspond to the plot's left and right spines.
-    # Additional groups are colorbar borders and are ignored.
-    v_threshold = h * 0.2
-    border_cols = np.where(col_counts > v_threshold)[0]
-    col_groups = _group_indices(border_cols, min_gap=max(15, int(w * 0.02)))
-
-    if len(col_groups) >= 2:
-        # First group = left spine, second group = right spine
-        left_bound = col_groups[0][0]
-        right_bound = col_groups[1][-1]
-        if debug and len(col_groups) > 2:
-            print(f"  Found {len(col_groups)} vertical border groups "
-                  f"(using first 2, ignoring {len(col_groups) - 2} colorbar groups)")
-    elif len(col_groups) == 1:
-        left_bound = col_groups[0][0]
-        right_bound = col_groups[0][-1]
     else:
+        # No clear horizontal spines found — fall back to column analysis
         if debug:
-            print("Warning: Could not detect vertical borders, using fallback")
-        left_bound = int(w * 0.08)
-        right_bound = int(w * 0.92)
+            print("Warning: No horizontal spines detected, "
+                  "falling back to column-based detection")
+        # Use column analysis as last resort
+        col_lengths, col_starts, col_ends = _longest_run_per_line(near_black.T)
+        min_run_v = h * 0.3
+        spine_cols = np.where(col_lengths >= min_run_v)[0]
 
-    # Validate bounds make sense
-    if right_bound - left_bound < w * 0.3 or bottom_bound - top_bound < h * 0.3:
+        if len(spine_cols) >= 2:
+            left_bound = int(spine_cols[0])
+            right_bound = int(spine_cols[-1])
+            top_bound = int(np.median(col_starts[spine_cols]))
+            bottom_bound = int(np.median(col_ends[spine_cols]))
+        else:
+            # Complete fallback
+            left_bound = int(w * 0.08)
+            right_bound = int(w * 0.92)
+            top_bound = int(h * 0.10)
+            bottom_bound = int(h * 0.85)
+
+    # Validate bounds
+    if right_bound - left_bound < w * 0.2 or bottom_bound - top_bound < h * 0.2:
         if debug:
-            print("Warning: Detected bounds seem too small, using fallback")
+            print("Warning: Detected bounds too small, using fallback")
         left_bound = int(w * 0.08)
         right_bound = int(w * 0.92)
         top_bound = int(h * 0.10)
         bottom_bound = int(h * 0.85)
 
     if debug:
-        print(f"Detected plot bounds: left={left_bound}, right={right_bound}, "
+        print(f"  Final plot bounds: left={left_bound}, right={right_bound}, "
               f"top={top_bound}, bottom={bottom_bound}")
-        print(f"  Plot size: {right_bound - left_bound} x {bottom_bound - top_bound} pixels")
-        if row_groups:
-            print(f"  Horizontal border groups: {len(row_groups)} "
-                  f"(rows: {[g[0] for g in row_groups]})")
-        if col_groups:
-            print(f"  Vertical border groups: {len(col_groups)} "
-                  f"(cols: {[g[0] for g in col_groups]})")
+        print(f"  Plot size: {right_bound - left_bound} x {bottom_bound - top_bound} px")
 
     return (left_bound, right_bound, top_bound, bottom_bound)
 
