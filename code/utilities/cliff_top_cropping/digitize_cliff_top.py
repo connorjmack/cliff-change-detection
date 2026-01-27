@@ -6,10 +6,12 @@ Extracts a manually drawn cliff-top line from an annotated PNG image,
 converts pixel coordinates to real-world coordinates, and outputs
 CSV files at multiple resolutions for use in the pipeline.
 
-The input image should have:
-- X-axis: Alongshore Location (m)
-- Y-axis: Elevation (m)
+The input image should be a SINGLE-PANEL heatmap (e.g., the top panel
+from simple_gif.py) with:
+- X-axis: Alongshore Position (m), inverted (high values on left)
+- Y-axis: Elevation (m NAVD88)
 - A colored line drawn to mark the cliff top
+- No other panels (timeline, colorbar subplots, etc.)
 
 Usage:
     # Auto-detect image, read axis extents from grid data:
@@ -206,7 +208,8 @@ def get_image_extent_from_grids(location):
             if not os.path.isdir(search_dir):
                 continue
             for f in os.listdir(search_dir):
-                if not (f.endswith('.csv') and 'grid' in f.lower()):
+                if not (f.endswith('.csv') and 'grid' in f.lower()
+                        and resolution in f):
                     continue
                 filepath = os.path.join(search_dir, f)
                 try:
@@ -526,31 +529,35 @@ def detect_plot_bounds(image_array, debug=False):
 
 
 def plot_verification(location, output_dir, alongshore_m, elevation_m, n_meters):
-    """Generate verification plot showing extracted line at all resolutions."""
-    fig, axes = plt.subplots(len(RESOLUTIONS), 1, figsize=(14, 10))
+    """Generate single-panel verification plot showing extracted cliff top line.
 
-    for i, resolution in enumerate(RESOLUTIONS):
-        ax = axes[i]
-        df = resample_line(alongshore_m, elevation_m, resolution, n_meters=n_meters)
+    Styled to match simple_gif.py heatmap panel for direct visual comparison
+    with the source annotated image.
+    """
+    resolution = '25cm'
+    res_m = _resolution_to_meters(resolution)
+    df = resample_line(alongshore_m, elevation_m, resolution, n_meters=n_meters)
+    x_meters = df['Polygon_ID'].values * res_m
 
-        res_m = _resolution_to_meters(resolution)
-        x_meters = df['Polygon_ID'].values * res_m
+    fig, ax = plt.subplots(1, 1, figsize=(20, 7))
 
-        ax.plot(x_meters, df['CliffTop_Z'], 'b-', linewidth=1.5)
-        ax.scatter(x_meters, df['CliffTop_Z'], s=2, c='blue', alpha=0.5)
+    ax.plot(x_meters, df['CliffTop_Z'], color='green', linewidth=2)
 
-        ax.set_title(f"{resolution} Resolution ({len(df)} points)", fontsize=12, fontweight='bold')
-        ax.set_xlabel("Alongshore Position (m)")
-        ax.set_ylabel("Elevation (m)")
-        ax.set_ylim(0, max(elevation_m) * 1.1)
-        ax.invert_xaxis()
-        ax.grid(True, alpha=0.3)
+    ax.set_title('Extracted Cliff Top Line (25cm)', fontsize=22, fontweight='bold', pad=15)
+    ax.set_xlabel('Alongshore Position (m)', fontsize=16, fontweight='bold')
+    ax.set_ylabel('Elevation (m NAVD88)', fontsize=16, fontweight='bold')
+    ax.tick_params(axis='both', labelsize=14)
+    ax.set_ylim(0, max(elevation_m) * 1.1)
+    ax.set_xlim(x_meters.max(), x_meters.min())
+    ax.grid(True, alpha=0.3)
 
-    fig.suptitle(f"{location}: Digitized Cliff Top Line", fontsize=14, fontweight='bold')
-    plt.tight_layout()
+    location_display = location.replace('DelMar', 'Del Mar').replace('SanElijo', 'San Elijo')
+    fig.suptitle(f"{location_display}: Digitized Cliff Top Line",
+                 fontsize=26, fontweight='bold', y=0.98)
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
 
     output_path = os.path.join(output_dir, f"{location}_Visual_CliffTop_verification.png")
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.savefig(output_path, dpi=150, bbox_inches='tight', facecolor='white')
     plt.close()
 
     return output_path
