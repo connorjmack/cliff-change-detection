@@ -2,8 +2,7 @@
 """
 show_data_cube.py
 
-Visualizes the structure and metadata of an NPZ data cube file.
-Draws a 3D cube diagram with labeled dimensions and lists all arrays/metadata.
+Visualizes the structure of an NPZ data cube file.
 
 Usage:
     python3 show_data_cube.py path/to/cube.npz
@@ -13,7 +12,6 @@ Usage:
 import argparse
 import os
 import sys
-from datetime import datetime
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -21,16 +19,7 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 
 def load_npz_info(npz_path):
-    """
-    Load NPZ file and extract metadata about all arrays.
-
-    Returns:
-        dict with keys:
-            - '3d_arrays': dict of {name: (shape, dtype, non_nan_count)}
-            - '1d_arrays': dict of {name: (shape, dtype, sample_values)}
-            - 'scalars': dict of {name: value}
-            - 'filename': basename of the file
-    """
+    """Load NPZ file and extract metadata about all arrays."""
     if not os.path.exists(npz_path):
         raise FileNotFoundError(f"NPZ file not found: {npz_path}")
 
@@ -47,241 +36,170 @@ def load_npz_info(npz_path):
     for key in data.files:
         arr = data[key]
 
-        # Handle scalar values (0-d arrays or single values)
         if arr.ndim == 0:
             info['scalars'][key] = arr.item()
         elif arr.ndim == 1:
-            # Sample first/last values for display
             if len(arr) > 0:
                 if np.issubdtype(arr.dtype, np.number):
-                    sample = f"[{arr[0]:.2f} ... {arr[-1]:.2f}]"
+                    sample = f"{arr[0]:.2f} to {arr[-1]:.2f}"
                 else:
-                    sample = f"[{arr[0]} ... {arr[-1]}]"
+                    sample = f"{arr[0]} to {arr[-1]}"
             else:
-                sample = "[]"
+                sample = "empty"
             info['1d_arrays'][key] = {
-                'shape': arr.shape,
-                'dtype': str(arr.dtype),
-                'sample': sample,
-                'length': len(arr)
+                'length': len(arr),
+                'sample': sample
             }
         elif arr.ndim == 2:
-            non_nan = np.sum(~np.isnan(arr)) if np.issubdtype(arr.dtype, np.floating) else arr.size
-            info['2d_arrays'][key] = {
-                'shape': arr.shape,
-                'dtype': str(arr.dtype),
-                'non_nan': non_nan
-            }
+            info['2d_arrays'][key] = {'shape': arr.shape}
         elif arr.ndim == 3:
-            non_nan = np.sum(~np.isnan(arr)) if np.issubdtype(arr.dtype, np.floating) else arr.size
-            info['3d_arrays'][key] = {
-                'shape': arr.shape,
-                'dtype': str(arr.dtype),
-                'non_nan': non_nan
-            }
+            info['3d_arrays'][key] = {'shape': arr.shape}
 
     data.close()
     return info
 
 
-def draw_cube(ax, origin, size, color='steelblue', alpha=0.3, edge_color='black'):
-    """Draw a 3D rectangular prism (cube) on the given axes."""
+def draw_cube(ax, origin, size, color='steelblue', alpha=0.4, edge_color='#333333'):
+    """Draw a 3D rectangular prism on the given axes."""
     x, y, z = origin
     dx, dy, dz = size
 
-    # Define the 8 vertices
     vertices = [
-        [x, y, z],
-        [x + dx, y, z],
-        [x + dx, y + dy, z],
-        [x, y + dy, z],
-        [x, y, z + dz],
-        [x + dx, y, z + dz],
-        [x + dx, y + dy, z + dz],
-        [x, y + dy, z + dz]
+        [x, y, z], [x + dx, y, z], [x + dx, y + dy, z], [x, y + dy, z],
+        [x, y, z + dz], [x + dx, y, z + dz], [x + dx, y + dy, z + dz], [x, y + dy, z + dz]
     ]
 
-    # Define the 6 faces
     faces = [
-        [vertices[0], vertices[1], vertices[5], vertices[4]],  # front
-        [vertices[2], vertices[3], vertices[7], vertices[6]],  # back
-        [vertices[0], vertices[3], vertices[7], vertices[4]],  # left
-        [vertices[1], vertices[2], vertices[6], vertices[5]],  # right
-        [vertices[0], vertices[1], vertices[2], vertices[3]],  # bottom
-        [vertices[4], vertices[5], vertices[6], vertices[7]]   # top
+        [vertices[0], vertices[1], vertices[5], vertices[4]],
+        [vertices[2], vertices[3], vertices[7], vertices[6]],
+        [vertices[0], vertices[3], vertices[7], vertices[4]],
+        [vertices[1], vertices[2], vertices[6], vertices[5]],
+        [vertices[0], vertices[1], vertices[2], vertices[3]],
+        [vertices[4], vertices[5], vertices[6], vertices[7]]
     ]
 
-    # Create collection and add to axes
     collection = Poly3DCollection(faces, alpha=alpha, facecolor=color,
-                                   edgecolor=edge_color, linewidth=1)
+                                   edgecolor=edge_color, linewidth=1.5)
     ax.add_collection3d(collection)
-
     return vertices
 
 
-def add_dimension_labels(ax, vertices, shape, dim_names):
-    """Add dimension labels with arrows to the cube."""
-    # Dimension 0: along x-axis (alongshore)
-    mid_x = (vertices[0][0] + vertices[1][0]) / 2
-    ax.text(mid_x, vertices[0][1] - 0.5, vertices[0][2] - 0.3,
-            f"{dim_names[0]}\n({shape[0]})",
-            fontsize=11, ha='center', va='top', fontweight='bold', color='#2E86AB')
-
-    # Dimension 1: along y-axis (elevation)
-    mid_y = (vertices[0][1] + vertices[3][1]) / 2
-    ax.text(vertices[0][0] - 0.5, mid_y, vertices[0][2] - 0.3,
-            f"{dim_names[1]}\n({shape[1]})",
-            fontsize=11, ha='right', va='center', fontweight='bold', color='#06D6A0')
-
-    # Dimension 2: along z-axis (time)
-    mid_z = (vertices[0][2] + vertices[4][2]) / 2
-    ax.text(vertices[0][0] - 0.5, vertices[0][1] - 0.5, mid_z,
-            f"{dim_names[2]}\n({shape[2]})",
-            fontsize=11, ha='right', va='center', fontweight='bold', color='#8338EC')
-
-
 def create_visualization(info, output_path=None):
-    """Create the full visualization figure."""
-    fig = plt.figure(figsize=(14, 10))
+    """Create the visualization figure."""
+    fig = plt.figure(figsize=(16, 9))
 
-    # Create grid: 3D cube on left, info panels on right
-    gs = fig.add_gridspec(2, 2, width_ratios=[1.2, 1], height_ratios=[1, 1],
-                          wspace=0.3, hspace=0.3)
+    # Large cube on left, compact info on right
+    gs = fig.add_gridspec(1, 2, width_ratios=[2, 1], wspace=0.05)
 
-    # 3D Cube subplot
-    ax_cube = fig.add_subplot(gs[:, 0], projection='3d')
-
-    # Info text subplots
-    ax_arrays = fig.add_subplot(gs[0, 1])
-    ax_meta = fig.add_subplot(gs[1, 1])
-
-    # Turn off axes for text panels
-    ax_arrays.axis('off')
-    ax_meta.axis('off')
+    ax_cube = fig.add_subplot(gs[0], projection='3d')
+    ax_info = fig.add_subplot(gs[1])
+    ax_info.axis('off')
 
     # --- Draw 3D Cube ---
-    # Find the primary 3D array to visualize
     if info['3d_arrays']:
-        # Prefer 'erosion' if available, otherwise use first 3D array
         primary_key = 'erosion' if 'erosion' in info['3d_arrays'] else list(info['3d_arrays'].keys())[0]
         shape = info['3d_arrays'][primary_key]['shape']
 
-        # Normalize dimensions for visualization (scale to reasonable size)
+        # Scale cube to fill the space well, with proportional dimensions
+        base_size = 8
         max_dim = max(shape)
-        normalized = [s / max_dim * 3 for s in shape]
+        cube_dims = [s / max_dim * base_size for s in shape]
 
-        # Draw the cube
-        vertices = draw_cube(ax_cube, (0, 0, 0), normalized,
-                            color='steelblue', alpha=0.25)
+        # Ensure minimum visible size for small dimensions
+        cube_dims = [max(d, base_size * 0.15) for d in cube_dims]
 
-        # Add dimension labels
-        # Infer dimension names from 1D arrays if available
-        dim_names = ['alongshore', 'elevation', 'time']  # defaults
-        if 'alongshore_m' in info['1d_arrays']:
-            dim_names[0] = 'alongshore_m'
-        if 'elevation_m' in info['1d_arrays']:
-            dim_names[1] = 'elevation_m'
-        if 'dates' in info['1d_arrays'] or 'date_strings' in info['1d_arrays']:
-            dim_names[2] = 'time'
+        vertices = draw_cube(ax_cube, (0, 0, 0), cube_dims, color='#4A90D9', alpha=0.35)
 
-        add_dimension_labels(ax_cube, vertices, shape, dim_names)
+        # Dimension labels - positioned at midpoints of edges
+        label_fontsize = 14
+        colors = {'x': '#1a5f8a', 'y': '#0a8a6a', 'z': '#7a3ab0'}
 
-        # Set axis properties
-        ax_cube.set_xlim(-1, normalized[0] + 1)
-        ax_cube.set_ylim(-1, normalized[1] + 1)
-        ax_cube.set_zlim(-1, normalized[2] + 1)
-        ax_cube.set_xlabel('')
-        ax_cube.set_ylabel('')
-        ax_cube.set_zlabel('')
+        # X-axis label (alongshore)
+        mid_x = cube_dims[0] / 2
+        ax_cube.text(mid_x, -1.5, -0.5, f"alongshore_m\n{shape[0]}",
+                    fontsize=label_fontsize, ha='center', va='top',
+                    fontweight='bold', color=colors['x'])
+
+        # Y-axis label (elevation)
+        mid_y = cube_dims[1] / 2
+        ax_cube.text(-1.5, mid_y, -0.5, f"elevation_m\n{shape[1]}",
+                    fontsize=label_fontsize, ha='center', va='top',
+                    fontweight='bold', color=colors['y'])
+
+        # Z-axis label (time)
+        mid_z = cube_dims[2] / 2
+        ax_cube.text(-1.5, -1.0, mid_z, f"time\n{shape[2]}",
+                    fontsize=label_fontsize, ha='center', va='center',
+                    fontweight='bold', color=colors['z'])
+
+        # Set axis limits with padding
+        pad = 2
+        ax_cube.set_xlim(-pad, cube_dims[0] + pad)
+        ax_cube.set_ylim(-pad, cube_dims[1] + pad)
+        ax_cube.set_zlim(-pad, cube_dims[2] + pad)
+
         ax_cube.set_xticks([])
         ax_cube.set_yticks([])
         ax_cube.set_zticks([])
+        ax_cube.set_xlabel('')
+        ax_cube.set_ylabel('')
+        ax_cube.set_zlabel('')
 
-        # Nice viewing angle
+        # Remove panes and grid
+        ax_cube.xaxis.pane.fill = False
+        ax_cube.yaxis.pane.fill = False
+        ax_cube.zaxis.pane.fill = False
+        ax_cube.xaxis.pane.set_edgecolor('none')
+        ax_cube.yaxis.pane.set_edgecolor('none')
+        ax_cube.zaxis.pane.set_edgecolor('none')
+        ax_cube.grid(False)
+
         ax_cube.view_init(elev=20, azim=45)
 
-        # Add shape annotation
-        shape_str = f"Shape: {shape[0]} × {shape[1]} × {shape[2]}"
-        ax_cube.text2D(0.5, 0.95, shape_str, transform=ax_cube.transAxes,
-                      fontsize=14, ha='center', fontweight='bold')
-    else:
-        ax_cube.text(0.5, 0.5, 0.5, "No 3D arrays found", ha='center', va='center')
+    # --- Info Panel ---
+    lines = []
+    lines.append(f"File: {info['filename']}")
+    lines.append("")
 
-    # --- Arrays Panel ---
-    array_text = "ARRAYS IN FILE\n" + "=" * 30 + "\n\n"
-
+    # 3D arrays
     if info['3d_arrays']:
-        array_text += "3D Arrays (Cubes):\n"
+        lines.append("3D Arrays:")
         for name, data in info['3d_arrays'].items():
-            non_nan_pct = data['non_nan'] / np.prod(data['shape']) * 100
-            array_text += f"  • {name}\n"
-            array_text += f"      shape: {data['shape']}\n"
-            array_text += f"      dtype: {data['dtype']}\n"
-            array_text += f"      valid: {data['non_nan']:,} ({non_nan_pct:.1f}%)\n"
-        array_text += "\n"
+            s = data['shape']
+            lines.append(f"  {name}  [{s[0]} x {s[1]} x {s[2]}]")
+        lines.append("")
 
-    if info['2d_arrays']:
-        array_text += "2D Arrays:\n"
-        for name, data in info['2d_arrays'].items():
-            array_text += f"  • {name}: {data['shape']} ({data['dtype']})\n"
-        array_text += "\n"
-
+    # 1D arrays (axes)
     if info['1d_arrays']:
-        array_text += "1D Arrays (Axes):\n"
+        lines.append("1D Arrays (Axes):")
         for name, data in info['1d_arrays'].items():
-            array_text += f"  • {name}\n"
-            array_text += f"      length: {data['length']}\n"
-            array_text += f"      dtype: {data['dtype']}\n"
-            array_text += f"      range: {data['sample']}\n"
+            lines.append(f"  {name}  [{data['length']}]")
+            lines.append(f"    {data['sample']}")
+        lines.append("")
 
-    ax_arrays.text(0.05, 0.95, array_text, transform=ax_arrays.transAxes,
-                   fontsize=10, family='monospace', va='top',
-                   bbox=dict(boxstyle='round', facecolor='#f0f0f0', alpha=0.8))
-
-    # --- Metadata Panel ---
-    meta_text = "METADATA\n" + "=" * 30 + "\n\n"
-    meta_text += f"File: {info['filename']}\n\n"
-
+    # Scalars
     if info['scalars']:
-        meta_text += "Scalar Values:\n"
+        lines.append("Scalars:")
         for name, value in info['scalars'].items():
             if isinstance(value, float):
-                meta_text += f"  • {name}: {value:.4f}\n"
+                lines.append(f"  {name}: {value:.2f}")
             else:
-                meta_text += f"  • {name}: {value}\n"
-        meta_text += "\n"
+                lines.append(f"  {name}: {value}")
 
-    # Add computed stats
-    meta_text += "Computed Statistics:\n"
-    total_elements = 0
-    total_valid = 0
-    for data in info['3d_arrays'].values():
-        total_elements += np.prod(data['shape'])
-        total_valid += data['non_nan']
-
-    if total_elements > 0:
-        meta_text += f"  • Total 3D elements: {total_elements:,}\n"
-        meta_text += f"  • Valid (non-NaN): {total_valid:,}\n"
-        meta_text += f"  • Sparsity: {(1 - total_valid/total_elements)*100:.1f}%\n"
-
-    # If date arrays exist, show date range
-    if 'date_strings' in info['1d_arrays']:
-        meta_text += f"\nTemporal Range:\n"
-        meta_text += f"  {info['1d_arrays']['date_strings']['sample']}\n"
-
-    ax_meta.text(0.05, 0.95, meta_text, transform=ax_meta.transAxes,
-                 fontsize=10, family='monospace', va='top',
-                 bbox=dict(boxstyle='round', facecolor='#e8f4f8', alpha=0.8))
+    info_text = "\n".join(lines)
+    ax_info.text(0.05, 0.95, info_text, transform=ax_info.transAxes,
+                 fontsize=12, family='monospace', va='top',
+                 bbox=dict(boxstyle='round,pad=0.5', facecolor='#f5f5f5',
+                          edgecolor='#cccccc', alpha=0.9))
 
     # Title
-    fig.suptitle(f"NPZ Data Cube Structure: {info['filename']}",
-                 fontsize=16, fontweight='bold', y=0.98)
+    fig.suptitle(f"Data Cube Structure", fontsize=18, fontweight='bold', y=0.95)
 
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    plt.tight_layout(rect=[0, 0, 1, 0.92])
 
     if output_path:
-        plt.savefig(output_path, dpi=150, bbox_inches='tight')
-        print(f"Saved visualization to: {output_path}")
+        plt.savefig(output_path, dpi=150, bbox_inches='tight', facecolor='white')
+        print(f"Saved: {output_path}")
     else:
         plt.show()
 
@@ -290,45 +208,29 @@ def create_visualization(info, output_path=None):
 
 def print_summary(info):
     """Print a text summary of the NPZ contents."""
-    print(f"\n{'='*60}")
-    print(f"NPZ FILE: {info['filename']}")
-    print('='*60)
+    print(f"\n{info['filename']}")
+    print("-" * 40)
 
     if info['3d_arrays']:
-        print("\n3D Arrays:")
         for name, data in info['3d_arrays'].items():
-            print(f"  {name}: {data['shape']} ({data['dtype']})")
-            print(f"    Non-NaN values: {data['non_nan']:,}")
-
-    if info['2d_arrays']:
-        print("\n2D Arrays:")
-        for name, data in info['2d_arrays'].items():
-            print(f"  {name}: {data['shape']} ({data['dtype']})")
+            print(f"  {name}: {data['shape']}")
 
     if info['1d_arrays']:
-        print("\n1D Arrays:")
         for name, data in info['1d_arrays'].items():
-            print(f"  {name}: length={data['length']} ({data['dtype']})")
-            print(f"    Range: {data['sample']}")
+            print(f"  {name}: [{data['length']}] {data['sample']}")
 
     if info['scalars']:
-        print("\nScalar Values:")
         for name, value in info['scalars'].items():
             print(f"  {name}: {value}")
 
-    print('='*60 + '\n')
+    print()
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Visualize the structure and metadata of an NPZ data cube file."
-    )
-    parser.add_argument('npz_path', type=str,
-                        help="Path to the NPZ file to visualize")
-    parser.add_argument('--save', '-s', type=str, default=None,
-                        help="Save visualization to file (e.g., output.png)")
-    parser.add_argument('--no-plot', action='store_true',
-                        help="Only print text summary, skip visualization")
+    parser = argparse.ArgumentParser(description="Visualize NPZ data cube structure")
+    parser.add_argument('npz_path', help="Path to the NPZ file")
+    parser.add_argument('--save', '-s', default=None, help="Save to file")
+    parser.add_argument('--no-plot', action='store_true', help="Text summary only")
 
     args = parser.parse_args()
 
@@ -338,10 +240,8 @@ def main():
         print(f"[ERROR] {e}")
         sys.exit(1)
 
-    # Always print text summary
     print_summary(info)
 
-    # Create visualization unless --no-plot
     if not args.no_plot:
         create_visualization(info, args.save)
 
