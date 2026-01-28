@@ -206,7 +206,7 @@ st.sidebar.subheader("1. Load Events")
 csv_dir = st.sidebar.text_input(
     "Event CSV Directory",
     value=os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-                       "results", "event_lists_old"),
+                       "results", "event_lists_erosion"),
     help="Directory containing event CSV files"
 )
 

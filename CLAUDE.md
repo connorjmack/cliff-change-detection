@@ -29,7 +29,10 @@ utilities/
 ├── canupo/              # Vegetation classifiers (.prm)
 ├── m3c2_params/         # CloudCompare parameter files
 ├── cliff_top_cutoffs/   # Visual cutoff CSVs per location
-└── dbscan/              # DBSCAN clustering reports
+├── dbscan/              # DBSCAN clustering reports
+└── event_lists/         # Event list generation scripts
+results/event_lists/     # Generated event CSVs
+results/data_cubes/      # 3D NPZ data cubes
 ```
 
 **Path Handling**: Scripts auto-detect OS: macOS uses `/Volumes/group/LiDAR`, Linux/HPC uses `/project/group/LiDAR`.
@@ -90,6 +93,24 @@ python3 code/pipeline/run_daily.py
 python3 code/pipeline/run_daily.py --force-all  # Force reprocessing
 ```
 
+### Event List Generation
+```bash
+# Generate event CSVs from 25cm filled grids
+python3 utilities/event_lists/make_event_lists.py SanElijo
+python3 utilities/event_lists/make_event_lists.py --all
+
+# Generate 3D data cubes (alongshore × elevation × time)
+python3 utilities/event_lists/make_event_lists.py SanElijo --make-npz
+
+# Filter for significant events (volume > 5 m³, elevation > 5 m)
+python3 utilities/event_lists/make_sig_event_lists.py
+python3 utilities/event_lists/make_sig_event_lists.py --min_volume 10 --min_elevation 3
+
+# Generate filtered 3D data cubes
+python3 utilities/event_lists/make_sig_event_lists.py --make-npz
+```
+Output: CSVs in `results/event_lists/`, NPZ cubes in `results/data_cubes/`
+
 ## Location-Specific Configuration
 
 ### MOP Ranges (defined in step 2 script)
@@ -112,7 +133,7 @@ shift = {
 
 - **Parallel Processing**: Most scripts use `ProcessPoolExecutor`. Control with `--n_jobs` flag (default: 5).
 - **Point Cloud Handling**: `laspy` for LAS/LAZ, `geopandas`/`shapely` for spatial ops, PDAL for cropping, CloudCompare CLI for M3C2/CANUPO.
-- **Data Flow**: Raw → Cropped → Beach Removed → Veg Removed → M3C2 → DBSCAN Clustered → Gridded → Cleaned/Filled
+- **Data Flow**: Raw → Cropped → Beach Removed → Veg Removed → M3C2 → DBSCAN Clustered → Gridded → Cleaned/Filled → Event Lists/Cubes
 
 ## Testing
 

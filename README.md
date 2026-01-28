@@ -18,7 +18,8 @@ graph TD
     G -->|Step 6| H[DBSCAN Clustering]
     H -->|Step 7| I[Spatial Gridding]
     I -->|Step 8| J[Cleaning & Hole Filling]
-    J --> K[Final Analytical Data]
+    J --> K[Event Lists & 3D Cubes]
+    K --> L[Filtered Significant Events]
 ````
 
 ## System Requirements
@@ -82,11 +83,17 @@ The pipeline operates on data stored on a shared server. Base paths are automati
 └── results/
     ├── event_lists/                 # Generated event CSVs
     │   ├── erosion/
-    │   │   └── <Location>_events.csv
+    │   │   ├── <Location>_events.csv
+    │   │   └── <Location>_vol_<V>_elv_<E>.csv    # Filtered significant events
     │   ├── deposition/
     │   │   └── <Location>_events.csv
     │   └── combined/
-    │       └── <Location>_events.csv
+    │       ├── <Location>_events.csv
+    │       └── <Location>_vol_<V>_elv_<E>.csv    # Filtered significant events
+    │
+    ├── data_cubes/                  # 3D NPZ data cubes
+    │   ├── <Location>_cube.npz                   # Full 3D data cube
+    │   └── <Location>_vol_<V>_elv_<E>_cube.npz   # Filtered 3D data cube
     │
     └── <Location>/                  # Per-location results (e.g., DelMar, SanElijo)
         ├── cropped/                 # Step 2 output
@@ -285,6 +292,79 @@ Applies visual cliff-top cutoffs and fills occlusion holes in erosion clusters u
 ```bash
 python3 8_clean_fill_grids.py SanElijo --resolution 10cm --erosion --min_volume 2.0
 ```
+
+### Event List Generation
+
+**Scripts:** `utilities/event_lists/make_event_lists.py`, `utilities/event_lists/make_sig_event_lists.py`
+
+These utilities generate event-level summaries from the 25cm filled grid outputs.
+
+#### Generate Event CSVs
+
+Extracts individual cluster events with volume, elevation, and spatial extent metrics:
+
+```bash
+# Generate event lists for a single location
+python3 utilities/event_lists/make_event_lists.py SanElijo
+
+# Generate for all locations
+python3 utilities/event_lists/make_event_lists.py --all
+
+# Erosion only
+python3 utilities/event_lists/make_event_lists.py SanElijo --erosion
+```
+
+**Output columns:** `mid_date`, `start_date`, `end_date`, `volume`, `elevation`, `alongshore_centroid_m`, `alongshore_start_m`, `alongshore_end_m`, `width`, `height`, `vol_unc`, `month`
+
+#### Generate 3D Data Cubes (NPZ)
+
+Creates 3D numpy arrays (alongshore × elevation × time) from the filled grids:
+
+```bash
+# Generate NPZ cube for a location
+python3 utilities/event_lists/make_event_lists.py SanElijo --make-npz
+
+# Generate for all locations
+python3 utilities/event_lists/make_event_lists.py --all --make-npz
+```
+
+**Output:** `results/data_cubes/<Location>_cube.npz` containing:
+- `erosion`: 3D array of M3C2 values (alongshore, elevation, time)
+- `deposition`: 3D array of M3C2 values
+- `alongshore_m`: 1D array of alongshore positions (meters)
+- `elevation_m`: 1D array of elevation bin centers (meters)
+- `dates`: 1D array of mid-dates (ordinal integers, use `datetime.fromordinal()`)
+- `date_strings`: 1D array of date folder names (YYYYMMDD_to_YYYYMMDD)
+
+#### Filter Significant Events
+
+Filters event lists to keep only significant erosion events meeting volume and elevation thresholds:
+
+```bash
+# Filter with default thresholds (volume > 5 m³, elevation > 5 m)
+python3 utilities/event_lists/make_sig_event_lists.py
+
+# Custom thresholds
+python3 utilities/event_lists/make_sig_event_lists.py --min_volume 10 --min_elevation 3
+```
+
+**Output:** `<Location>_vol_<V>_elv_<E>.csv` (e.g., `SanElijo_vol_5_elv_5.csv`)
+
+#### Generate Filtered 3D Data Cubes
+
+Creates filtered NPZ cubes containing only cells belonging to clusters that meet the significance criteria:
+
+```bash
+# Generate filtered cube with default thresholds
+python3 utilities/event_lists/make_sig_event_lists.py --make-npz
+
+# Custom thresholds
+python3 utilities/event_lists/make_sig_event_lists.py --make-npz --min_volume 10 --min_elevation 3
+```
+
+**Output:** `results/data_cubes/<Location>_vol_<V>_elv_<E>_cube.npz` containing the same structure as the full cube, plus:
+- `min_volume`: The volume threshold used for filtering
+- `min_elevation`: The elevation threshold used for filtering
 
 -----
 

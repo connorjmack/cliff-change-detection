@@ -18,7 +18,7 @@ Output columns match the legacy format:
 
 Optional NPZ export:
   --make-npz creates a 3D data cube (alongshore × elevation × time) from filled grids.
-  Output: <location>_cube.npz with keys:
+  Output: results/data_cubes/<location>_cube.npz with keys:
     - 'erosion': 3D array (alongshore, elevation, time) of M3C2 values
     - 'deposition': 3D array (alongshore, elevation, time) of M3C2 values
     - 'alongshore_m': 1D array of alongshore positions (meters)
@@ -667,12 +667,17 @@ def main():
     print(f"EVENT LIST GENERATION")
     print(f"Resolution: {RESOLUTION}")
     print(f"Output: {output_dir}")
+    # Set up NPZ output directory (separate from CSV output)
+    npz_output_dir = os.path.join(os.path.dirname(output_dir), 'data_cubes')
+
     if not args.make_npz:
         print(f"  - erosion/")
         print(f"  - deposition/")
         print(f"  - combined/")
     else:
         print(f"  Mode: NPZ cube generation")
+        print(f"  NPZ Output: {npz_output_dir}")
+        os.makedirs(npz_output_dir, exist_ok=True)
     print(f"{'='*60}\n")
 
     for location in locations:
@@ -681,7 +686,7 @@ def main():
         if args.make_npz:
             # Build and save 3D data cubes
             save_data_cube_npz(
-                location, output_dir, base_dir,
+                location, npz_output_dir, base_dir,
                 process_erosion=process_erosion,
                 process_deposition=process_deposition
             )
