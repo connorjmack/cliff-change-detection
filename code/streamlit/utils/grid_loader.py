@@ -372,7 +372,7 @@ def extract_grid_slice_from_cube(cube_data: dict, event: pd.Series,
         DataFrame with:
             - Index: alongshore positions (m), sorted ascending
             - Columns: elevation values (m), sorted ascending
-            - Values: M3C2 change values
+            - Values: M3C2 change values (reordered to match sorted coordinates)
 
         Returns None if matching slice not found.
     """
@@ -401,23 +401,22 @@ def extract_grid_slice_from_cube(cube_data: dict, event: pd.Series,
     # Extract 2D slice: (alongshore, elevation) at time_idx
     slice_2d = cube_3d[:, :, time_idx]
 
-    # Create DataFrame with proper coordinates
-    alongshore = cube_data['alongshore_m']
-    elevation = cube_data['elevation_m']
+    # Get coordinates
+    alongshore = np.array(cube_data['alongshore_m'])
+    elevation = np.array(cube_data['elevation_m'])
 
-    # DataFrame: rows=alongshore, columns=elevation
+    # CRITICAL: Sort alongshore and reorder data to match
+    # imshow requires data to be on a regular sorted grid
+    along_sort_idx = np.argsort(alongshore)
+    alongshore_sorted = alongshore[along_sort_idx]
+    slice_2d_sorted = slice_2d[along_sort_idx, :]
+
+    # DataFrame: rows=alongshore (sorted), columns=elevation
     df = pd.DataFrame(
-        slice_2d,
-        index=alongshore,
+        slice_2d_sorted,
+        index=alongshore_sorted,
         columns=elevation
     )
-
-    # CRITICAL: Sort by alongshore index (rows) for correct imshow display
-    # The NPZ alongshore values may not be sorted, which breaks coordinate mapping
-    df = df.sort_index()
-
-    # Also ensure columns (elevation) are sorted
-    df = df.reindex(columns=sorted(df.columns))
 
     # Replace NaN with 0 for display
     df = df.fillna(0.0)
