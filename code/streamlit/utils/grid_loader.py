@@ -9,6 +9,7 @@ import os
 import re
 import glob
 import platform
+import numpy as np
 import pandas as pd
 from datetime import datetime
 from functools import lru_cache
@@ -247,3 +248,175 @@ def scan_event_csvs(directory: str, recursive: bool = True) -> list:
         files = glob.glob(os.path.join(directory, '*.csv'))
 
     return sorted(set(files))
+
+
+# ============================================================================
+# NPZ DATA CUBE UTILITIES
+# ============================================================================
+
+def csv_path_to_npz_path(csv_path: str, data_cubes_dir: str = None) -> str:
+    """
+    Convert an event CSV path to its corresponding NPZ cube path.
+
+    Mapping examples:
+        - SanElijo_events.csv -> SanElijo_cube.npz
+        - SanElijo_vol_5_elv_3.csv -> SanElijo_vol_5_elv_3_cube.npz
+
+    Args:
+        csv_path: Path to event CSV file
+        data_cubes_dir: Directory containing NPZ cubes (if None, infers from csv_path)
+
+    Returns:
+        Path to corresponding NPZ file
+    """
+    basename = os.path.basename(csv_path)
+
+    # Extract the core name (remove _events suffix if present)
+    if basename.endswith('_events.csv'):
+        core_name = basename.replace('_events.csv', '')
+        npz_name = f"{core_name}_cube.npz"
+    else:
+        # Already has filter params like SanElijo_vol_5_elv_3.csv
+        core_name = basename.replace('.csv', '')
+        npz_name = f"{core_name}_cube.npz"
+
+    # Determine data_cubes directory
+    if data_cubes_dir is None:
+        # Infer from csv_path: results/event_lists/... -> results/data_cubes/
+        csv_dir = os.path.dirname(csv_path)
+        # Go up to find event_lists parent, then sibling data_cubes
+        while csv_dir and os.path.basename(csv_dir) not in ('event_lists', 'event_lists_erosion', 'event_lists_deposition'):
+            parent = os.path.dirname(csv_dir)
+            if parent == csv_dir:  # Reached root
+                break
+            csv_dir = parent
+
+        results_dir = os.path.dirname(csv_dir)
+        data_cubes_dir = os.path.join(results_dir, 'data_cubes')
+
+    return os.path.join(data_cubes_dir, npz_name)
+
+
+def load_npz_cube(npz_path: str) -> dict:
+    """
+    Load a 3D data cube from NPZ file.
+
+    Args:
+        npz_path: Path to NPZ file
+
+    Returns:
+        Dict with keys:
+            - 'erosion': 3D array (alongshore, elevation, time) or None
+            - 'deposition': 3D array (alongshore, elevation, time) or None
+            - 'alongshore_m': 1D array of alongshore positions (m)
+            - 'elevation_m': 1D array of elevation values (m)
+            - 'date_strings': 1D array of date folder names (YYYYMMDD_to_YYYYMMDD)
+            - 'dates': 1D array of ordinal dates
+
+        Returns None if file doesn't exist or fails to load.
+    """
+    if not os.path.exists(npz_path):
+        return None
+
+    try:
+        data = np.load(npz_path, allow_pickle=True)
+
+        result = {
+            'erosion': data.get('erosion'),
+            'deposition': data.get('deposition'),
+            'alongshore_m': data['alongshore_m'],
+            'elevation_m': data['elevation_m'],
+            'date_strings': data['date_strings'],
+            'dates': data.get('dates'),
+        }
+
+        # Handle case where date_strings might be object array
+        if result['date_strings'] is not None:
+            result['date_strings'] = [str(s) for s in result['date_strings']]
+
+        return result
+
+    except Exception as e:
+        print(f"Error loading NPZ {npz_path}: {e}")
+        return None
+
+
+def extract_grid_slice_from_cube(cube_data: dict, event: pd.Series,
+                                  event_type: str = 'erosion') -> pd.DataFrame:
+    """
+    Extract a 2D grid slice from the 3D cube for a specific event.
+
+    The event's date range is matched to the cube's date_strings to find
+    the correct time index.
+
+    Args:
+        cube_data: Dict from load_npz_cube()
+        event: Event row from events DataFrame (must have start_date, end_date)
+        event_type: 'erosion' or 'deposition'
+
+    Returns:
+        DataFrame with:
+            - Index: alongshore positions (m)
+            - Columns: elevation values (m)
+            - Values: M3C2 change values
+
+        Returns None if matching slice not found.
+    """
+    if cube_data is None:
+        return None
+
+    # Get the appropriate 3D cube
+    cube_3d = cube_data.get(event_type)
+    if cube_3d is None:
+        return None
+
+    # Build date folder string from event dates
+    date_folder = event_dates_to_folder(event['start_date'], event['end_date'])
+
+    # Find matching time index
+    date_strings = cube_data.get('date_strings', [])
+    time_idx = None
+    for i, ds in enumerate(date_strings):
+        if ds == date_folder:
+            time_idx = i
+            break
+
+    if time_idx is None:
+        return None
+
+    # Extract 2D slice: (alongshore, elevation) at time_idx
+    slice_2d = cube_3d[:, :, time_idx]
+
+    # Create DataFrame with proper coordinates
+    alongshore = cube_data['alongshore_m']
+    elevation = cube_data['elevation_m']
+
+    # DataFrame: rows=alongshore, columns=elevation
+    df = pd.DataFrame(
+        slice_2d,
+        index=alongshore,
+        columns=elevation
+    )
+
+    # Replace NaN with 0 for display
+    df = df.fillna(0.0)
+
+    return df
+
+
+def find_npz_for_csv(csv_path: str) -> str:
+    """
+    Find the NPZ file corresponding to a CSV file.
+
+    Searches in the sibling data_cubes directory.
+
+    Args:
+        csv_path: Path to event CSV file
+
+    Returns:
+        Path to NPZ file if found, None otherwise
+    """
+    npz_path = csv_path_to_npz_path(csv_path)
+    if os.path.exists(npz_path):
+        return npz_path
+    return None

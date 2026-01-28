@@ -29,6 +29,10 @@ from utils.grid_loader import (
     get_zoom_extent,
     load_event_csv,
     scan_event_csvs,
+    # NPZ cube utilities
+    find_npz_for_csv,
+    load_npz_cube,
+    extract_grid_slice_from_cube,
 )
 
 # === Constants ===
@@ -184,6 +188,8 @@ def init_session_state():
         'csv_path': None,
         'location': None,
         'results_dir': DEFAULT_RESULTS_DIR,
+        'npz_data': None,  # Loaded NPZ cube data
+        'npz_path': None,  # Path to NPZ file (for display)
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -231,7 +237,17 @@ if os.path.isdir(csv_dir):
                 # Initialize QC flags for all events as unreviewed
                 st.session_state.qc_flags = {i: 'unreviewed' for i in range(len(events_df))}
 
-                st.sidebar.success(f"Loaded {len(events_df)} events")
+                # Try to load corresponding NPZ cube
+                npz_path = find_npz_for_csv(csv_path)
+                if npz_path:
+                    npz_data = load_npz_cube(npz_path)
+                    st.session_state.npz_data = npz_data
+                    st.session_state.npz_path = npz_path
+                    st.sidebar.success(f"Loaded {len(events_df)} events + NPZ cube")
+                else:
+                    st.session_state.npz_data = None
+                    st.session_state.npz_path = None
+                    st.sidebar.success(f"Loaded {len(events_df)} events (no NPZ found)")
             else:
                 st.sidebar.error("Failed to load CSV file")
     else:
@@ -244,11 +260,13 @@ if st.session_state.events_df is not None:
     st.sidebar.markdown("---")
     st.sidebar.subheader("2. Settings")
 
-    st.session_state.resolution = st.sidebar.selectbox(
-        "Resolution",
-        options=RESOLUTIONS,
-        index=RESOLUTIONS.index(st.session_state.resolution)
-    )
+    # Show data source info
+    if st.session_state.npz_data is not None:
+        st.sidebar.info(f"Using NPZ cube")
+        npz_name = os.path.basename(st.session_state.npz_path) if st.session_state.npz_path else "unknown"
+        st.sidebar.caption(f"File: {npz_name}")
+    else:
+        st.sidebar.warning("No NPZ cube - using grid CSVs")
 
     st.session_state.event_type = st.sidebar.selectbox(
         "Event Type",
@@ -256,11 +274,19 @@ if st.session_state.events_df is not None:
         index=0 if st.session_state.event_type == 'erosion' else 1
     )
 
-    st.session_state.results_dir = st.sidebar.text_input(
-        "Results Directory",
-        value=st.session_state.results_dir,
-        help="Directory containing grid files"
-    )
+    # Only show resolution and results_dir if not using NPZ (they're not needed with NPZ)
+    if st.session_state.npz_data is None:
+        st.session_state.resolution = st.sidebar.selectbox(
+            "Resolution",
+            options=RESOLUTIONS,
+            index=RESOLUTIONS.index(st.session_state.resolution)
+        )
+
+        st.session_state.results_dir = st.sidebar.text_input(
+            "Results Directory",
+            value=st.session_state.results_dir,
+            help="Directory containing grid CSV files (only used when no NPZ cube)"
+        )
 
     # Navigation
     st.sidebar.markdown("---")
@@ -354,31 +380,53 @@ if st.session_state.events_df is not None:
     # Heatmap
     st.markdown("---")
 
-    # Try to load grid
-    date_folder = event_dates_to_folder(event['start_date'], event['end_date'])
-    grid_path = find_grid_file(
-        st.session_state.results_dir,
-        st.session_state.location,
-        st.session_state.event_type,
-        date_folder,
-        st.session_state.resolution
-    )
+    # Try to get grid data - prefer NPZ cube, fallback to individual CSV files
+    grid_df = None
+    data_source = None
+    resolution_m = get_resolution_value(st.session_state.resolution)
 
-    if grid_path:
-        resolution_m = get_resolution_value(st.session_state.resolution)
-        grid_df = load_and_prepare_grid(grid_path, resolution_m)
-
+    # Method 1: Try NPZ cube first (faster, pre-loaded)
+    if st.session_state.npz_data is not None:
+        grid_df = extract_grid_slice_from_cube(
+            st.session_state.npz_data,
+            event,
+            st.session_state.event_type
+        )
         if grid_df is not None:
-            fig = plot_event_heatmap(
-                grid_df, event, resolution_m, st.session_state.event_type
-            )
-            st.pyplot(fig)
-            plt.close(fig)
-        else:
-            st.warning(f"Could not load grid from: {grid_path}")
+            data_source = "NPZ cube"
+
+    # Method 2: Fallback to individual grid CSV files
+    if grid_df is None:
+        date_folder = event_dates_to_folder(event['start_date'], event['end_date'])
+        grid_path = find_grid_file(
+            st.session_state.results_dir,
+            st.session_state.location,
+            st.session_state.event_type,
+            date_folder,
+            st.session_state.resolution
+        )
+
+        if grid_path:
+            grid_df = load_and_prepare_grid(grid_path, resolution_m)
+            if grid_df is not None:
+                data_source = "grid CSV"
+
+    # Display heatmap or warning
+    if grid_df is not None:
+        fig = plot_event_heatmap(
+            grid_df, event, resolution_m, st.session_state.event_type
+        )
+        st.pyplot(fig)
+        plt.close(fig)
+        st.caption(f"Data source: {data_source}")
     else:
-        st.warning(f"Grid file not found for: {st.session_state.location}/{st.session_state.event_type}/{date_folder}/{st.session_state.resolution}")
-        st.info("Event details are shown below. You can still assign QC flags.")
+        date_folder = event_dates_to_folder(event['start_date'], event['end_date'])
+        st.warning(f"Grid data not found for: {st.session_state.location}/{st.session_state.event_type}/{date_folder}")
+        if st.session_state.npz_path:
+            st.info(f"NPZ cube loaded from: {st.session_state.npz_path}")
+            st.info("Date range may not match cube contents.")
+        else:
+            st.info("No NPZ cube found. Configure Results Directory to load individual grid CSVs.")
 
     # Event Details
     st.markdown("---")
