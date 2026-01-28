@@ -277,24 +277,36 @@ def plot_fill_vs_original(base_dir, location, resolution, vmax, output_path):
 
 def main():
     parser = argparse.ArgumentParser(description="Compare filled vs. original cumulative erosion grids (panel E style).")
-    parser.add_argument("location", type=str, help="Location name (e.g., SanElijo)")
-    parser.add_argument("--resolution", type=str, default=DEFAULT_RESOLUTION, help="Grid resolution tag (e.g., 25cm, 10cm, 1m)")
+    parser.add_argument("--location", type=str, help="Location name (e.g., SanElijo). If not specified, processes all locations.")
+    parser.add_argument("--resolution", type=str, default=DEFAULT_RESOLUTION, help="Grid resolution tag (e.g., 25cm, 10cm, 1m). Default: 25cm")
     parser.add_argument("--vmax", type=float, default=DEFAULT_VMAX, help="Upper bound for color scale (meters)")
-    parser.add_argument("--output", type=str, help="Optional output filepath. Defaults to figures/fill_vs_original/<location>_fill_compare_<resolution>.png")
+    parser.add_argument("--output", type=str, help="Optional output filepath (only valid with single --location)")
     parser.add_argument("--base-dir", type=str, help="Override default base directory detection")
     args = parser.parse_args()
 
     base_dir = args.base_dir if args.base_dir else get_base_dir()
     out_dir = get_output_dir(base_dir)
-    default_name = f"{args.location}_fill_compare_{args.resolution}.png"
-    output_path = args.output if args.output else os.path.join(out_dir, default_name)
+
+    # Determine which locations to process
+    if args.location:
+        locations = [args.location]
+    else:
+        locations = ALL_LOCATIONS
+        print(f"No location specified, processing all locations: {', '.join(locations)}")
 
     print(f"Base dir: {base_dir}")
-    print(f"Location: {args.location}")
     print(f"Resolution: {args.resolution}")
-    print(f"Output: {output_path}")
+    print()
 
-    plot_fill_vs_original(base_dir, args.location, args.resolution, args.vmax, output_path)
+    for location in locations:
+        default_name = f"{location}_fill_compare_{args.resolution}.png"
+        output_path = args.output if args.output and len(locations) == 1 else os.path.join(out_dir, default_name)
+
+        print(f"Processing: {location}")
+        print(f"  Output: {output_path}")
+
+        plot_fill_vs_original(base_dir, location, args.resolution, args.vmax, output_path)
+        print()
 
 
 if __name__ == "__main__":
