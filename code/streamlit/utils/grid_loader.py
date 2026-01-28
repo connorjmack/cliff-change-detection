@@ -259,8 +259,8 @@ def csv_path_to_npz_path(csv_path: str, data_cubes_dir: str = None) -> str:
     Convert an event CSV path to its corresponding NPZ cube path.
 
     Mapping examples:
-        - results/event_lists/erosion/SanElijo_events.csv -> results/data_cubes/SanElijo_events_cube.npz
-        - results/event_lists/combined/SanElijo_vol_5_elv_3.csv -> results/data_cubes/SanElijo_vol_5_elv_3_cube.npz
+        - results/event_lists/erosion/DelMar_events.csv -> results/data_cubes/DelMar_cube.npz
+        - results/event_lists/erosion/SanElijo_events.csv -> results/data_cubes/SanElijo_cube.npz
 
     Args:
         csv_path: Path to event CSV file
@@ -271,34 +271,44 @@ def csv_path_to_npz_path(csv_path: str, data_cubes_dir: str = None) -> str:
     """
     basename = os.path.basename(csv_path)
 
-    # Mapping: CSV name with _cube suffix
-    # SanElijo_events.csv -> SanElijo_events_cube.npz
-    npz_name = basename.replace('.csv', '_cube.npz')
+    # Strip _events or _dep_events suffix, then add _cube.npz
+    # DelMar_events.csv -> DelMar_cube.npz
+    # SanElijo_dep_events.csv -> SanElijo_cube.npz
+    name = basename.replace('.csv', '')
+    name = name.replace('_events', '').replace('_dep_events', '')
+    npz_name = f"{name}_cube.npz"
 
     # Determine data_cubes directory
     if data_cubes_dir is None:
-        # Infer from csv_path: results/event_lists/<subdir>/file.csv -> results/data_cubes/
-        csv_dir = os.path.dirname(csv_path)
+        csv_dir = os.path.dirname(os.path.abspath(csv_path))
 
-        # Walk up to find 'event_lists' directory
+        # Walk up to find 'results' directory
         current = csv_dir
-        while current:
-            if os.path.basename(current) == 'event_lists':
-                # Found it - data_cubes is a sibling
-                results_dir = os.path.dirname(current)
-                data_cubes_dir = os.path.join(results_dir, 'data_cubes')
+        while current and current != '/':
+            if os.path.basename(current) == 'results':
+                # Found results dir - data_cubes is a subdirectory
+                data_cubes_dir = os.path.join(current, 'data_cubes')
                 break
             parent = os.path.dirname(current)
             if parent == current:  # Reached root
                 break
             current = parent
 
-        # Fallback: assume data_cubes is sibling to csv directory's grandparent
+        # Fallback: look for results/data_cubes relative to project root
         if data_cubes_dir is None:
-            results_dir = os.path.dirname(os.path.dirname(csv_dir))
-            data_cubes_dir = os.path.join(results_dir, 'data_cubes')
+            # Try to find project root by looking for common markers
+            current = csv_dir
+            while current and current != '/':
+                potential = os.path.join(current, 'results', 'data_cubes')
+                if os.path.isdir(potential):
+                    data_cubes_dir = potential
+                    break
+                parent = os.path.dirname(current)
+                if parent == current:
+                    break
+                current = parent
 
-    return os.path.join(data_cubes_dir, npz_name)
+    return os.path.join(data_cubes_dir, npz_name) if data_cubes_dir else None
 
 
 def load_npz_cube(npz_path: str) -> dict:
@@ -360,8 +370,8 @@ def extract_grid_slice_from_cube(cube_data: dict, event: pd.Series,
 
     Returns:
         DataFrame with:
-            - Index: alongshore positions (m)
-            - Columns: elevation values (m)
+            - Index: alongshore positions (m), sorted ascending
+            - Columns: elevation values (m), sorted ascending
             - Values: M3C2 change values
 
         Returns None if matching slice not found.
@@ -402,6 +412,13 @@ def extract_grid_slice_from_cube(cube_data: dict, event: pd.Series,
         columns=elevation
     )
 
+    # CRITICAL: Sort by alongshore index (rows) for correct imshow display
+    # The NPZ alongshore values may not be sorted, which breaks coordinate mapping
+    df = df.sort_index()
+
+    # Also ensure columns (elevation) are sorted
+    df = df.reindex(columns=sorted(df.columns))
+
     # Replace NaN with 0 for display
     df = df.fillna(0.0)
 
@@ -421,6 +438,6 @@ def find_npz_for_csv(csv_path: str) -> str:
         Path to NPZ file if found, None otherwise
     """
     npz_path = csv_path_to_npz_path(csv_path)
-    if os.path.exists(npz_path):
+    if npz_path and os.path.exists(npz_path):
         return npz_path
     return None
