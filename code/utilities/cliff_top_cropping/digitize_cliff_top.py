@@ -466,78 +466,70 @@ def _longest_run_per_line(binary_2d):
 
 def detect_plot_bounds(image_array, debug=False):
     """
-    Detect the plot area by finding the axis frame as actual straight lines.
+    Detect the plot area by finding the axis frame (spines) as straight lines.
 
-    Strategy: the matplotlib axis frame is a rectangle of thin black lines.
-    Each horizontal spine (top/bottom) is a continuous run of black pixels
-    spanning the full plot width — far longer than any scattered data pixels
-    or text. We find these two lines, and their horizontal extent directly
-    gives us left and right bounds too (since they connect the vertical spines).
+    Strategy: matplotlib axis spines are rendered as gray lines (not pure
+    black) due to anti-aliasing.  We detect them as non-white pixels —
+    specifically, pixels where all RGB channels are below 230 and roughly
+    equal (R≈G≈B, i.e. gray).  Vertical spines (left/right) produce long
+    continuous column runs; horizontal spines (top/bottom) produce long
+    continuous row runs.
 
-    This avoids the colorbar problem entirely: the colorbar has no horizontal
-    line spanning the plot width.
+    We first find left/right via vertical spine columns, then use their
+    vertical extent for top/bottom bounds — this is more robust than
+    searching for horizontal spines which can be confused by colorbars.
 
     Returns (left, right, top, bottom) pixel coordinates.
     """
     h, w = image_array.shape[:2]
 
-    # Tight threshold: actual axis lines are pure black.
-    # Using < 40 avoids false matches on dark (but not black) data pixels.
-    near_black = np.all(image_array < 40, axis=2)
+    # Detect gray-ish pixels: not white, and roughly achromatic (R≈G≈B).
+    # Matplotlib spines are typically RGB ~(130-220, 130-220, 130-220).
+    r = image_array[:, :, 0].astype(np.int16)
+    g = image_array[:, :, 1].astype(np.int16)
+    b = image_array[:, :, 2].astype(np.int16)
 
-    # --- Find horizontal axis lines ---
-    # For each row, get the longest continuous run of black pixels.
-    # Axis spines produce runs spanning the full plot width (40%+ of image).
-    # Text, tick marks, and scattered data produce much shorter runs.
-    row_lengths, row_starts, row_ends = _longest_run_per_line(near_black)
+    not_white = (r < 230) & (g < 230) & (b < 230)
+    achromatic = (np.abs(r - g) < 30) & (np.abs(r - b) < 30) & (np.abs(g - b) < 30)
+    spine_candidate = not_white & achromatic
 
-    min_run_h = w * 0.4
-    spine_rows = np.where(row_lengths >= min_run_h)[0]
+    # --- Find vertical spines (left/right) via column analysis ---
+    # Transpose so _longest_run_per_line operates on columns.
+    col_lengths, col_starts, col_ends = _longest_run_per_line(spine_candidate.T)
+
+    min_run_v = h * 0.4
+    spine_cols = np.where(col_lengths >= min_run_v)[0]
 
     if debug:
-        print(f"  Rows with continuous black runs >= {min_run_h:.0f}px: {len(spine_rows)}")
-        if len(spine_rows) > 0:
-            print(f"  Top candidate rows: {spine_rows[:5]}, "
-                  f"run lengths: {row_lengths[spine_rows[:5]]}")
-            print(f"  Bottom candidate rows: {spine_rows[-5:]}, "
-                  f"run lengths: {row_lengths[spine_rows[-5:]]}")
+        print(f"  Columns with gray runs >= {min_run_v:.0f}px: {len(spine_cols)}")
+        if len(spine_cols) > 0:
+            print(f"  First cols: {spine_cols[:5]}, lengths: {col_lengths[spine_cols[:5]]}")
+            print(f"  Last cols:  {spine_cols[-5:]}, lengths: {col_lengths[spine_cols[-5:]]}")
 
-    if len(spine_rows) >= 2:
-        # Top spine = first qualifying row, bottom spine = last qualifying row
-        top_bound = int(spine_rows[0])
-        bottom_bound = int(spine_rows[-1])
+    if len(spine_cols) >= 2:
+        left_bound = int(spine_cols[0])
+        right_bound = int(spine_cols[-1])
 
-        # The horizontal spines run from left spine to right spine.
-        # Use the median start/end of all spine rows for robustness.
-        left_bound = int(np.median(row_starts[spine_rows]))
-        right_bound = int(np.median(row_ends[spine_rows]))
-
-    elif len(spine_rows) == 1:
-        if debug:
-            print("Warning: Only one horizontal spine found, falling back for vertical")
-        # One spine found — use it for top or bottom, estimate the other
-        top_bound = int(spine_rows[0])
-        bottom_bound = int(h * 0.85)
-        left_bound = int(row_starts[spine_rows[0]])
-        right_bound = int(row_ends[spine_rows[0]])
-
+        # Top/bottom from the vertical extent of the spine columns.
+        top_bound = int(np.median(col_starts[spine_cols]))
+        bottom_bound = int(np.median(col_ends[spine_cols]))
     else:
-        # No clear horizontal spines found — fall back to column analysis
+        # Fallback: try horizontal spine detection
         if debug:
-            print("Warning: No horizontal spines detected, "
-                  "falling back to column-based detection")
-        # Use column analysis as last resort
-        col_lengths, col_starts, col_ends = _longest_run_per_line(near_black.T)
-        min_run_v = h * 0.3
-        spine_cols = np.where(col_lengths >= min_run_v)[0]
+            print("  Warning: Vertical spine detection failed, trying horizontal")
+        row_lengths, row_starts, row_ends = _longest_run_per_line(spine_candidate)
+        min_run_h = w * 0.4
+        spine_rows = np.where(row_lengths >= min_run_h)[0]
 
-        if len(spine_cols) >= 2:
-            left_bound = int(spine_cols[0])
-            right_bound = int(spine_cols[-1])
-            top_bound = int(np.median(col_starts[spine_cols]))
-            bottom_bound = int(np.median(col_ends[spine_cols]))
+        if len(spine_rows) >= 2:
+            top_bound = int(spine_rows[0])
+            bottom_bound = int(spine_rows[-1])
+            left_bound = int(np.median(row_starts[spine_rows]))
+            right_bound = int(np.median(row_ends[spine_rows]))
         else:
             # Complete fallback
+            if debug:
+                print("  Warning: No spines detected, using percentage fallback")
             left_bound = int(w * 0.08)
             right_bound = int(w * 0.92)
             top_bound = int(h * 0.10)
@@ -546,7 +538,7 @@ def detect_plot_bounds(image_array, debug=False):
     # Validate bounds
     if right_bound - left_bound < w * 0.2 or bottom_bound - top_bound < h * 0.2:
         if debug:
-            print("Warning: Detected bounds too small, using fallback")
+            print("  Warning: Detected bounds too small, using fallback")
         left_bound = int(w * 0.08)
         right_bound = int(w * 0.92)
         top_bound = int(h * 0.10)
