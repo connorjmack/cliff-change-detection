@@ -3,3 +3,4 @@
 - add visual cliff top for all locations (Del Mar done, need the rest)
 - fix Torrey M3C2 limits / rerun M3C2 with the 8cm threshold
 - re-run DBSCAN with new files
+- look into signal to noise ratio filtering

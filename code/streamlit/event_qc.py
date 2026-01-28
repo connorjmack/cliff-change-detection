@@ -151,9 +151,60 @@ def get_progress_stats(events_df: pd.DataFrame, qc_flags: dict) -> dict:
     }
 
 
-def export_qc_csv(events_df: pd.DataFrame, qc_flags: dict, original_path: str) -> tuple:
+def get_qc_output_path(original_path: str) -> str:
     """
-    Prepare CSV export with QC flags column.
+    Determine the QC output path based on the original CSV path.
+
+    Maps: results/event_lists/<subdir>/file.csv -> results/event_lists_qc/<subdir>/file_qc_<timestamp>.csv
+
+    Args:
+        original_path: Original CSV file path
+
+    Returns:
+        Full output path for QC results
+    """
+    # Get the subdirectory (erosion, deposition, or combined)
+    parent_dir = os.path.basename(os.path.dirname(original_path))
+    if parent_dir in ('erosion', 'deposition', 'combined'):
+        subdir = parent_dir
+    else:
+        # Fallback: try to infer from filename or default to combined
+        basename_lower = os.path.basename(original_path).lower()
+        if 'dep' in basename_lower:
+            subdir = 'deposition'
+        elif 'ero' in basename_lower:
+            subdir = 'erosion'
+        else:
+            subdir = 'combined'
+
+    # Find results directory by walking up from original path
+    current = os.path.dirname(original_path)
+    while current:
+        if os.path.basename(current) == 'event_lists':
+            results_dir = os.path.dirname(current)
+            break
+        parent = os.path.dirname(current)
+        if parent == current:  # Reached root
+            # Fallback: use grandparent of CSV directory
+            results_dir = os.path.dirname(os.path.dirname(os.path.dirname(original_path)))
+            break
+        current = parent
+
+    # Build output directory
+    output_dir = os.path.join(results_dir, 'event_lists_qc', subdir)
+
+    # Generate filename with timestamp
+    base = os.path.basename(original_path)
+    name, ext = os.path.splitext(base)
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    filename = f"{name}_qc_{timestamp}{ext}"
+
+    return os.path.join(output_dir, filename)
+
+
+def export_qc_csv(events_df: pd.DataFrame, qc_flags: dict, original_path: str) -> str:
+    """
+    Save CSV with QC flags column to results/event_lists_qc/<subdir>/.
 
     Args:
         events_df: Original events DataFrame
@@ -161,19 +212,22 @@ def export_qc_csv(events_df: pd.DataFrame, qc_flags: dict, original_path: str) -
         original_path: Original CSV file path
 
     Returns:
-        Tuple of (csv_string, suggested_filename)
+        Path where file was saved
     """
     # Create copy with QC column
     export_df = events_df.copy()
     export_df['qc_flag'] = export_df.index.map(lambda i: qc_flags.get(i, 'unreviewed'))
 
-    # Generate filename
-    base = os.path.basename(original_path)
-    name, ext = os.path.splitext(base)
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    filename = f"{name}_qc_{timestamp}{ext}"
+    # Get output path
+    output_path = get_qc_output_path(original_path)
 
-    return export_df.to_csv(index=False), filename
+    # Create directory if needed
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+    # Save to disk
+    export_df.to_csv(output_path, index=False)
+
+    return output_path
 
 
 # === Initialize Session State ===
@@ -212,7 +266,7 @@ st.sidebar.subheader("1. Load Events")
 csv_dir = st.sidebar.text_input(
     "Event CSV Directory",
     value=os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-                       "results", "event_lists_erosion"),
+                       "results", "event_lists", "erosion"),
     help="Directory containing event CSV files"
 )
 
@@ -228,14 +282,35 @@ if os.path.isdir(csv_dir):
             events_df = load_event_csv(csv_path)
 
             if events_df is not None:
+                # Sort by volume (largest first) if volume column exists
+                if 'volume' in events_df.columns:
+                    events_df = events_df.sort_values('volume', ascending=False).reset_index(drop=True)
+
                 st.session_state.events_df = events_df
                 st.session_state.csv_path = csv_path
-                st.session_state.current_index = 0
                 st.session_state.location = infer_location_from_filename(csv_path)
                 st.session_state.event_type = infer_event_type_from_filename(csv_path)
 
-                # Initialize QC flags for all events as unreviewed
-                st.session_state.qc_flags = {i: 'unreviewed' for i in range(len(events_df))}
+                # Check if CSV has existing QC flags (resuming previous work)
+                resumed = False
+                if 'qc_flag' in events_df.columns:
+                    # Load existing flags
+                    st.session_state.qc_flags = {
+                        i: row['qc_flag'] if pd.notna(row['qc_flag']) else 'unreviewed'
+                        for i, row in events_df.iterrows()
+                    }
+                    # Find first unreviewed event
+                    first_unreviewed = 0
+                    for i in range(len(events_df)):
+                        if st.session_state.qc_flags.get(i, 'unreviewed') == 'unreviewed':
+                            first_unreviewed = i
+                            break
+                    st.session_state.current_index = first_unreviewed
+                    resumed = True
+                else:
+                    # Initialize all as unreviewed, start at beginning
+                    st.session_state.qc_flags = {i: 'unreviewed' for i in range(len(events_df))}
+                    st.session_state.current_index = 0
 
                 # Try to load corresponding NPZ cube
                 npz_path = find_npz_for_csv(csv_path)
@@ -243,11 +318,16 @@ if os.path.isdir(csv_dir):
                     npz_data = load_npz_cube(npz_path)
                     st.session_state.npz_data = npz_data
                     st.session_state.npz_path = npz_path
-                    st.sidebar.success(f"Loaded {len(events_df)} events + NPZ cube")
+                    msg = f"Loaded {len(events_df)} events + NPZ cube"
                 else:
                     st.session_state.npz_data = None
                     st.session_state.npz_path = None
-                    st.sidebar.success(f"Loaded {len(events_df)} events (no NPZ found)")
+                    msg = f"Loaded {len(events_df)} events (no NPZ found)"
+
+                if resumed:
+                    reviewed = sum(1 for f in st.session_state.qc_flags.values() if f != 'unreviewed')
+                    msg += f" | Resumed: {reviewed} already reviewed"
+                st.sidebar.success(msg)
             else:
                 st.sidebar.error("Failed to load CSV file")
     else:
@@ -344,19 +424,17 @@ if st.session_state.events_df is not None:
     st.sidebar.markdown("---")
     st.sidebar.subheader("5. Export")
 
-    csv_data, filename = export_qc_csv(
-        st.session_state.events_df,
-        st.session_state.qc_flags,
-        st.session_state.csv_path
-    )
+    # Show where file will be saved
+    output_path = get_qc_output_path(st.session_state.csv_path)
+    st.sidebar.caption(f"Saves to: `{os.path.relpath(output_path, os.path.dirname(st.session_state.csv_path))}`")
 
-    st.sidebar.download_button(
-        label="Download QC Results",
-        data=csv_data,
-        file_name=filename,
-        mime="text/csv",
-        use_container_width=True
-    )
+    if st.sidebar.button("Save QC Results", use_container_width=True):
+        saved_path = export_qc_csv(
+            st.session_state.events_df,
+            st.session_state.qc_flags,
+            st.session_state.csv_path
+        )
+        st.sidebar.success(f"Saved to {os.path.basename(saved_path)}")
 
 # === Main Content ===
 if st.session_state.events_df is not None:

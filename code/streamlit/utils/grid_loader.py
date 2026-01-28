@@ -259,8 +259,8 @@ def csv_path_to_npz_path(csv_path: str, data_cubes_dir: str = None) -> str:
     Convert an event CSV path to its corresponding NPZ cube path.
 
     Mapping examples:
-        - SanElijo_events.csv -> SanElijo_cube.npz
-        - SanElijo_vol_5_elv_3.csv -> SanElijo_vol_5_elv_3_cube.npz
+        - results/event_lists/erosion/SanElijo_events.csv -> results/data_cubes/SanElijo_events_cube.npz
+        - results/event_lists/combined/SanElijo_vol_5_elv_3.csv -> results/data_cubes/SanElijo_vol_5_elv_3_cube.npz
 
     Args:
         csv_path: Path to event CSV file
@@ -271,28 +271,32 @@ def csv_path_to_npz_path(csv_path: str, data_cubes_dir: str = None) -> str:
     """
     basename = os.path.basename(csv_path)
 
-    # Extract the core name (remove _events suffix if present)
-    if basename.endswith('_events.csv'):
-        core_name = basename.replace('_events.csv', '')
-        npz_name = f"{core_name}_cube.npz"
-    else:
-        # Already has filter params like SanElijo_vol_5_elv_3.csv
-        core_name = basename.replace('.csv', '')
-        npz_name = f"{core_name}_cube.npz"
+    # Mapping: CSV name with _cube suffix
+    # SanElijo_events.csv -> SanElijo_events_cube.npz
+    npz_name = basename.replace('.csv', '_cube.npz')
 
     # Determine data_cubes directory
     if data_cubes_dir is None:
-        # Infer from csv_path: results/event_lists/... -> results/data_cubes/
+        # Infer from csv_path: results/event_lists/<subdir>/file.csv -> results/data_cubes/
         csv_dir = os.path.dirname(csv_path)
-        # Go up to find event_lists parent, then sibling data_cubes
-        while csv_dir and os.path.basename(csv_dir) not in ('event_lists', 'event_lists_erosion', 'event_lists_deposition'):
-            parent = os.path.dirname(csv_dir)
-            if parent == csv_dir:  # Reached root
-                break
-            csv_dir = parent
 
-        results_dir = os.path.dirname(csv_dir)
-        data_cubes_dir = os.path.join(results_dir, 'data_cubes')
+        # Walk up to find 'event_lists' directory
+        current = csv_dir
+        while current:
+            if os.path.basename(current) == 'event_lists':
+                # Found it - data_cubes is a sibling
+                results_dir = os.path.dirname(current)
+                data_cubes_dir = os.path.join(results_dir, 'data_cubes')
+                break
+            parent = os.path.dirname(current)
+            if parent == current:  # Reached root
+                break
+            current = parent
+
+        # Fallback: assume data_cubes is sibling to csv directory's grandparent
+        if data_cubes_dir is None:
+            results_dir = os.path.dirname(os.path.dirname(csv_dir))
+            data_cubes_dir = os.path.join(results_dir, 'data_cubes')
 
     return os.path.join(data_cubes_dir, npz_name)
 
