@@ -202,7 +202,6 @@ def load_cutoff_dataframe(base_dir, location, resolution):
 
     for p in paths:
         if os.path.exists(p):
-            print(f"Loaded Cutoff File: {p}")
             try:
                 df = pd.read_csv(p)
                 if 'Polygon_ID' in df.columns:
@@ -393,9 +392,6 @@ def morphological_cleanup(grid, clusters, min_component_size=3):
     clusters_cleaned = np.where(mask_cleaned, clusters, 0)
 
     cells_removed = np.sum(mask) - np.sum(mask_cleaned)
-    if cells_removed > 0:
-        print(f"    [Cleanup] Removed {cells_removed} isolated cells")
-
     return grid_cleaned, clusters_cleaned
 
 
@@ -862,11 +858,7 @@ def process_location(location, args):
     process_erosion = args.erosion or not (args.erosion or args.deposition)
     process_deposition = args.deposition or not (args.erosion or args.deposition)
 
-    print(f"\n{'='*80}\nCLEANING + HOLE FILLING (Physical Coordinates)\n{'='*80}")
-    print(f"Location: {location}")
-    print(f"Resolution: {args.resolution}")
-    print(f"Elevation Scale: {args.elevation_scale}")
-    print(f"Cleanup Size: {args.cleanup_size}")
+    print(f"\n--- {location} ({args.resolution}) ---")
 
     system = platform.system()
     base_dir = '/Volumes/group/LiDAR/LidarProcessing/LidarProcessingCliffs' if system == 'Darwin' else '/project/group/LiDAR/LidarProcessing/LidarProcessingCliffs'
@@ -882,9 +874,7 @@ def process_location(location, args):
     # LOAD SHAPEFILE AND POLYGON CENTROIDS
     try:
         shp_path = find_shapefile(util_dir, location, args.resolution)
-        print(f"Loading shapefile: {shp_path}")
         polygon_centroids = load_polygon_centroids(shp_path)
-        print(f"Loaded {len(polygon_centroids)} polygon centroids")
     except FileNotFoundError as e:
         print(f"[ERROR] {e}")
         print(f"[WARNING] Cannot proceed without shapefile for physical coordinates.")
@@ -921,7 +911,7 @@ def process_location(location, args):
         return
 
     workers = max(1, multiprocessing.cpu_count() // 4)
-    print(f"Launching {len(tasks)} tasks on {workers} workers...\n")
+    print(f"  {len(tasks)} tasks, {workers} workers")
 
     start_time = time.time()
     with multiprocessing.Pool(workers) as pool:
@@ -931,7 +921,7 @@ def process_location(location, args):
                            args.min_volume, stats_results, base_dir,
                            args.skip_filling)
 
-    print(f"Processing complete for {location} in {time.time() - start_time:.2f} s")
+    print(f"  Done ({time.time() - start_time:.1f}s)")
 
 if __name__ == '__main__':
     main()
