@@ -63,19 +63,16 @@ def plot_event_heatmap(grid_df: pd.DataFrame, event: pd.Series,
     Returns:
         Matplotlib Figure object
     """
-    # Get zoom extent from event coordinates
+    # Get zoom extent from event coordinates (in meters)
     extent = get_zoom_extent(event, resolution_m)
 
     # Transpose for display (elevation on Y-axis, alongshore on X-axis)
-    # Grid structure: rows=alongshore position, cols=elevation grid indices
+    # Grid structure: rows=alongshore position (m), cols=elevation (m)
     plot_df = grid_df.T
 
-    # Get coordinate arrays
-    # X = alongshore positions (row indices from original grid, already in meters)
-    # Y = elevation grid indices (need to convert to meters)
-    x_values = plot_df.columns.values.astype(float)
-    y_indices = plot_df.index.values.astype(float)
-    y_values = y_indices * resolution_m  # Convert grid indices to meters
+    # Get coordinate arrays (both already in meters after clean_and_snap_grid)
+    x_values = plot_df.columns.values.astype(float)  # Alongshore (m)
+    y_values = plot_df.index.values.astype(float)    # Elevation (m)
 
     # Get matrix values
     matrix = plot_df.values
@@ -112,7 +109,7 @@ def plot_event_heatmap(grid_df: pd.DataFrame, event: pd.Series,
     ax.axvline(event['alongshore_start_m'], color='orange', linestyle=':', linewidth=1, alpha=0.6)
     ax.axvline(event['alongshore_end_m'], color='orange', linestyle=':', linewidth=1, alpha=0.6)
 
-    # ZOOM: Set axis limits to event extent (this is the key fix!)
+    # ZOOM: Set axis limits to event extent
     # Reverse x-axis for cliff-facing view (higher alongshore values on left)
     ax.set_xlim(extent['x_max'], extent['x_min'])
     ax.set_ylim(extent['y_min'], extent['y_max'])
@@ -216,11 +213,12 @@ csv_dir = st.sidebar.text_input(
 if os.path.isdir(csv_dir):
     csv_files = scan_event_csvs(csv_dir)
     if csv_files:
-        csv_names = [os.path.basename(f) for f in csv_files]
-        selected_csv = st.sidebar.selectbox("Select Event File", csv_names)
+        # Show relative paths from base directory for readability
+        csv_display = {os.path.relpath(f, csv_dir): f for f in csv_files}
+        selected_display = st.sidebar.selectbox("Select Event File", list(csv_display.keys()))
 
         if st.sidebar.button("Load Events", type="primary"):
-            csv_path = os.path.join(csv_dir, selected_csv)
+            csv_path = csv_display[selected_display]
             events_df = load_event_csv(csv_path)
 
             if events_df is not None:
@@ -237,7 +235,7 @@ if os.path.isdir(csv_dir):
             else:
                 st.sidebar.error("Failed to load CSV file")
     else:
-        st.sidebar.warning("No event CSV files found in directory")
+        st.sidebar.warning("No CSV files found in directory")
 else:
     st.sidebar.warning("Directory does not exist")
 

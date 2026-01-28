@@ -319,6 +319,201 @@ def extract_events_from_grids(grid_csv_path, cluster_csv_path, stats_npz_path,
 
 
 # ============================================================================
+# NPZ CUBE BUILDING
+# ============================================================================
+
+def build_data_cube(location, base_dir, event_type='erosion'):
+    """
+    Build a 3D data cube from filled grid CSVs.
+
+    Args:
+        location: Location name (e.g., 'SanElijo')
+        base_dir: Base directory path
+        event_type: 'erosion' or 'deposition'
+
+    Returns:
+        cube: 3D numpy array (alongshore, elevation, time)
+        alongshore_m: 1D array of alongshore positions
+        elevation_m: 1D array of elevation values
+        dates: List of mid-dates
+        date_strings: List of date folder names
+    """
+    results_dir = os.path.join(base_dir, 'results', location)
+    util_dir = os.path.join(base_dir, 'utilities')
+
+    type_dir = os.path.join(results_dir, event_type)
+    if not os.path.isdir(type_dir):
+        print(f"  [WARNING] {event_type}/ directory not found")
+        return None, None, None, None, None
+
+    # Load shapefile for alongshore positions
+    try:
+        shp_path = find_shapefile(util_dir, location, RESOLUTION)
+        alongshore_positions, _ = load_polygon_alongshore(shp_path)
+    except FileNotFoundError as e:
+        print(f"  [ERROR] {e}")
+        return None, None, None, None, None
+
+    # Collect all date folders and their grid data
+    dates = sorted([d for d in os.listdir(type_dir)
+                    if os.path.isdir(os.path.join(type_dir, d))])
+
+    if not dates:
+        print(f"  [WARNING] No date folders found in {event_type}/")
+        return None, None, None, None, None
+
+    # First pass: collect all unique polygon IDs and elevations
+    all_polygon_ids = set()
+    all_elevations = set()
+    valid_dates = []
+    grid_data_cache = {}
+
+    for date_str in dates:
+        res_folder = os.path.join(type_dir, date_str, RESOLUTION)
+        if not os.path.isdir(res_folder):
+            continue
+
+        # Find grid file
+        grid_file = None
+        for f in os.listdir(res_folder):
+            if f.endswith(f'_grid_{RESOLUTION}_filled.csv'):
+                grid_file = os.path.join(res_folder, f)
+                break
+
+        if not grid_file:
+            continue
+
+        headers, rows, grid = load_grid_csv(grid_file)
+        if grid is None:
+            continue
+
+        # Parse elevations from headers
+        elevations = [parse_elevation_from_header(h) for h in headers]
+        elevations = [e for e in elevations if e is not None]
+
+        all_polygon_ids.update(rows)
+        all_elevations.update(elevations)
+        valid_dates.append(date_str)
+        grid_data_cache[date_str] = (headers, rows, grid)
+
+    if not valid_dates:
+        print(f"  [WARNING] No valid grid files found for {event_type}")
+        return None, None, None, None, None
+
+    # Create sorted axes
+    sorted_polygon_ids = sorted(all_polygon_ids)
+    sorted_elevations = sorted(all_elevations)
+
+    # Map polygon IDs to alongshore positions
+    alongshore_m = np.array([alongshore_positions.get(pid, np.nan)
+                             for pid in sorted_polygon_ids])
+
+    elevation_m = np.array(sorted_elevations)
+
+    # Create index mappings
+    pid_to_idx = {pid: i for i, pid in enumerate(sorted_polygon_ids)}
+    elv_to_idx = {elv: i for i, elv in enumerate(sorted_elevations)}
+
+    # Parse mid-dates
+    mid_dates = []
+    for date_str in valid_dates:
+        parts = date_str.split('_to_')
+        if len(parts) == 2:
+            try:
+                start = datetime.strptime(parts[0], '%Y%m%d').date()
+                end = datetime.strptime(parts[1], '%Y%m%d').date()
+                mid = start + (end - start) / 2
+                mid_dates.append(mid)
+            except ValueError:
+                mid_dates.append(None)
+        else:
+            mid_dates.append(None)
+
+    # Build 3D cube (alongshore, elevation, time)
+    n_alongshore = len(sorted_polygon_ids)
+    n_elevation = len(sorted_elevations)
+    n_time = len(valid_dates)
+
+    cube = np.full((n_alongshore, n_elevation, n_time), np.nan, dtype=np.float32)
+
+    for t_idx, date_str in enumerate(valid_dates):
+        headers, rows, grid = grid_data_cache[date_str]
+
+        for row_idx, pid in enumerate(rows):
+            if pid not in pid_to_idx:
+                continue
+            as_idx = pid_to_idx[pid]
+
+            for col_idx, header in enumerate(headers):
+                elv = parse_elevation_from_header(header)
+                if elv is None or elv not in elv_to_idx:
+                    continue
+                el_idx = elv_to_idx[elv]
+
+                value = grid[row_idx, col_idx]
+                if not np.isnan(value):
+                    cube[as_idx, el_idx, t_idx] = value
+
+    return cube, alongshore_m, elevation_m, mid_dates, valid_dates
+
+
+def save_data_cube_npz(location, output_dir, base_dir, process_erosion=True, process_deposition=True):
+    """
+    Build and save 3D data cubes to NPZ file.
+
+    Args:
+        location: Location name
+        output_dir: Output directory
+        base_dir: Base directory for input data
+        process_erosion: Include erosion data
+        process_deposition: Include deposition data
+
+    Returns:
+        Path to saved NPZ file, or None if no data
+    """
+    print(f"  Building data cubes for {location}...")
+
+    data = {}
+
+    if process_erosion:
+        result = build_data_cube(location, base_dir, 'erosion')
+        if result[0] is not None:
+            cube, alongshore, elevation, dates, date_strs = result
+            data['erosion'] = cube
+            data['alongshore_m'] = alongshore
+            data['elevation_m'] = elevation
+            data['dates'] = np.array([d.toordinal() if d else 0 for d in dates])
+            data['date_strings'] = np.array(date_strs, dtype=object)
+            print(f"    Erosion cube: {cube.shape} (alongshore, elevation, time)")
+            print(f"      Non-NaN values: {np.sum(~np.isnan(cube)):,}")
+
+    if process_deposition:
+        result = build_data_cube(location, base_dir, 'deposition')
+        if result[0] is not None:
+            cube, alongshore, elevation, dates, date_strs = result
+            data['deposition'] = cube
+            # Only set axes if not already set from erosion
+            if 'alongshore_m' not in data:
+                data['alongshore_m'] = alongshore
+                data['elevation_m'] = elevation
+                data['dates'] = np.array([d.toordinal() if d else 0 for d in dates])
+                data['date_strings'] = np.array(date_strs, dtype=object)
+            print(f"    Deposition cube: {cube.shape} (alongshore, elevation, time)")
+            print(f"      Non-NaN values: {np.sum(~np.isnan(cube)):,}")
+
+    if not data:
+        print(f"  [WARNING] No data cubes built for {location}")
+        return None
+
+    # Save to NPZ
+    npz_path = os.path.join(output_dir, f'{location}_cube.npz')
+    np.savez_compressed(npz_path, **data)
+    print(f"  Saved: {npz_path}")
+
+    return npz_path
+
+
+# ============================================================================
 # MAIN PROCESSING
 # ============================================================================
 
@@ -427,6 +622,8 @@ def main():
     parser.add_argument('--all', action='store_true', help='Process all locations')
     parser.add_argument('--erosion', action='store_true', help='Process only erosion')
     parser.add_argument('--deposition', action='store_true', help='Process only deposition')
+    parser.add_argument('--make-npz', action='store_true',
+                        help='Create 3D data cube NPZ file (alongshore × elevation × time)')
     parser.add_argument('--output_dir', type=str, default=None,
                         help='Output directory (default: results/event_lists/)')
     args = parser.parse_args()
@@ -456,62 +653,75 @@ def main():
 
     os.makedirs(output_dir, exist_ok=True)
 
-    # Create subdirectories
+    # Create subdirectories (only needed for CSV output, not NPZ)
     erosion_dir = os.path.join(output_dir, 'erosion')
     deposition_dir = os.path.join(output_dir, 'deposition')
     combined_dir = os.path.join(output_dir, 'combined')
 
-    os.makedirs(erosion_dir, exist_ok=True)
-    os.makedirs(deposition_dir, exist_ok=True)
-    os.makedirs(combined_dir, exist_ok=True)
+    if not args.make_npz:
+        os.makedirs(erosion_dir, exist_ok=True)
+        os.makedirs(deposition_dir, exist_ok=True)
+        os.makedirs(combined_dir, exist_ok=True)
 
     print(f"\n{'='*60}")
     print(f"EVENT LIST GENERATION")
     print(f"Resolution: {RESOLUTION}")
     print(f"Output: {output_dir}")
-    print(f"  - erosion/")
-    print(f"  - deposition/")
-    print(f"  - combined/")
+    if not args.make_npz:
+        print(f"  - erosion/")
+        print(f"  - deposition/")
+        print(f"  - combined/")
+    else:
+        print(f"  Mode: NPZ cube generation")
     print(f"{'='*60}\n")
 
     for location in locations:
         print(f"\n--- {location} ---")
 
-        erosion_events, deposition_events = process_location(
-            location, base_dir,
-            process_erosion=process_erosion,
-            process_deposition=process_deposition
-        )
-
-        # Save erosion events
-        if erosion_events:
-            df_ero = pd.DataFrame(erosion_events).sort_values('mid_date')
-            ero_path = os.path.join(erosion_dir, f'{location}_events.csv')
-            df_ero.to_csv(ero_path, index=False)
-            print(f"  Erosion: {len(df_ero)} events -> {ero_path}")
+        if args.make_npz:
+            # Build and save 3D data cubes
+            save_data_cube_npz(
+                location, output_dir, base_dir,
+                process_erosion=process_erosion,
+                process_deposition=process_deposition
+            )
         else:
-            print(f"  Erosion: No events found")
+            # Generate event list CSVs
+            erosion_events, deposition_events = process_location(
+                location, base_dir,
+                process_erosion=process_erosion,
+                process_deposition=process_deposition
+            )
 
-        # Save deposition events
-        if deposition_events:
-            df_dep = pd.DataFrame(deposition_events).sort_values('mid_date')
-            dep_path = os.path.join(deposition_dir, f'{location}_events.csv')
-            df_dep.to_csv(dep_path, index=False)
-            print(f"  Deposition: {len(df_dep)} events -> {dep_path}")
-        else:
-            print(f"  Deposition: No events found")
+            # Save erosion events
+            if erosion_events:
+                df_ero = pd.DataFrame(erosion_events).sort_values('mid_date')
+                ero_path = os.path.join(erosion_dir, f'{location}_events.csv')
+                df_ero.to_csv(ero_path, index=False)
+                print(f"  Erosion: {len(df_ero)} events -> {ero_path}")
+            else:
+                print(f"  Erosion: No events found")
 
-        # Save combined events
-        all_events = erosion_events + deposition_events
-        if all_events:
-            df_all = pd.DataFrame(all_events).sort_values('mid_date')
-            combined_path = os.path.join(combined_dir, f'{location}_events.csv')
-            df_all.to_csv(combined_path, index=False)
-            print(f"  Combined: {len(df_all)} events -> {combined_path}")
-            print(f"    Date range: {df_all['start_date'].min()} to {df_all['end_date'].max()}")
-            print(f"    Volume range: {df_all['volume'].min():.2f} to {df_all['volume'].max():.2f} m³")
-        else:
-            print(f"  No events found for {location}")
+            # Save deposition events
+            if deposition_events:
+                df_dep = pd.DataFrame(deposition_events).sort_values('mid_date')
+                dep_path = os.path.join(deposition_dir, f'{location}_events.csv')
+                df_dep.to_csv(dep_path, index=False)
+                print(f"  Deposition: {len(df_dep)} events -> {dep_path}")
+            else:
+                print(f"  Deposition: No events found")
+
+            # Save combined events
+            all_events = erosion_events + deposition_events
+            if all_events:
+                df_all = pd.DataFrame(all_events).sort_values('mid_date')
+                combined_path = os.path.join(combined_dir, f'{location}_events.csv')
+                df_all.to_csv(combined_path, index=False)
+                print(f"  Combined: {len(df_all)} events -> {combined_path}")
+                print(f"    Date range: {df_all['start_date'].min()} to {df_all['end_date'].max()}")
+                print(f"    Volume range: {df_all['volume'].min():.2f} to {df_all['volume'].max():.2f} m³")
+            else:
+                print(f"  No events found for {location}")
 
     print(f"\n{'='*60}")
     print("Done!")

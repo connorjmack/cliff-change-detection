@@ -120,26 +120,24 @@ def find_grid_file(results_dir: str, location: str, event_type: str,
 
 def clean_and_snap_grid(df: pd.DataFrame, resolution_val: float) -> pd.DataFrame:
     """
-    Clean column names and snap to resolution grid.
-    Matches existing dashboard pattern.
+    Clean column names and keep coordinates in physical meters.
 
     Args:
         df: Raw grid DataFrame
-        resolution_val: Resolution in meters
+        resolution_val: Resolution in meters (used for reference)
 
     Returns:
-        Cleaned DataFrame with integer column indices
+        Cleaned DataFrame with float column values (elevation in meters)
     """
     # Remove letters and underscores from column names (e.g., 'M3C2_0.25m' -> '0.25')
     cleaned_cols = df.columns.astype(str).str.replace(r'[a-zA-Z_]', '', regex=True)
 
     try:
         col_floats = cleaned_cols.astype(float)
-        # Convert to grid indices
-        scale = 1.0 / resolution_val
-        new_cols = (col_floats * scale).round().astype(int)
-        df.columns = new_cols
-        df.index = df.index.astype(int)
+        # Keep columns as physical meters (not grid indices)
+        df.columns = col_floats
+        # Keep row index as-is (alongshore positions, typically in meters)
+        df.index = df.index.astype(float)
         return df
     except Exception:
         return None
@@ -227,12 +225,13 @@ def load_event_csv(csv_path: str) -> pd.DataFrame:
         return None
 
 
-def scan_event_csvs(directory: str) -> list:
+def scan_event_csvs(directory: str, recursive: bool = True) -> list:
     """
-    Scan directory for event CSV files.
+    Scan directory for all CSV files.
 
     Args:
         directory: Directory to scan
+        recursive: If True, also scan subdirectories
 
     Returns:
         List of CSV file paths
@@ -240,9 +239,11 @@ def scan_event_csvs(directory: str) -> list:
     if not os.path.isdir(directory):
         return []
 
-    patterns = ['*_events.csv', '*_events_sig.csv', '*_dep_events.csv', '*_dep_events_sig.csv']
-    files = []
-    for pattern in patterns:
-        files.extend(glob.glob(os.path.join(directory, pattern)))
+    if recursive:
+        # Scan directory and all subdirectories
+        files = glob.glob(os.path.join(directory, '**', '*.csv'), recursive=True)
+    else:
+        # Scan only the specified directory
+        files = glob.glob(os.path.join(directory, '*.csv'))
 
     return sorted(set(files))
