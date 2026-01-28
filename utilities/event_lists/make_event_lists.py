@@ -16,11 +16,22 @@ Output columns match the legacy format:
   - vol_unc: Volume uncertainty (m³)
   - month: Calendar month
 
+Optional NPZ export:
+  --make-npz creates a 3D data cube (alongshore × elevation × time) from filled grids.
+  Output: <location>_cube.npz with keys:
+    - 'erosion': 3D array (alongshore, elevation, time) of M3C2 values
+    - 'deposition': 3D array (alongshore, elevation, time) of M3C2 values
+    - 'alongshore_m': 1D array of alongshore positions (meters)
+    - 'elevation_m': 1D array of elevation values (meters)
+    - 'dates': 1D array of mid-dates (as ordinal integers for numpy compatibility)
+    - 'date_strings': 1D array of date strings (YYYYMMDD_to_YYYYMMDD)
+
 Usage:
     python3 make_event_lists.py SanElijo
     python3 make_event_lists.py --all
     python3 make_event_lists.py SanElijo --erosion
     python3 make_event_lists.py SanElijo --deposition
+    python3 make_event_lists.py SanElijo --make-npz
 """
 import os
 import platform

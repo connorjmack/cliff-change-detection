@@ -63,42 +63,28 @@ def plot_event_heatmap(grid_df: pd.DataFrame, event: pd.Series,
     Returns:
         Matplotlib Figure object
     """
-    # Get zoom extent
+    # Get zoom extent from event coordinates
     extent = get_zoom_extent(event, resolution_m)
 
     # Transpose for display (elevation on Y-axis, alongshore on X-axis)
+    # Grid structure: rows=alongshore position, cols=elevation grid indices
     plot_df = grid_df.T
 
-    # Convert grid indices to physical meters
-    x_indices = plot_df.columns.astype(int)
-    x_meters = x_indices * resolution_m
-    y_indices = plot_df.index.astype(int)
-    y_meters = y_indices * resolution_m
-
-    # Filter to zoom region
-    x_mask = (x_meters >= extent['x_min']) & (x_meters <= extent['x_max'])
-    y_mask = (y_meters >= extent['y_min']) & (y_meters <= extent['y_max'])
-
-    # Apply masks
-    x_cols = x_meters[x_mask]
-    y_rows = y_meters[y_mask]
-
-    if len(x_cols) == 0 or len(y_rows) == 0:
-        # Fall back to full grid if zoom fails
-        x_cols = x_meters
-        y_rows = y_meters
-        zoomed_df = plot_df
-    else:
-        zoomed_df = plot_df.loc[y_mask, x_mask]
+    # Get coordinate arrays
+    # X = alongshore positions (row indices from original grid, already in meters)
+    # Y = elevation grid indices (need to convert to meters)
+    x_values = plot_df.columns.values.astype(float)
+    y_indices = plot_df.index.values.astype(float)
+    y_values = y_indices * resolution_m  # Convert grid indices to meters
 
     # Get matrix values
-    matrix = zoomed_df.values
+    matrix = plot_df.values
 
-    # Calculate physical extent for imshow
-    if len(x_cols) > 0 and len(y_rows) > 0:
-        img_extent = [x_cols.min(), x_cols.max(), y_rows.min(), y_rows.max()]
-    else:
-        img_extent = [0, 1, 0, 1]
+    # Calculate full grid extent for imshow
+    # Note: imshow extent is [left, right, bottom, top]
+    x_min_grid, x_max_grid = x_values.min(), x_values.max()
+    y_min_grid, y_max_grid = y_values.min(), y_values.max()
+    img_extent = [x_min_grid, x_max_grid, y_min_grid, y_max_grid]
 
     # Choose colormap based on event type
     if event_type == 'erosion':
@@ -113,7 +99,7 @@ def plot_event_heatmap(grid_df: pd.DataFrame, event: pd.Series,
     # Create figure
     fig, ax = plt.subplots(figsize=(12, 6))
 
-    # Plot heatmap
+    # Plot heatmap with full data
     im = ax.imshow(matrix, origin='lower', extent=img_extent,
                    cmap=cmap, norm=norm, aspect='auto',
                    interpolation='nearest')
@@ -125,6 +111,11 @@ def plot_event_heatmap(grid_df: pd.DataFrame, event: pd.Series,
     # Add event bounding box
     ax.axvline(event['alongshore_start_m'], color='orange', linestyle=':', linewidth=1, alpha=0.6)
     ax.axvline(event['alongshore_end_m'], color='orange', linestyle=':', linewidth=1, alpha=0.6)
+
+    # ZOOM: Set axis limits to event extent (this is the key fix!)
+    # Reverse x-axis for cliff-facing view (higher alongshore values on left)
+    ax.set_xlim(extent['x_max'], extent['x_min'])
+    ax.set_ylim(extent['y_min'], extent['y_max'])
 
     # Labels
     ax.set_xlabel("Alongshore Position (m)", fontsize=12, fontweight='bold')
@@ -138,9 +129,6 @@ def plot_event_heatmap(grid_df: pd.DataFrame, event: pd.Series,
     cbar = plt.colorbar(im, ax=ax, shrink=0.8)
     label = "Erosion Depth (m)" if event_type == 'erosion' else "Deposition Depth (m)"
     cbar.set_label(label, fontsize=11)
-
-    # Reverse x-axis for cliff-facing view
-    ax.set_xlim(img_extent[1], img_extent[0])
 
     plt.tight_layout()
     return fig
