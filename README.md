@@ -41,30 +41,110 @@ pip install numpy pandas laspy[lazrs] pdal scikit-learn scipy shapely geopandas 
 
 ## Directory Structure
 
-The pipeline relies on a specific directory structure to locate assets, models, and save results. Ensure your environment matches the following layout:
+The pipeline operates on data stored on a shared server. Base paths are automatically detected by platform:
+- **macOS:** `/Volumes/group/LiDAR/LidarProcessing/LidarProcessingCliffs/`
+- **Linux/HPC:** `/project/group/LiDAR/LidarProcessing/LidarProcessingCliffs/`
+
+### Full Directory Layout
 
 ```text
-/LidarProcessingCliffs/
+/Volumes/group/LiDAR/LidarProcessing/LidarProcessingCliffs/
+│
 ├── code/
-│   └── pipeline/           # Source code (this repo)
-│       └── daily_reports/  # Master daily run logs (run_daily.py)
-├── reports/
-│   └── daily/              # Step 1 update logs
-├── results/
-│   └── <Location>/         # e.g., DelMar, SanElijo
-│       ├── cropped/
-│       ├── nobeach/
-│       ├── noveg/
-│       ├── m3c2/
-│       ├── erosion/
-│       └── deposition/
-├── survey_lists/           # CSV inventories of surveys
-└── utilities/
-    ├── shape_files/        # Polygons for gridding
-    ├── beach_removal/      # RF Models (.joblib) and Scalers
-    ├── canupo/             # Vegetation classifiers (.prm)
-    └── m3c2_params/        # Parameter files for CloudCompare
+│   └── pipeline/                    # Pipeline scripts (this repo)
+│       └── daily_reports/           # Master daily run logs
+│
+├── survey_lists/
+│   └── surveys_<Location>.csv       # Survey inventories (Step 0/1 output)
+│
+├── utilities/
+│   ├── shape_files/
+│   │   └── <Location>Polygons<MOP1>to<MOP2>at<resolution>/
+│   │       └── *.shp                # Polygons for spatial gridding
+│   ├── beach_removal/
+│   │   ├── <Location>_rf_model.joblib
+│   │   ├── <Location>_scaler.joblib
+│   │   └── classification_reports/  # Step 3 output
+│   ├── canupo/
+│   │   └── *.prm                    # Vegetation classifiers
+│   ├── m3c2_params/
+│   │   ├── new_params.txt           # Default M3C2 parameters
+│   │   └── m3c2_params_torrey.txt   # Location-specific params
+│   ├── cliff_top_cutoffs/
+│   │   └── <Location>_Visual_CliffTop_<resolution>.csv
+│   ├── dbscan/                      # Step 6 reports
+│   └── event_lists/                 # Event list generation scripts
+│
+├── validation/
+│   ├── m3c2/                        # Step 5 reports
+│   └── hole_filling/reports/        # Step 8 reports
+│
+└── results/
+    ├── event_lists/                 # Generated event CSVs
+    │   ├── erosion/
+    │   │   └── <Location>_events.csv
+    │   ├── deposition/
+    │   │   └── <Location>_events.csv
+    │   └── combined/
+    │       └── <Location>_events.csv
+    │
+    └── <Location>/                  # Per-location results (e.g., DelMar, SanElijo)
+        ├── cropped/                 # Step 2 output
+        │   └── *_cropped.las
+        │
+        ├── nobeach/                 # Step 3 output
+        │   └── *_nobeach.las
+        │
+        ├── noveg/                   # Step 4 output
+        │   └── *_noveg.las
+        │
+        ├── m3c2/                    # Step 5 output
+        │   └── pipeline_run_YYYYMMDD/
+        │       └── DATE1_to_DATE2/
+        │           ├── DATE1.las              # Reference cloud
+        │           ├── DATE2.las              # Comparison cloud
+        │           └── DATE1_to_DATE2_m3c2.las
+        │
+        ├── erosion/                 # Steps 6-8 output
+        │   └── DATE1_to_DATE2/
+        │       ├── ero_clusters.las           # Step 6: clustered points
+        │       ├── ero_outliers.las           # Step 6: noise points
+        │       ├── 10cm/                      # Step 7-8: resolution subdirs
+        │       │   ├── DATE1_to_DATE2_ero_grid_10cm.csv
+        │       │   ├── DATE1_to_DATE2_ero_clusters_10cm.csv
+        │       │   ├── DATE1_to_DATE2_ero_stats_10cm.npz
+        │       │   ├── DATE1_to_DATE2_ero_grid_10cm_filled.csv
+        │       │   └── DATE1_to_DATE2_ero_clusters_10cm_filled.csv
+        │       ├── 25cm/
+        │       │   ├── DATE1_to_DATE2_ero_grid_25cm.csv
+        │       │   ├── DATE1_to_DATE2_ero_clusters_25cm.csv
+        │       │   ├── DATE1_to_DATE2_ero_stats_25cm.npz
+        │       │   ├── DATE1_to_DATE2_ero_grid_25cm_filled.csv
+        │       │   └── DATE1_to_DATE2_ero_clusters_25cm_filled.csv
+        │       └── 1m/
+        │           └── ... (same pattern)
+        │
+        └── deposition/              # Steps 6-8 output (same structure as erosion)
+            └── DATE1_to_DATE2/
+                ├── dep_clusters.las
+                ├── dep_outliers.las
+                ├── 10cm/
+                ├── 25cm/
+                └── 1m/
 ```
+
+### Locations
+
+The pipeline supports the following study sites with their MOP (Monitoring and Prediction) line ranges:
+
+| Location  | MOP Range |
+|-----------|-----------|
+| DelMar    | 595-620   |
+| Solana    | 637-666   |
+| SanElijo  | 683-708   |
+| Encinitas | 708-764   |
+| Torrey    | 567-581   |
+| Blacks    | 520-567   |
 
 -----
 
