@@ -7,8 +7,13 @@ using the same panel E styling from plot_dashboard.py. Designed for quick
 visual QA of the fill step.
 
 Usage:
-    python3 compare_filled_vs_cleaned.py SanElijo --resolution 25cm
+    python3 compare_filled_vs_cleaned.py                           # All locations at 25cm
+    python3 compare_filled_vs_cleaned.py --location SanElijo       # Single location at 25cm
+    python3 compare_filled_vs_cleaned.py --resolution 10cm         # All locations at 10cm
+    python3 compare_filled_vs_cleaned.py --location SanElijo --resolution 10cm
 """
+
+ALL_LOCATIONS = ['DelMar', 'Solana', 'Encinitas', 'SanElijo', 'Torrey', 'Blacks']
 
 import os
 import re
