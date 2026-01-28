@@ -435,11 +435,13 @@ def main():
 
     base_dir = get_base_dir()
 
-    # Set output directory
+    # Set output directory (default: repo's results/event_lists/)
     if args.output_dir:
         output_dir = args.output_dir
     else:
-        output_dir = os.path.join(base_dir, 'results', 'event_lists')
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        repo_root = os.path.dirname(os.path.dirname(script_dir))  # up from utilities/event_lists/
+        output_dir = os.path.join(repo_root, 'results', 'event_lists')
 
     os.makedirs(output_dir, exist_ok=True)
 

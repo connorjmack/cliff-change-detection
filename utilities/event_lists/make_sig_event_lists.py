@@ -132,12 +132,13 @@ def main():
                         help=f'Minimum elevation threshold in m (default: {DEFAULT_MIN_ELEVATION})')
     args = parser.parse_args()
 
-    base_dir = get_base_dir()
-
+    # Set input directory (default: repo's results/event_lists/)
     if args.input_dir:
         input_dir = args.input_dir
     else:
-        input_dir = os.path.join(base_dir, 'results', 'event_lists')
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        repo_root = os.path.dirname(os.path.dirname(script_dir))  # up from utilities/event_lists/
+        input_dir = os.path.join(repo_root, 'results', 'event_lists')
 
     if not os.path.isdir(input_dir):
         print(f"[ERROR] Input directory not found: {input_dir}")
