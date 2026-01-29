@@ -41,14 +41,19 @@ def load_npz_info(npz_path):
         elif arr.ndim == 1:
             if len(arr) > 0:
                 if np.issubdtype(arr.dtype, np.number):
-                    sample = f"{arr[0]:.2f} to {arr[-1]:.2f}"
+                    min_val, max_val = float(arr[0]), float(arr[-1])
+                    sample = f"{min_val:.2f} to {max_val:.2f}"
                 else:
-                    sample = f"{arr[0]} to {arr[-1]}"
+                    min_val, max_val = str(arr[0]), str(arr[-1])
+                    sample = f"{min_val} to {max_val}"
             else:
                 sample = "empty"
+                min_val, max_val = None, None
             info['1d_arrays'][key] = {
                 'length': len(arr),
-                'sample': sample
+                'sample': sample,
+                'min': min_val,
+                'max': max_val
             }
         elif arr.ndim == 2:
             info['2d_arrays'][key] = {'shape': arr.shape}
@@ -111,24 +116,35 @@ def create_visualization(info, output_path=None):
         vertices = draw_cube(ax_cube, (0, 0, 0), cube_dims, color='#4A90D9', alpha=0.35)
 
         # Dimension labels - positioned at midpoints of edges
-        label_fontsize = 14
+        label_fontsize = 13
         colors = {'x': '#1a5f8a', 'y': '#0a8a6a', 'z': '#7a3ab0'}
+
+        # Build labels with physical ranges from 1D arrays
+        def get_range_str(arr_name):
+            """Get physical range string for a 1D array."""
+            if arr_name in info['1d_arrays']:
+                d = info['1d_arrays'][arr_name]
+                if d['min'] is not None and isinstance(d['min'], float):
+                    return f"({d['min']:.0f}-{d['max']:.0f} m)"
+            return ""
 
         # X-axis label (alongshore)
         mid_x = cube_dims[0] / 2
-        ax_cube.text(mid_x, -1.5, -0.5, f"alongshore_m\n{shape[0]}",
+        along_range = get_range_str('alongshore_m')
+        ax_cube.text(mid_x, -1.5, -0.5, f"alongshore_m\n{shape[0]} bins {along_range}",
                     fontsize=label_fontsize, ha='center', va='top',
                     fontweight='bold', color=colors['x'])
 
         # Y-axis label (elevation)
         mid_y = cube_dims[1] / 2
-        ax_cube.text(-1.5, mid_y, -0.5, f"elevation_m\n{shape[1]}",
+        elev_range = get_range_str('elevation_m')
+        ax_cube.text(-1.5, mid_y, -0.5, f"elevation_m\n{shape[1]} bins {elev_range}",
                     fontsize=label_fontsize, ha='center', va='top',
                     fontweight='bold', color=colors['y'])
 
-        # Z-axis label (time)
+        # Z-axis label (time) - show count of intervals
         mid_z = cube_dims[2] / 2
-        ax_cube.text(-1.5, -1.0, mid_z, f"time\n{shape[2]}",
+        ax_cube.text(-1.5, -1.0, mid_z, f"time\n{shape[2]} intervals",
                     fontsize=label_fontsize, ha='center', va='center',
                     fontweight='bold', color=colors['z'])
 

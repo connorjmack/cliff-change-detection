@@ -9,7 +9,8 @@
       "Bash(head:*)",
       "Bash(python3:*)",
       "Bash(wc:*)",
-      "Bash(sort:*)"
+      "Bash(sort:*)",
+      "Bash(source ~/.zshrc)"
     ]
   }
 }

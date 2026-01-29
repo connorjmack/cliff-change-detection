@@ -54,15 +54,29 @@ def infer_location_from_filename(csv_path: str) -> str:
     Infer location name from event CSV filename.
 
     Args:
-        csv_path: Path like '/path/to/SanElijo_events.csv'
+        csv_path: Path like '/path/to/SanElijo_events.csv' or '/path/to/DelMar_vol_10_elv_3.csv'
 
     Returns:
-        Location string like 'SanElijo'
+        Location string like 'SanElijo' or 'DelMar'
     """
     basename = os.path.basename(csv_path)
-    # Remove common suffixes
-    name = basename.replace('_events_sig.csv', '').replace('_events.csv', '')
-    name = name.replace('_dep_events_sig.csv', '').replace('_dep_events.csv', '')
+    # Remove .csv extension
+    name = basename.replace('.csv', '')
+
+    # Remove common suffixes in order (longer/more specific first to avoid partial matches)
+    suffixes_to_remove = [
+        '_dep_events_sig', '_events_sig',
+        '_dep_events', '_events',
+    ]
+    for suffix in suffixes_to_remove:
+        if name.endswith(suffix):
+            name = name[:-len(suffix)]
+            break
+
+    # Remove filter suffixes like _vol_10_elv_3 or _vol_5_elv_5
+    # Pattern: _vol_<number>_elv_<number> at end of string
+    name = re.sub(r'_vol_\d+_elv_\d+$', '', name)
+
     return name
 
 
@@ -169,7 +183,9 @@ def load_and_prepare_grid(grid_path: str, resolution_m: float) -> pd.DataFrame:
         return None
 
 
-def get_zoom_extent(event: pd.Series, resolution_m: float, padding: float = 0.3) -> dict:
+def get_zoom_extent(event: pd.Series, resolution_m: float, padding: float = 0.3,
+                    x_pad_m: float = None, y_pad_bottom_m: float = None,
+                    y_pad_top_m: float = None) -> dict:
     """
     Calculate zoom bounds from event coordinates.
 
@@ -177,6 +193,9 @@ def get_zoom_extent(event: pd.Series, resolution_m: float, padding: float = 0.3)
         event: Event row from events DataFrame
         resolution_m: Resolution in meters
         padding: Fractional padding to add around event (default 30%)
+        x_pad_m: Override horizontal padding in meters (applied to both sides)
+        y_pad_bottom_m: Override bottom padding in meters
+        y_pad_top_m: Override top padding in meters
 
     Returns:
         Dict with x_min, x_max, y_min, y_max in physical units (meters)
@@ -185,13 +204,25 @@ def get_zoom_extent(event: pd.Series, resolution_m: float, padding: float = 0.3)
     x_min = event['alongshore_start_m']
     x_max = event['alongshore_end_m']
     x_range = x_max - x_min
-    x_pad = max(5, x_range * padding)
+
+    if x_pad_m is not None:
+        x_pad = x_pad_m
+    else:
+        x_pad = max(5, x_range * padding)
 
     # Elevation bounds (Y-axis)
     elev_centroid = event['elevation']
     height = event['height']
-    y_min = max(0, elev_centroid - height / 2 - height * padding)
-    y_max = elev_centroid + height / 2 + height * padding
+
+    if y_pad_bottom_m is not None:
+        y_min = max(0, elev_centroid - height / 2 - y_pad_bottom_m)
+    else:
+        y_min = max(0, elev_centroid - height / 2 - height * padding)
+
+    if y_pad_top_m is not None:
+        y_max = elev_centroid + height / 2 + y_pad_top_m
+    else:
+        y_max = elev_centroid + height / 2 + height * padding
 
     return {
         'x_min': x_min - x_pad,
@@ -258,9 +289,12 @@ def csv_path_to_npz_path(csv_path: str, data_cubes_dir: str = None) -> str:
     """
     Convert an event CSV path to its corresponding NPZ cube path.
 
+    Always maps to the base location cube, regardless of filtering suffixes.
+
     Mapping examples:
         - results/event_lists/erosion/DelMar_events.csv -> results/data_cubes/DelMar_cube.npz
         - results/event_lists/erosion/SanElijo_events.csv -> results/data_cubes/SanElijo_cube.npz
+        - results/event_lists/combined/DelMar_vol_10_elv_3.csv -> results/data_cubes/DelMar_cube.npz
 
     Args:
         csv_path: Path to event CSV file
@@ -269,14 +303,10 @@ def csv_path_to_npz_path(csv_path: str, data_cubes_dir: str = None) -> str:
     Returns:
         Path to corresponding NPZ file
     """
-    basename = os.path.basename(csv_path)
-
-    # Strip _events or _dep_events suffix, then add _cube.npz
-    # DelMar_events.csv -> DelMar_cube.npz
-    # SanElijo_dep_events.csv -> SanElijo_cube.npz
-    name = basename.replace('.csv', '')
-    name = name.replace('_events', '').replace('_dep_events', '')
-    npz_name = f"{name}_cube.npz"
+    # Use infer_location_from_filename to get the base location name
+    # This handles all suffix patterns: _events, _dep_events, _vol_X_elv_Y, etc.
+    location = infer_location_from_filename(csv_path)
+    npz_name = f"{location}_cube.npz"
 
     # Determine data_cubes directory
     if data_cubes_dir is None:
@@ -422,6 +452,65 @@ def extract_grid_slice_from_cube(cube_data: dict, event: pd.Series,
     df = df.fillna(0.0)
 
     return df
+
+
+def extract_both_slices_from_cube(cube_data: dict, event: pd.Series) -> tuple:
+    """
+    Extract both erosion and deposition 2D slices from the 3D cube for a specific event.
+
+    Args:
+        cube_data: Dict from load_npz_cube()
+        event: Event row from events DataFrame (must have start_date, end_date)
+
+    Returns:
+        Tuple of (erosion_df, deposition_df, alongshore_sorted, elevation)
+        DataFrames have:
+            - Index: alongshore positions (m), sorted ascending
+            - Columns: elevation values (m)
+            - Values: M3C2 change values
+
+        Returns (None, None, None, None) if date not found.
+    """
+    if cube_data is None:
+        return None, None, None, None
+
+    # Build date folder string from event dates
+    date_folder = event_dates_to_folder(event['start_date'], event['end_date'])
+
+    # Find matching time index
+    date_strings = cube_data.get('date_strings', [])
+    time_idx = None
+    for i, ds in enumerate(date_strings):
+        if ds == date_folder:
+            time_idx = i
+            break
+
+    if time_idx is None:
+        return None, None, None, None
+
+    # Get coordinates and sort indices
+    alongshore = np.array(cube_data['alongshore_m'])
+    elevation = np.array(cube_data['elevation_m'])
+    along_sort_idx = np.argsort(alongshore)
+    alongshore_sorted = alongshore[along_sort_idx]
+
+    # Extract erosion slice
+    erosion_df = None
+    erosion_cube = cube_data.get('erosion')
+    if erosion_cube is not None:
+        slice_2d = erosion_cube[:, :, time_idx]
+        slice_sorted = slice_2d[along_sort_idx, :]
+        erosion_df = pd.DataFrame(slice_sorted, index=alongshore_sorted, columns=elevation)
+
+    # Extract deposition slice
+    deposition_df = None
+    deposition_cube = cube_data.get('deposition')
+    if deposition_cube is not None:
+        slice_2d = deposition_cube[:, :, time_idx]
+        slice_sorted = slice_2d[along_sort_idx, :]
+        deposition_df = pd.DataFrame(slice_sorted, index=alongshore_sorted, columns=elevation)
+
+    return erosion_df, deposition_df, alongshore_sorted, elevation
 
 
 def find_npz_for_csv(csv_path: str) -> str:

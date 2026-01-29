@@ -700,7 +700,7 @@ def worker(task):
         col_elevations = np.array([parse_elevation_from_header(h) for h in header_g])
 
         original_volume = np.nansum(np.abs(cleaned_grid[cleaned_grid != 0])) * res_params['cell_area']
-        hole_mask = (cleaned_grid == 0) & ~np.isnan(cleaned_grid)
+        hole_mask = (cleaned_grid == 0) | np.isnan(cleaned_grid)
         cluster_volumes = calculate_cluster_volumes(cleaned_grid, cleaned_clusters, res_params['cell_area'])
 
         filled_grid, filled_clusters, holes_filled, filled_sum, clusters_processed, clusters_skipped = \

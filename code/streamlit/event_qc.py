@@ -33,10 +33,11 @@ from utils.grid_loader import (
     find_npz_for_csv,
     load_npz_cube,
     extract_grid_slice_from_cube,
+    extract_both_slices_from_cube,
 )
 
 # === Constants ===
-QC_FLAGS = ['unreviewed', 'real', 'construction', 'noise']
+QC_FLAGS = ['unreviewed', 'real', 'construction', 'noise', 'needs_check']
 RESOLUTIONS = ['25cm', '10cm', '1m']
 
 
@@ -53,83 +54,137 @@ def get_custom_cmap(cmap_name: str = 'magma_r', vmax: float = 1.0):
     return cmap, norm
 
 
-def plot_event_heatmap(grid_df: pd.DataFrame, event: pd.Series,
-                       resolution_m: float, event_type: str = 'erosion') -> plt.Figure:
+def get_diverging_cmap(vmax: float = 1.0):
     """
-    Create heatmap zoomed to event extent with centroid overlay.
+    Create a diverging colormap: blue for deposition (negative), white at zero,
+    orange/red for erosion (positive).
+    """
+    # Use RdBu_r: red for positive (erosion), blue for negative (deposition)
+    cmap = cm.get_cmap('RdBu_r', 256)
+    norm = Normalize(vmin=-vmax, vmax=vmax)
+    return cmap, norm
+
+
+def plot_event_heatmap(erosion_df: pd.DataFrame, deposition_df: pd.DataFrame,
+                       event: pd.Series, resolution_m: float) -> plt.Figure:
+    """
+    Create heatmap showing both erosion and deposition data with diverging colormap.
 
     Args:
-        grid_df: Prepared grid DataFrame (cleaned and snapped)
+        erosion_df: Erosion grid DataFrame (rows=alongshore, cols=elevation)
+        deposition_df: Deposition grid DataFrame (same structure)
         event: Event row from events DataFrame
         resolution_m: Resolution in meters
-        event_type: 'erosion' or 'deposition'
 
     Returns:
         Matplotlib Figure object
     """
     # Get zoom extent from event coordinates (in meters)
-    extent = get_zoom_extent(event, resolution_m)
+    # Reduced horizontal padding, more padding below (to see beach), less above
+    extent_m = get_zoom_extent(event, resolution_m, x_pad_m=10, y_pad_bottom_m=8, y_pad_top_m=3)
 
-    # Transpose for display (elevation on Y-axis, alongshore on X-axis)
-    # Grid structure: rows=alongshore position (m), cols=elevation (m)
-    plot_df = grid_df.T
+    # Use erosion_df for coordinates (both should have same structure)
+    grid_df = erosion_df if erosion_df is not None else deposition_df
+    if grid_df is None:
+        fig, ax = plt.subplots(figsize=(12, 6))
+        ax.text(0.5, 0.5, "No data available", ha='center', va='center', fontsize=14)
+        return fig
 
-    # Get coordinate arrays (both already in meters after clean_and_snap_grid)
-    x_values = plot_df.columns.values.astype(float)  # Alongshore (m)
-    y_values = plot_df.index.values.astype(float)    # Elevation (m)
+    alongshore_m = grid_df.index.values.astype(float)
+    elevation_m = grid_df.columns.values.astype(float)
 
-    # Get matrix values
-    matrix = plot_df.values
-
-    # Calculate full grid extent for imshow
-    # Note: imshow extent is [left, right, bottom, top]
-    x_min_grid, x_max_grid = x_values.min(), x_values.max()
-    y_min_grid, y_max_grid = y_values.min(), y_values.max()
-    img_extent = [x_min_grid, x_max_grid, y_min_grid, y_max_grid]
-
-    # Choose colormap based on event type
-    if event_type == 'erosion':
-        cmap_name = 'magma_r'
-        vmax = max(1.0, np.nanmax(matrix) * 1.1) if matrix.size > 0 else 1.0
+    # Get erosion matrix (positive values = warm colors)
+    if erosion_df is not None:
+        erosion_matrix = erosion_df.values.T  # Transpose: (n_elev, n_along)
+        erosion_matrix = np.nan_to_num(erosion_matrix, nan=0.0)
     else:
-        cmap_name = 'viridis_r'
-        vmax = max(0.5, np.nanmax(matrix) * 1.1) if matrix.size > 0 else 0.5
+        erosion_matrix = np.zeros((len(elevation_m), len(alongshore_m)))
 
-    cmap, norm = get_custom_cmap(cmap_name, vmax=vmax)
+    # Get deposition matrix (will be shown as negative = cool colors)
+    if deposition_df is not None:
+        deposition_matrix = deposition_df.values.T  # Transpose: (n_elev, n_along)
+        deposition_matrix = np.nan_to_num(deposition_matrix, nan=0.0)
+    else:
+        deposition_matrix = np.zeros((len(elevation_m), len(alongshore_m)))
+
+    # Combine: erosion positive, deposition negative
+    # Where both exist, erosion takes precedence (shows the dominant signal)
+    combined_matrix = erosion_matrix.copy()
+    # Only add deposition (as negative) where erosion is zero/small
+    dep_mask = (deposition_matrix > 0) & (erosion_matrix < 0.01)
+    combined_matrix[dep_mask] = -deposition_matrix[dep_mask]
+
+    n_elev, n_along = combined_matrix.shape
+
+    # Find indices for the zoom extent
+    x_mask = (alongshore_m >= extent_m['x_min']) & (alongshore_m <= extent_m['x_max'])
+    y_mask = (elevation_m >= extent_m['y_min']) & (elevation_m <= extent_m['y_max'])
+
+    if not np.any(x_mask) or not np.any(y_mask):
+        x_idx_min, x_idx_max = 0, n_along
+        y_idx_min, y_idx_max = 0, n_elev
+    else:
+        x_indices = np.where(x_mask)[0]
+        y_indices = np.where(y_mask)[0]
+        x_idx_min, x_idx_max = x_indices.min(), x_indices.max() + 1
+        y_idx_min, y_idx_max = y_indices.min(), y_indices.max() + 1
+
+    # Extract the zoomed region
+    matrix_zoom = combined_matrix[y_idx_min:y_idx_max, x_idx_min:x_idx_max]
+    alongshore_zoom = alongshore_m[x_idx_min:x_idx_max]
+    elevation_zoom = elevation_m[y_idx_min:y_idx_max]
+
+    # Determine color scale (symmetric around 0, capped at 5m)
+    cmap, norm = get_diverging_cmap(vmax=5.0)
 
     # Create figure
     fig, ax = plt.subplots(figsize=(12, 6))
 
-    # Plot heatmap with full data
-    im = ax.imshow(matrix, origin='lower', extent=img_extent,
-                   cmap=cmap, norm=norm, aspect='auto',
-                   interpolation='nearest')
+    # Plot using array indices
+    n_y, n_x = matrix_zoom.shape
+    im = ax.imshow(matrix_zoom, origin='lower', aspect='auto', interpolation='nearest',
+                   cmap=cmap, norm=norm)
 
-    # Add event centroid crosshairs
-    ax.axhline(event['elevation'], color='red', linestyle='--', linewidth=1.5, alpha=0.8)
-    ax.axvline(event['alongshore_centroid_m'], color='red', linestyle='--', linewidth=1.5, alpha=0.8)
+    # Set up axis labels in meters
+    n_xticks = min(6, n_x) if n_x > 0 else 1
+    if n_x > 1:
+        xtick_idx = np.linspace(0, n_x - 1, n_xticks, dtype=int)
+        ax.set_xticks(xtick_idx)
+        ax.set_xticklabels([f'{alongshore_zoom[i]:.0f}' for i in xtick_idx])
 
-    # Add event bounding box
-    ax.axvline(event['alongshore_start_m'], color='orange', linestyle=':', linewidth=1, alpha=0.6)
-    ax.axvline(event['alongshore_end_m'], color='orange', linestyle=':', linewidth=1, alpha=0.6)
+    n_yticks = min(6, n_y) if n_y > 0 else 1
+    if n_y > 1:
+        ytick_idx = np.linspace(0, n_y - 1, n_yticks, dtype=int)
+        ax.set_yticks(ytick_idx)
+        ax.set_yticklabels([f'{elevation_zoom[i]:.1f}' for i in ytick_idx])
 
-    # ZOOM: Set axis limits to event extent
-    # Reverse x-axis for cliff-facing view (higher alongshore values on left)
-    ax.set_xlim(extent['x_max'], extent['x_min'])
-    ax.set_ylim(extent['y_min'], extent['y_max'])
+    # Reverse x-axis for cliff-facing view
+    ax.invert_xaxis()
+
+    # Add event centroid crosshairs (lighter style)
+    if len(alongshore_zoom) > 0 and len(elevation_zoom) > 0:
+        x_crosshair = np.argmin(np.abs(alongshore_zoom - event['alongshore_centroid_m']))
+        y_crosshair = np.argmin(np.abs(elevation_zoom - event['elevation']))
+        ax.axhline(y_crosshair, color='#666666', linestyle='--', linewidth=1.0, alpha=0.5)
+        ax.axvline(x_crosshair, color='#666666', linestyle='--', linewidth=1.0, alpha=0.5)
+
+        # Add bounding box lines
+        x_start_idx = np.argmin(np.abs(alongshore_zoom - event['alongshore_start_m']))
+        x_end_idx = np.argmin(np.abs(alongshore_zoom - event['alongshore_end_m']))
+        ax.axvline(x_start_idx, color='#999999', linestyle=':', linewidth=1, alpha=0.4)
+        ax.axvline(x_end_idx, color='#999999', linestyle=':', linewidth=1, alpha=0.4)
 
     # Labels
     ax.set_xlabel("Alongshore Position (m)", fontsize=12, fontweight='bold')
     ax.set_ylabel("Elevation (m)", fontsize=12, fontweight='bold')
 
     # Title with event info
-    title = f"Event: Vol={event['volume']:.2f} m³, Elev={event['elevation']:.1f} m"
+    title = f"Event: {event['start_date']} to {event['end_date']} | Vol={event['volume']:.2f} m³, Elev={event['elevation']:.1f} m"
     ax.set_title(title, fontsize=14, fontweight='bold')
 
-    # Colorbar
+    # Colorbar with diverging labels
     cbar = plt.colorbar(im, ax=ax, shrink=0.8)
-    label = "Erosion Depth (m)" if event_type == 'erosion' else "Deposition Depth (m)"
-    cbar.set_label(label, fontsize=11)
+    cbar.set_label("← Deposition | Erosion →  (m)", fontsize=11)
 
     plt.tight_layout()
     return fig
@@ -148,6 +203,7 @@ def get_progress_stats(events_df: pd.DataFrame, qc_flags: dict) -> dict:
         'real': by_status.get('real', 0),
         'construction': by_status.get('construction', 0),
         'noise': by_status.get('noise', 0),
+        'needs_check': by_status.get('needs_check', 0),
     }
 
 
@@ -409,6 +465,21 @@ if st.session_state.events_df is not None:
             else:
                 st.sidebar.info("All events reviewed!")
 
+    # Jump to needs check
+    if st.sidebar.button("Jump to Next Needs Check"):
+        for i in range(st.session_state.current_index + 1, total_events):
+            if st.session_state.qc_flags.get(i, 'unreviewed') == 'needs_check':
+                st.session_state.current_index = i
+                break
+        else:
+            # Wrap around to start
+            for i in range(0, st.session_state.current_index):
+                if st.session_state.qc_flags.get(i, 'unreviewed') == 'needs_check':
+                    st.session_state.current_index = i
+                    break
+            else:
+                st.sidebar.info("No events flagged for manual check")
+
     # Progress
     st.sidebar.markdown("---")
     st.sidebar.subheader("4. Progress")
@@ -419,6 +490,7 @@ if st.session_state.events_df is not None:
     st.sidebar.markdown(f"- Real: {stats['real']}")
     st.sidebar.markdown(f"- Construction: {stats['construction']}")
     st.sidebar.markdown(f"- Noise: {stats['noise']}")
+    st.sidebar.markdown(f"- Needs Check: {stats['needs_check']}")
 
     # Export
     st.sidebar.markdown("---")
@@ -451,7 +523,8 @@ if st.session_state.events_df is not None:
             'unreviewed': 'gray',
             'real': 'green',
             'construction': 'orange',
-            'noise': 'red'
+            'noise': 'red',
+            'needs_check': 'violet'
         }
         st.markdown(f"**Status:** :{flag_colors[current_flag]}[{current_flag.upper()}]")
 
@@ -459,47 +532,58 @@ if st.session_state.events_df is not None:
     st.markdown("---")
 
     # Try to get grid data - prefer NPZ cube, fallback to individual CSV files
-    grid_df = None
+    erosion_df = None
+    deposition_df = None
     data_source = None
     resolution_m = get_resolution_value(st.session_state.resolution)
 
-    # Method 1: Try NPZ cube first (faster, pre-loaded)
+    # Method 1: Try NPZ cube first (faster, pre-loaded) - get BOTH erosion and deposition
     if st.session_state.npz_data is not None:
-        grid_df = extract_grid_slice_from_cube(
+        erosion_df, deposition_df, _, _ = extract_both_slices_from_cube(
             st.session_state.npz_data,
-            event,
-            st.session_state.event_type
+            event
         )
-        if grid_df is not None:
+        if erosion_df is not None or deposition_df is not None:
             data_source = "NPZ cube"
 
-    # Method 2: Fallback to individual grid CSV files
-    if grid_df is None:
+    # Method 2: Fallback to individual grid CSV files (erosion only for now)
+    if erosion_df is None and deposition_df is None:
         date_folder = event_dates_to_folder(event['start_date'], event['end_date'])
         grid_path = find_grid_file(
             st.session_state.results_dir,
             st.session_state.location,
-            st.session_state.event_type,
+            'erosion',
             date_folder,
             st.session_state.resolution
         )
 
         if grid_path:
-            grid_df = load_and_prepare_grid(grid_path, resolution_m)
-            if grid_df is not None:
+            erosion_df = load_and_prepare_grid(grid_path, resolution_m)
+            if erosion_df is not None:
                 data_source = "grid CSV"
 
+        # Try deposition CSV too
+        dep_grid_path = find_grid_file(
+            st.session_state.results_dir,
+            st.session_state.location,
+            'deposition',
+            date_folder,
+            st.session_state.resolution
+        )
+        if dep_grid_path:
+            deposition_df = load_and_prepare_grid(dep_grid_path, resolution_m)
+
     # Display heatmap or warning
-    if grid_df is not None:
+    if erosion_df is not None or deposition_df is not None:
         fig = plot_event_heatmap(
-            grid_df, event, resolution_m, st.session_state.event_type
+            erosion_df, deposition_df, event, resolution_m
         )
         st.pyplot(fig)
         plt.close(fig)
-        st.caption(f"Data source: {data_source}")
+        st.caption(f"Data source: {data_source} | Red/Orange = Erosion, Blue = Deposition")
     else:
         date_folder = event_dates_to_folder(event['start_date'], event['end_date'])
-        st.warning(f"Grid data not found for: {st.session_state.location}/{st.session_state.event_type}/{date_folder}")
+        st.warning(f"Grid data not found for: {st.session_state.location}/{date_folder}")
         if st.session_state.npz_path:
             st.info(f"NPZ cube loaded from: {st.session_state.npz_path}")
             st.info("Date range may not match cube contents.")
@@ -535,7 +619,7 @@ if st.session_state.events_df is not None:
     st.markdown("---")
     st.markdown("**Assign QC Flag:**")
 
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
 
     with col1:
         if st.button("Real", type="primary" if current_flag == 'real' else "secondary",
@@ -563,6 +647,14 @@ if st.session_state.events_df is not None:
             st.rerun()
 
     with col4:
+        if st.button("Needs Check", type="primary" if current_flag == 'needs_check' else "secondary",
+                     use_container_width=True):
+            st.session_state.qc_flags[current_idx] = 'needs_check'
+            if current_idx < len(st.session_state.events_df) - 1:
+                st.session_state.current_index += 1
+            st.rerun()
+
+    with col5:
         if st.button("Clear Flag", use_container_width=True):
             st.session_state.qc_flags[current_idx] = 'unreviewed'
             st.rerun()
@@ -575,6 +667,7 @@ else:
     2. Select an event file and click "Load Events"
     3. Configure the resolution and results directory if needed
     4. Navigate through events using Prev/Next buttons
-    5. Assign QC flags: Real, Construction, or Noise
-    6. Export results when finished
+    5. Assign QC flags: Real, Construction, Noise, or Needs Check
+    6. Use "Jump to Next Needs Check" to revisit flagged events
+    7. Export results when finished
     """)
