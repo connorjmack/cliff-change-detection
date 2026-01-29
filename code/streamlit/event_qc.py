@@ -212,6 +212,7 @@ def get_qc_output_path(original_path: str) -> str:
     Determine the QC output path based on the original CSV path.
 
     Maps: results/event_lists/<subdir>/file.csv -> results/event_lists_qc/<subdir>/file_qc_<timestamp>.csv
+    Also handles: results/event_lists_qc/<subdir>/file.csv (resuming previous QC work)
 
     Args:
         original_path: Original CSV file path
@@ -234,17 +235,22 @@ def get_qc_output_path(original_path: str) -> str:
             subdir = 'combined'
 
     # Find results directory by walking up from original path
+    # Handle both event_lists and event_lists_qc source directories
+    results_dir = None
     current = os.path.dirname(original_path)
     while current:
-        if os.path.basename(current) == 'event_lists':
+        basename = os.path.basename(current)
+        if basename == 'event_lists' or basename == 'event_lists_qc':
             results_dir = os.path.dirname(current)
             break
         parent = os.path.dirname(current)
         if parent == current:  # Reached root
-            # Fallback: use grandparent of CSV directory
-            results_dir = os.path.dirname(os.path.dirname(os.path.dirname(original_path)))
             break
         current = parent
+
+    # Fallback if we didn't find event_lists or event_lists_qc
+    if results_dir is None:
+        results_dir = os.path.dirname(os.path.dirname(os.path.dirname(original_path)))
 
     # Build output directory
     output_dir = os.path.join(results_dir, 'event_lists_qc', subdir)

@@ -55,6 +55,7 @@ def infer_location_from_filename(csv_path: str) -> str:
 
     Args:
         csv_path: Path like '/path/to/SanElijo_events.csv' or '/path/to/DelMar_vol_10_elv_3.csv'
+                  Also handles QC files like 'DelMar_vol_10_elv_3_qc_20260128_172029.csv'
 
     Returns:
         Location string like 'SanElijo' or 'DelMar'
@@ -62,6 +63,10 @@ def infer_location_from_filename(csv_path: str) -> str:
     basename = os.path.basename(csv_path)
     # Remove .csv extension
     name = basename.replace('.csv', '')
+
+    # Strip QC suffix pattern: _qc_YYYYMMDD_HHMMSS and anything after
+    # This handles files saved from the QC tool
+    name = re.sub(r'_qc_\d{8}_\d{6}.*$', '', name)
 
     # Remove common suffixes in order (longer/more specific first to avoid partial matches)
     suffixes_to_remove = [
