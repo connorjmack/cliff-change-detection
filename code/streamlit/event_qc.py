@@ -265,14 +265,14 @@ def get_qc_output_path(original_path: str) -> str:
     return os.path.join(output_dir, filename)
 
 
-def export_qc_csv(events_df: pd.DataFrame, qc_flags: dict, original_path: str) -> str:
+def export_qc_csv(events_df: pd.DataFrame, qc_flags: dict, output_path: str) -> str:
     """
-    Save CSV with QC flags column to results/event_lists_qc/<subdir>/.
+    Save CSV with QC flags column to the specified path.
 
     Args:
         events_df: Original events DataFrame
         qc_flags: Dict mapping row index to QC flag
-        original_path: Original CSV file path
+        output_path: Path to save the QC'd CSV
 
     Returns:
         Path where file was saved
@@ -281,9 +281,6 @@ def export_qc_csv(events_df: pd.DataFrame, qc_flags: dict, original_path: str) -
     export_df = events_df.copy()
     export_df['qc_flag'] = export_df.index.map(lambda i: qc_flags.get(i, 'unreviewed'))
 
-    # Get output path
-    output_path = get_qc_output_path(original_path)
-
     # Create directory if needed
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
@@ -291,6 +288,17 @@ def export_qc_csv(events_df: pd.DataFrame, qc_flags: dict, original_path: str) -
     export_df.to_csv(output_path, index=False)
 
     return output_path
+
+
+def auto_save_qc():
+    """Auto-save QC results to the current output path."""
+    if (st.session_state.events_df is not None and
+        st.session_state.output_path is not None):
+        export_qc_csv(
+            st.session_state.events_df,
+            st.session_state.qc_flags,
+            st.session_state.output_path
+        )
 
 
 # === Keyboard Shortcuts ===
@@ -360,14 +368,16 @@ def handle_keyboard_action():
         st.query_params.clear()
 
         if action in ['real', 'construction', 'noise', 'needs_check']:
-            # Set the flag and advance
+            # Set the flag, auto-save, and advance
             st.session_state.qc_flags[current_idx] = action
+            auto_save_qc()
             if current_idx < total_events - 1:
                 st.session_state.current_index += 1
             st.rerun()
         elif action == 'unreviewed':
-            # Clear the flag
+            # Clear the flag and auto-save
             st.session_state.qc_flags[current_idx] = 'unreviewed'
+            auto_save_qc()
             st.rerun()
         elif action == 'prev':
             if current_idx > 0:
@@ -389,6 +399,7 @@ def init_session_state():
         'event_type': 'erosion',
         'resolution': '25cm',
         'csv_path': None,
+        'output_path': None,  # Path for auto-saving QC results
         'location': None,
         'results_dir': DEFAULT_RESULTS_DIR,
         'npz_data': None,  # Loaded NPZ cube data
@@ -495,10 +506,14 @@ if os.path.isdir(csv_dir):
                             break
                     st.session_state.current_index = first_unreviewed
                     resumed = True
+                    # When resuming, save back to the same file
+                    st.session_state.output_path = csv_path
                 else:
                     # Initialize all as unreviewed, start at beginning
                     st.session_state.qc_flags = {i: 'unreviewed' for i in range(len(events_df))}
                     st.session_state.current_index = 0
+                    # Starting new: create a new timestamped output file
+                    st.session_state.output_path = get_qc_output_path(csv_path)
 
                 # Try to load corresponding NPZ cube
                 npz_path = find_npz_for_csv(csv_path)
@@ -624,21 +639,21 @@ if st.session_state.events_df is not None:
     st.sidebar.markdown(f"- Noise: {stats['noise']}")
     st.sidebar.markdown(f"- Needs Check: {stats['needs_check']}")
 
-    # Export
+    # Export / Auto-save info
     st.sidebar.markdown("---")
-    st.sidebar.subheader("5. Export")
+    st.sidebar.subheader("5. Auto-Save")
 
-    # Show where file will be saved
-    output_path = get_qc_output_path(st.session_state.csv_path)
-    st.sidebar.caption(f"Saves to: `{os.path.relpath(output_path, os.path.dirname(st.session_state.csv_path))}`")
+    # Show where file is being saved
+    if st.session_state.output_path:
+        st.sidebar.success("✓ Auto-saving enabled")
+        st.sidebar.caption(f"Saving to: `{os.path.basename(st.session_state.output_path)}`")
 
-    if st.sidebar.button("Save QC Results", use_container_width=True):
-        saved_path = export_qc_csv(
-            st.session_state.events_df,
-            st.session_state.qc_flags,
-            st.session_state.csv_path
-        )
-        st.sidebar.success(f"Saved to {os.path.basename(saved_path)}")
+        # Manual save button (for explicit save)
+        if st.sidebar.button("Force Save Now", use_container_width=True):
+            auto_save_qc()
+            st.sidebar.info("Saved!")
+    else:
+        st.sidebar.warning("Auto-save not configured")
 
 # === Main Content ===
 if st.session_state.events_df is not None:
@@ -757,6 +772,7 @@ if st.session_state.events_df is not None:
         if st.button("Real (R)", type="primary" if current_flag == 'real' else "secondary",
                      use_container_width=True):
             st.session_state.qc_flags[current_idx] = 'real'
+            auto_save_qc()
             # Auto-advance to next
             if current_idx < len(st.session_state.events_df) - 1:
                 st.session_state.current_index += 1
@@ -766,6 +782,7 @@ if st.session_state.events_df is not None:
         if st.button("Construction (C)", type="primary" if current_flag == 'construction' else "secondary",
                      use_container_width=True):
             st.session_state.qc_flags[current_idx] = 'construction'
+            auto_save_qc()
             if current_idx < len(st.session_state.events_df) - 1:
                 st.session_state.current_index += 1
             st.rerun()
@@ -774,6 +791,7 @@ if st.session_state.events_df is not None:
         if st.button("Noise (N)", type="primary" if current_flag == 'noise' else "secondary",
                      use_container_width=True):
             st.session_state.qc_flags[current_idx] = 'noise'
+            auto_save_qc()
             if current_idx < len(st.session_state.events_df) - 1:
                 st.session_state.current_index += 1
             st.rerun()
@@ -782,6 +800,7 @@ if st.session_state.events_df is not None:
         if st.button("Needs Check (K)", type="primary" if current_flag == 'needs_check' else "secondary",
                      use_container_width=True):
             st.session_state.qc_flags[current_idx] = 'needs_check'
+            auto_save_qc()
             if current_idx < len(st.session_state.events_df) - 1:
                 st.session_state.current_index += 1
             st.rerun()
@@ -789,6 +808,7 @@ if st.session_state.events_df is not None:
     with col5:
         if st.button("Clear (U)", use_container_width=True):
             st.session_state.qc_flags[current_idx] = 'unreviewed'
+            auto_save_qc()
             st.rerun()
 
     # Inject keyboard shortcuts (at end of main content)
@@ -798,13 +818,12 @@ else:
     st.info("Load an event CSV file from the sidebar to begin QC review.")
     st.markdown("""
     **Instructions:**
-    1. Enter the path to your event CSV directory in the sidebar
-    2. Select an event file and click "Load Events"
-    3. Configure the resolution and results directory if needed
-    4. Navigate through events using Prev/Next buttons or arrow keys
-    5. Assign QC flags: Real, Construction, Noise, or Needs Check
+    1. Choose "Start New" or "Resume Previous" in the sidebar
+    2. Select event type and an event file, then click "Load Events"
+    3. Navigate through events using Prev/Next buttons or arrow keys
+    4. Assign QC flags: Real, Construction, Noise, or Needs Check
+    5. **Progress is auto-saved** after each classification - no manual save needed!
     6. Use "Jump to Next Needs Check" to revisit flagged events
-    7. Export results when finished
 
     **Keyboard Shortcuts:**
     - **R** = Real, **N** = Noise, **C** = Construction, **K** = Needs Check, **U** = Clear
