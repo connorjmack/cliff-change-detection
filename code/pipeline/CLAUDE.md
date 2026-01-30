@@ -1004,3 +1004,33 @@ After each step, verify:
 2. **Reports:** Check for errors/failures
 3. **Visualizations:** Review generated plots (audit and step 6)
 4. **Sample data:** Spot-check LAS files in CloudCompare
+
+---
+
+## Known Issues / TODO
+
+### Step 8: Vertical Stripes in Filled Grids
+
+**Status:** Unresolved - needs investigation
+
+**Symptom:** Thin vertical stripes (unfilled holes at specific alongshore positions) visible in the filled grid data, particularly noticeable in the Streamlit QC tool visualizations.
+
+**Observed behavior:**
+- Stripes appear as narrow vertical gaps running through cluster data
+- Stripes span all elevations at specific alongshore positions
+- Pattern is consistent across multiple events/locations
+
+**Investigation notes (2026-01-30):**
+- The stripes exist in the data cubes (post-filling), meaning step 8 is not filling them
+- Root cause unclear - need to determine if stripes exist BEFORE step 8 (in unfilled grids from step 7)
+- If stripes exist pre-filling: issue is upstream (M3C2/DBSCAN/gridding)
+- If stripes created by filling algorithm: need to fix boundary/interpolation logic
+
+**Next steps:**
+1. Compare unfilled grids (`*_grid_<res>.csv`) vs filled grids (`*_grid_<res>_filled.csv`) to determine if stripes exist before filling
+2. Check if stripes correspond to specific Polygon_IDs that have no M3C2 data
+3. If filling algorithm issue: may need to fill based on row index range rather than alpha-shape boundary containment
+
+**Visualization files created during investigation:**
+- `results/delmar_stripe_analysis.png` - Shows stripe pattern in data
+- `results/delmar_top3_events_current.png` - Top 3 events overview

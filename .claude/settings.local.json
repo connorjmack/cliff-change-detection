@@ -11,7 +11,8 @@
       "Bash(wc:*)",
       "Bash(sort:*)",
       "Bash(source ~/.zshrc)",
-      "Bash(git rm:*)"
+      "Bash(git rm:*)",
+      "Bash(conda info:*)"
     ]
   }
 }
