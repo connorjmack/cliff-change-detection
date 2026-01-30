@@ -11,6 +11,7 @@ import platform
 import numpy as np
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap, Normalize
 from matplotlib import cm
@@ -292,6 +293,92 @@ def export_qc_csv(events_df: pd.DataFrame, qc_flags: dict, original_path: str) -
     return output_path
 
 
+# === Keyboard Shortcuts ===
+KEYBOARD_SHORTCUTS_JS = """
+<script>
+document.addEventListener('keydown', function(e) {
+    // Ignore if user is typing in an input field
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
+        return;
+    }
+
+    const key = e.key.toLowerCase();
+    const validKeys = ['r', 'n', 'c', 'k', 'u', 'arrowleft', 'arrowright'];
+
+    if (validKeys.includes(key)) {
+        e.preventDefault();
+
+        // Map keys to actions
+        const keyMap = {
+            'r': 'real',
+            'n': 'noise',
+            'c': 'construction',
+            'k': 'needs_check',
+            'u': 'unreviewed',
+            'arrowleft': 'prev',
+            'arrowright': 'next'
+        };
+
+        const action = keyMap[key];
+        if (action) {
+            // Update URL with action parameter to trigger Streamlit rerun
+            const url = new URL(window.parent.location.href);
+            url.searchParams.set('keyboard_action', action);
+            url.searchParams.set('_ts', Date.now());  // Force unique URL
+            window.parent.history.replaceState({}, '', url);
+
+            // Trigger Streamlit rerun by dispatching a custom event
+            window.parent.postMessage({type: 'streamlit:setComponentValue', value: action}, '*');
+
+            // Force reload to pick up the query param
+            window.parent.location.href = url.toString();
+        }
+    }
+});
+</script>
+<div style="position: fixed; bottom: 10px; right: 10px; background: rgba(0,0,0,0.7); color: white; padding: 8px 12px; border-radius: 6px; font-size: 12px; z-index: 1000;">
+    <b>Shortcuts:</b> R=Real, N=Noise, C=Construction, K=Needs Check, U=Clear | ←/→ Navigate
+</div>
+"""
+
+
+def inject_keyboard_shortcuts():
+    """Inject JavaScript for keyboard shortcut handling."""
+    components.html(KEYBOARD_SHORTCUTS_JS, height=50)
+
+
+def handle_keyboard_action():
+    """Check for keyboard action from query params and apply it."""
+    query_params = st.query_params
+    action = query_params.get('keyboard_action')
+
+    if action and st.session_state.events_df is not None:
+        current_idx = st.session_state.current_index
+        total_events = len(st.session_state.events_df)
+
+        # Clear the query param to prevent repeated actions
+        st.query_params.clear()
+
+        if action in ['real', 'construction', 'noise', 'needs_check']:
+            # Set the flag and advance
+            st.session_state.qc_flags[current_idx] = action
+            if current_idx < total_events - 1:
+                st.session_state.current_index += 1
+            st.rerun()
+        elif action == 'unreviewed':
+            # Clear the flag
+            st.session_state.qc_flags[current_idx] = 'unreviewed'
+            st.rerun()
+        elif action == 'prev':
+            if current_idx > 0:
+                st.session_state.current_index -= 1
+                st.rerun()
+        elif action == 'next':
+            if current_idx < total_events - 1:
+                st.session_state.current_index += 1
+                st.rerun()
+
+
 # === Initialize Session State ===
 def init_session_state():
     """Initialize all session state variables."""
@@ -306,15 +393,28 @@ def init_session_state():
         'results_dir': DEFAULT_RESULTS_DIR,
         'npz_data': None,  # Loaded NPZ cube data
         'npz_path': None,  # Path to NPZ file (for display)
+        'load_mode': 'Start New',  # 'Start New' or 'Resume Previous'
     }
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
 
 
+def get_default_csv_dir(mode: str, event_type: str = 'erosion') -> str:
+    """Get the default CSV directory based on load mode."""
+    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    if mode == 'Resume Previous':
+        return os.path.join(base_dir, "results", "event_lists_qc", event_type)
+    else:
+        return os.path.join(base_dir, "results", "event_lists", event_type)
+
+
 # === Streamlit App ===
 st.set_page_config(page_title="Event QC Tool", layout="wide")
 init_session_state()
+
+# Handle keyboard shortcuts before rendering
+handle_keyboard_action()
 
 st.title("Event QC Tool")
 st.markdown("Manual quality control for erosion/deposition events")
@@ -325,12 +425,38 @@ st.sidebar.header("Configuration")
 # Event CSV Selection
 st.sidebar.subheader("1. Load Events")
 
-csv_dir = st.sidebar.text_input(
-    "Event CSV Directory",
-    value=os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-                       "results", "event_lists", "erosion"),
-    help="Directory containing event CSV files"
+# Mode selection: Start New or Resume Previous
+load_mode = st.sidebar.radio(
+    "Mode",
+    options=['Start New', 'Resume Previous'],
+    index=0 if st.session_state.load_mode == 'Start New' else 1,
+    horizontal=True,
+    help="Start New: Load from event_lists folder. Resume: Load from event_lists_qc folder."
 )
+st.session_state.load_mode = load_mode
+
+# Event type selection (affects default directory)
+sidebar_event_type = st.sidebar.selectbox(
+    "Event Type",
+    options=['erosion', 'deposition', 'combined'],
+    index=0,
+    help="Select event type to load"
+)
+
+# Get default directory based on mode and event type
+csv_dir = get_default_csv_dir(load_mode, sidebar_event_type)
+
+# Show the computed directory path
+st.sidebar.caption(f"📁 `{csv_dir}`")
+
+# Option to use custom directory
+use_custom_dir = st.sidebar.checkbox("Use custom directory", value=False)
+if use_custom_dir:
+    csv_dir = st.sidebar.text_input(
+        "Custom Directory",
+        value=csv_dir,
+        help="Override the default directory"
+    )
 
 if os.path.isdir(csv_dir):
     csv_files = scan_event_csvs(csv_dir)
@@ -628,7 +754,7 @@ if st.session_state.events_df is not None:
     col1, col2, col3, col4, col5 = st.columns(5)
 
     with col1:
-        if st.button("Real", type="primary" if current_flag == 'real' else "secondary",
+        if st.button("Real (R)", type="primary" if current_flag == 'real' else "secondary",
                      use_container_width=True):
             st.session_state.qc_flags[current_idx] = 'real'
             # Auto-advance to next
@@ -637,7 +763,7 @@ if st.session_state.events_df is not None:
             st.rerun()
 
     with col2:
-        if st.button("Construction", type="primary" if current_flag == 'construction' else "secondary",
+        if st.button("Construction (C)", type="primary" if current_flag == 'construction' else "secondary",
                      use_container_width=True):
             st.session_state.qc_flags[current_idx] = 'construction'
             if current_idx < len(st.session_state.events_df) - 1:
@@ -645,7 +771,7 @@ if st.session_state.events_df is not None:
             st.rerun()
 
     with col3:
-        if st.button("Noise", type="primary" if current_flag == 'noise' else "secondary",
+        if st.button("Noise (N)", type="primary" if current_flag == 'noise' else "secondary",
                      use_container_width=True):
             st.session_state.qc_flags[current_idx] = 'noise'
             if current_idx < len(st.session_state.events_df) - 1:
@@ -653,7 +779,7 @@ if st.session_state.events_df is not None:
             st.rerun()
 
     with col4:
-        if st.button("Needs Check", type="primary" if current_flag == 'needs_check' else "secondary",
+        if st.button("Needs Check (K)", type="primary" if current_flag == 'needs_check' else "secondary",
                      use_container_width=True):
             st.session_state.qc_flags[current_idx] = 'needs_check'
             if current_idx < len(st.session_state.events_df) - 1:
@@ -661,9 +787,12 @@ if st.session_state.events_df is not None:
             st.rerun()
 
     with col5:
-        if st.button("Clear Flag", use_container_width=True):
+        if st.button("Clear (U)", use_container_width=True):
             st.session_state.qc_flags[current_idx] = 'unreviewed'
             st.rerun()
+
+    # Inject keyboard shortcuts (at end of main content)
+    inject_keyboard_shortcuts()
 
 else:
     st.info("Load an event CSV file from the sidebar to begin QC review.")
@@ -672,8 +801,12 @@ else:
     1. Enter the path to your event CSV directory in the sidebar
     2. Select an event file and click "Load Events"
     3. Configure the resolution and results directory if needed
-    4. Navigate through events using Prev/Next buttons
+    4. Navigate through events using Prev/Next buttons or arrow keys
     5. Assign QC flags: Real, Construction, Noise, or Needs Check
     6. Use "Jump to Next Needs Check" to revisit flagged events
     7. Export results when finished
+
+    **Keyboard Shortcuts:**
+    - **R** = Real, **N** = Noise, **C** = Construction, **K** = Needs Check, **U** = Clear
+    - **← / →** = Previous / Next event
     """)
