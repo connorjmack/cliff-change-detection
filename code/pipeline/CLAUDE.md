@@ -695,10 +695,12 @@ Post-processes grids by:
 1. Applying visual cliff-top cutoffs (removes data above cliff edge)
 2. Filtering clusters by size threshold
 3. Footprint checking (deposition validation against erosion)
-4. Interpolating holes within erosion clusters using alpha shapes
+4. Filling holes within erosion clusters using diffusion with smoothed boundaries
 5. Morphological cleanup (removes isolated cells)
 
 **Note:** Only saves final `_filled.csv` outputs. For erosion, this includes cleaning + hole filling + morphological cleanup. For deposition, this includes cleaning only (no filling).
+
+**Hole Filling Method:** Uses index-based iterative diffusion with circular convolution boundary smoothing (radius=4). Empty cells inside cluster boundaries are filled by averaging valid neighbors, with nearest-neighbor fallback for disconnected cells.
 
 ### Usage
 ```bash
@@ -773,44 +775,55 @@ For deposition clusters, validates against erosion:
 - Removes deposition clusters with no erosion foundation
 
 #### 4. Hole Filling (Erosion Only)
-Uses alpha-shape boundaries and spatial interpolation:
+Uses index-based diffusion filling with smoothed boundaries:
 
-**Parameters (resolution-dependent):**
-```python
-'10cm': alpha=0.1,  buffer_dist=0.2m
-'25cm': alpha=0.04, buffer_dist=0.5m
-'1m':   alpha=0.01, buffer_dist=2.0m
-```
+**Parameters:**
+- `dilation=1`: Initial morphological dilation iterations
+- `conv_radius=4`: Circular convolution radius for boundary smoothing
+- `--min_volume 2.0`: Skip clusters below this volume (m³)
 
 **Algorithm:**
 1. Calculate cluster volumes
 2. Skip clusters below `--min_volume` threshold (default: 2.0 m³)
 3. For each qualifying cluster:
-   - Create alpha-shape boundary around cluster points
-   - Identify holes (zero cells) within boundary
-   - Interpolate M3C2 values from neighboring cluster cells
+   - Create morphological fill mask (`binary_fill_holes` + dilation)
+   - Smooth boundary using circular convolution (radius=4)
+   - Fill holes using iterative diffusion:
+     - For each empty cell inside boundary, compute mean of valid 4-connected neighbors
+     - Only use neighbors that are also inside the boundary
+     - Iterate until all cells are filled
+   - Fallback to nearest-neighbor for any disconnected cells
    - Assign filled cells to cluster ID
 
-**Interpolation Method:**
+**Boundary Smoothing:**
 ```python
-scipy.interpolate.griddata(
-    points=cluster_positions,
-    values=cluster_m3c2_values,
-    xi=hole_positions,
-    method='linear'
-)
+# Circular convolution smooths jagged cluster boundaries
+y_k, x_k = np.ogrid[-radius:radius+1, -radius:radius+1]
+circular_kernel = (x_k**2 + y_k**2 <= radius**2).astype(float)
+circular_kernel /= circular_kernel.sum()
+smoothed_mask = convolve(base_mask.astype(float), circular_kernel) > 0.5
+```
+
+**Diffusion Fill:**
+```python
+# Iteratively fill empty cells with mean of valid neighbors
+for each empty_cell inside boundary:
+    neighbors = [n for n in 4-connected if inside_boundary and has_data]
+    if neighbors:
+        new_value = mean(neighbors)
+# Fallback: nearest-neighbor for disconnected cells
 ```
 
 ### Report Files
 **Location:** `validation/hole_filling/reports/<Location>/`
 
-**combined_report_alphashape_<resolution>_YYYYMMDD_HHMMSS.txt:**
+**combined_report_<resolution>_YYYYMMDD_HHMMSS.txt:**
 ```
-COMBINED CLEANING + HOLE FILLING + VISUAL CUTOFF
+CLEANING + HOLE FILLING (Index-Based Diffusion)
 ================================================================================
 Location: SanElijo
 Resolution: 10cm
-Method: Vector (Alphashape)
+Method: Diffusion fill with smoothed boundaries (conv_radius=4)
 
 CLEANING SUMMARY (Visual Cutoff Applied)
 ------------------------------
@@ -1011,26 +1024,37 @@ After each step, verify:
 
 ### Step 8: Vertical Stripes in Filled Grids
 
-**Status:** Unresolved - needs investigation
+**Status:** RESOLVED (2026-02-02)
 
-**Symptom:** Thin vertical stripes (unfilled holes at specific alongshore positions) visible in the filled grid data, particularly noticeable in the Streamlit QC tool visualizations.
+**Original symptom:** Thin vertical stripes (unfilled holes at specific alongshore positions) visible in the filled grid data.
 
-**Observed behavior:**
-- Stripes appear as narrow vertical gaps running through cluster data
-- Stripes span all elevations at specific alongshore positions
-- Pattern is consistent across multiple events/locations
+**Root cause:** The original alphashape-based filling approach used UTM physical coordinates for boundary detection and interpolation. This caused issues with:
+1. `binary_fill_holes` only filling completely surrounded holes (stripes connecting to edges weren't filled)
+2. `scipy.interpolate.griddata` sometimes failing at boundary edges
+3. Complex boundary shapes from alphashape not matching grid structure
 
-**Investigation notes (2026-01-30):**
-- The stripes exist in the data cubes (post-filling), meaning step 8 is not filling them
-- Root cause unclear - need to determine if stripes exist BEFORE step 8 (in unfilled grids from step 7)
-- If stripes exist pre-filling: issue is upstream (M3C2/DBSCAN/gridding)
-- If stripes created by filling algorithm: need to fix boundary/interpolation logic
+**Solution implemented:**
+Replaced alphashape/physical coordinate approach with index-based diffusion filling:
 
-**Next steps:**
-1. Compare unfilled grids (`*_grid_<res>.csv`) vs filled grids (`*_grid_<res>_filled.csv`) to determine if stripes exist before filling
-2. Check if stripes correspond to specific Polygon_IDs that have no M3C2 data
-3. If filling algorithm issue: may need to fill based on row index range rather than alpha-shape boundary containment
+1. **Boundary smoothing:** Use circular convolution (radius=4) on morphological fill mask to create smooth, well-defined cluster boundaries
 
-**Visualization files created during investigation:**
-- `results/delmar_stripe_analysis.png` - Shows stripe pattern in data
-- `results/delmar_top3_events_current.png` - Top 3 events overview
+2. **Iterative diffusion fill:** For each empty cell inside the boundary:
+   - Compute mean of valid 4-connected neighbors (only neighbors inside boundary)
+   - Iterate until all cells are filled
+   - Guarantees all cells inside boundary get filled
+
+3. **Nearest-neighbor fallback:** For any disconnected cells that diffusion can't reach, copy value from nearest cell with data
+
+**Testing script:** `code/pipeline/grid_fill_index_based.py`
+```bash
+# Test boundary smoothing options
+python3 grid_fill_index_based.py --test-radii --top 10
+
+# Test diffusion fill
+python3 grid_fill_index_based.py --test-fill --top 10
+
+# Test specific event range
+python3 grid_fill_index_based.py --test-fill --start 19 --top 11
+```
+
+**Test figures location:** `figures/testing/boundary/` and `figures/testing/diffusion_fill/`

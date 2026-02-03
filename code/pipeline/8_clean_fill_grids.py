@@ -34,7 +34,8 @@ import time
 from datetime import datetime
 from scipy.interpolate import griddata
 from scipy.spatial import ConvexHull, cKDTree
-from scipy.ndimage import binary_opening, label
+from scipy.ndimage import (binary_opening, binary_closing, binary_dilation,
+                           binary_fill_holes, label, convolve, distance_transform_edt)
 from shapely.geometry import Point, Polygon
 import alphashape
 
@@ -396,7 +397,221 @@ def morphological_cleanup(grid, clusters, min_component_size=3):
 
 
 # ============================================================================
-# ALPHASHAPE / VECTOR HOLE FILLING WITH PHYSICAL COORDINATES
+# INDEX-BASED HOLE FILLING WITH SMOOTHED BOUNDARIES
+# ============================================================================
+
+def get_morphological_fill_mask(cluster_mask, dilation=1):
+    """
+    Create fill mask using morphological operations.
+    Tight fitting - only fills internal holes and small gaps.
+    """
+    if not np.any(cluster_mask):
+        return cluster_mask
+
+    # First fill internal holes (only fills holes completely surrounded)
+    filled = binary_fill_holes(cluster_mask)
+
+    # Then dilate slightly to catch edge gaps
+    if dilation > 0:
+        filled = binary_dilation(filled, iterations=dilation)
+
+    return filled
+
+
+def apply_circular_convolution(mask, radius=4):
+    """
+    Apply circular convolution to smooth boundary mask.
+
+    Args:
+        mask: Binary mask
+        radius: Kernel radius (default: 4)
+
+    Returns:
+        Smoothed binary mask
+    """
+    if not np.any(mask):
+        return mask
+
+    # Create circular kernel
+    y_k, x_k = np.ogrid[-radius:radius+1, -radius:radius+1]
+    circular_kernel = (x_k**2 + y_k**2 <= radius**2).astype(float)
+    circular_kernel /= circular_kernel.sum()  # Normalize
+
+    # Apply convolution and threshold
+    conv_blur = convolve(mask.astype(float), circular_kernel)
+    return conv_blur > 0.5
+
+
+def iterative_diffusion_fill(grid, boundary_mask, max_iterations=1000):
+    """
+    Fill empty cells inside boundary using iterative diffusion.
+
+    For each empty cell inside the boundary, replace with mean of valid neighbors.
+    Only considers neighbors that are also inside the boundary.
+    Falls back to nearest-neighbor for any remaining disconnected cells.
+
+    Args:
+        grid: Data grid with empty cells (0 or NaN)
+        boundary_mask: Boolean mask defining fill region
+        max_iterations: Safety limit to prevent infinite loops
+
+    Returns:
+        Filled grid
+    """
+    filled = grid.copy()
+
+    # Track which cells have valid data
+    has_data = (filled != 0) & ~np.isnan(filled)
+
+    # Cells to fill: inside boundary but no data
+    to_fill = boundary_mask & ~has_data
+
+    n_rows, n_cols = grid.shape
+
+    for iteration in range(max_iterations):
+        if not np.any(to_fill):
+            break
+
+        # Find cells that can be filled this iteration (have at least 1 valid neighbor)
+        new_values = np.zeros_like(filled)
+        can_fill = np.zeros_like(to_fill)
+
+        # Get indices of cells to fill
+        fill_rows, fill_cols = np.where(to_fill)
+
+        for idx in range(len(fill_rows)):
+            r, c = fill_rows[idx], fill_cols[idx]
+
+            # Get 4-connected neighbors
+            neighbors = []
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nr, nc = r + dr, c + dc
+                # Check bounds
+                if 0 <= nr < n_rows and 0 <= nc < n_cols:
+                    # Only use neighbors inside boundary AND with valid data
+                    if boundary_mask[nr, nc] and has_data[nr, nc]:
+                        neighbors.append(filled[nr, nc])
+
+            if len(neighbors) > 0:
+                new_values[r, c] = np.mean(neighbors)
+                can_fill[r, c] = True
+
+        # Apply new values
+        if not np.any(can_fill):
+            # No progress made - use nearest-neighbor fallback for remaining cells
+            remaining = np.sum(to_fill)
+            if remaining > 0:
+                # Use distance transform to find nearest cell with data
+                _, nearest_indices = distance_transform_edt(~has_data, return_indices=True)
+
+                fill_rows_remaining, fill_cols_remaining = np.where(to_fill)
+                for idx in range(len(fill_rows_remaining)):
+                    r, c = fill_rows_remaining[idx], fill_cols_remaining[idx]
+                    nearest_r = nearest_indices[0, r, c]
+                    nearest_c = nearest_indices[1, r, c]
+                    filled[r, c] = grid[nearest_r, nearest_c]
+            break
+
+        filled[can_fill] = new_values[can_fill]
+        has_data[can_fill] = True
+        to_fill[can_fill] = False
+
+    return filled
+
+
+def fill_holes_diffusion(grid, clusters_grid, min_cluster_volume, cell_area,
+                         dilation=1, conv_radius=4):
+    """
+    Fill holes in grid using index-based diffusion with smoothed boundaries.
+
+    This approach:
+    1. Creates a morphological fill mask for each cluster
+    2. Smooths boundaries using circular convolution
+    3. Fills holes using iterative diffusion (neighbor averaging)
+    4. Falls back to nearest-neighbor for disconnected cells
+
+    Args:
+        grid: M3C2 values grid
+        clusters_grid: Cluster ID grid
+        min_cluster_volume: Skip clusters below this volume (m³)
+        cell_area: Area of each grid cell (m²)
+        dilation: Dilation iterations for base mask (default: 1)
+        conv_radius: Radius for circular convolution smoothing (default: 4)
+
+    Returns:
+        filled_grid, filled_clusters, stats_dict
+    """
+    filled_grid = grid.copy()
+    filled_clusters = clusters_grid.copy()
+
+    # Find unique cluster IDs
+    valid_mask = ~np.isnan(clusters_grid) & (clusters_grid != 0)
+    unique_clusters = np.unique(clusters_grid[valid_mask])
+    unique_clusters = unique_clusters[unique_clusters > 0]
+
+    stats = {
+        'holes_filled': 0,
+        'clusters_processed': 0,
+        'clusters_skipped': 0,
+        'volume_change': 0.0
+    }
+
+    original_nonzero = np.sum((grid != 0) & ~np.isnan(grid))
+
+    for cluster_id in unique_clusters:
+        cluster_id = int(cluster_id)
+
+        # Get cluster mask (cells with data belonging to this cluster)
+        cluster_data_mask = (clusters_grid == cluster_id) & (grid != 0) & ~np.isnan(grid)
+
+        # Check minimum volume
+        if np.sum(cluster_data_mask) > 0:
+            cluster_values = grid[cluster_data_mask]
+            cluster_volume = np.sum(np.abs(cluster_values)) * cell_area
+            if cluster_volume < min_cluster_volume:
+                stats['clusters_skipped'] += 1
+                continue
+
+        # Skip very small clusters
+        if np.sum(cluster_data_mask) < 4:
+            stats['clusters_skipped'] += 1
+            continue
+
+        stats['clusters_processed'] += 1
+
+        # Create smoothed boundary mask for this cluster
+        base_mask = get_morphological_fill_mask(cluster_data_mask, dilation=dilation)
+        boundary_mask = apply_circular_convolution(base_mask, radius=conv_radius)
+
+        # Count holes before filling
+        has_data = (filled_grid != 0) & ~np.isnan(filled_grid)
+        holes_before = np.sum(boundary_mask & ~has_data)
+
+        # Fill holes using diffusion
+        filled_grid = iterative_diffusion_fill(filled_grid, boundary_mask)
+
+        # Update cluster assignments for newly filled cells
+        has_data_after = (filled_grid != 0) & ~np.isnan(filled_grid)
+        new_data_mask = boundary_mask & has_data_after & (filled_clusters == 0)
+        filled_clusters[new_data_mask] = cluster_id
+
+        # Count holes filled
+        holes_after = np.sum(boundary_mask & ~has_data_after)
+        stats['holes_filled'] += (holes_before - holes_after)
+
+    # Calculate volume change
+    final_nonzero = np.sum((filled_grid != 0) & ~np.isnan(filled_grid))
+    original_volume = np.nansum(np.abs(grid[(grid != 0) & ~np.isnan(grid)])) * cell_area
+    filled_volume = np.nansum(np.abs(filled_grid[(filled_grid != 0) & ~np.isnan(filled_grid)])) * cell_area
+    stats['volume_change'] = filled_volume - original_volume
+    stats['original_volume'] = original_volume
+    stats['filled_volume'] = filled_volume
+
+    return filled_grid, filled_clusters, stats
+
+
+# ============================================================================
+# LEGACY: ALPHASHAPE / VECTOR HOLE FILLING (kept for reference)
 # ============================================================================
 
 def calculate_cluster_volumes(grid, clusters_grid, cell_area):
@@ -694,30 +909,25 @@ def worker(task):
         print(f"[WARNING] Skipping {folder_name} - run without --skip_cleaning flag.")
         return None
 
-    # ========== STEP 2: ALPHASHAPE HOLE FILLING (EROSION ONLY) ==========
+    # ========== STEP 2: DIFFUSION HOLE FILLING (EROSION ONLY) ==========
     if not skip_filling and ftype == 'erosion':
-        # Parse column elevations
-        col_elevations = np.array([parse_elevation_from_header(h) for h in header_g])
-
-        original_volume = np.nansum(np.abs(cleaned_grid[cleaned_grid != 0])) * res_params['cell_area']
-        hole_mask = (cleaned_grid == 0) | np.isnan(cleaned_grid)
-        cluster_volumes = calculate_cluster_volumes(cleaned_grid, cleaned_clusters, res_params['cell_area'])
-
-        filled_grid, filled_clusters, holes_filled, filled_sum, clusters_processed, clusters_skipped = \
-            fill_holes_alphashape(
-                cleaned_grid, cleaned_clusters, hole_mask, cluster_volumes,
-                min_volume, res_params['alpha'], res_params['buffer_dist'],
-                rows_g, col_elevations, polygon_centroids, elevation_scale
-            )
+        # Use new index-based diffusion fill with smoothed boundaries
+        filled_grid, filled_clusters, fill_stats = fill_holes_diffusion(
+            cleaned_grid, cleaned_clusters,
+            min_cluster_volume=min_volume,
+            cell_area=res_params['cell_area'],
+            dilation=1,
+            conv_radius=4
+        )
 
         # ========== STEP 3: MORPHOLOGICAL CLEANUP ==========
         filled_grid, filled_clusters = morphological_cleanup(
             filled_grid, filled_clusters, min_component_size=cleanup_size
         )
 
-        filled_volume = np.nansum(np.abs(filled_grid[filled_grid != 0])) * res_params['cell_area']
-        volume_change = filled_volume - original_volume
-        fill_percentage = (holes_filled / np.sum(hole_mask) * 100) if np.sum(hole_mask) > 0 else 0
+        # Calculate fill percentage
+        hole_mask = (cleaned_grid == 0) | np.isnan(cleaned_grid)
+        fill_percentage = (fill_stats['holes_filled'] / np.sum(hole_mask) * 100) if np.sum(hole_mask) > 0 else 0
 
         # Save Filled Grid
         g_filled = gfile.replace('.csv', '_filled.csv')
@@ -728,10 +938,13 @@ def worker(task):
         save_csv_data(c_filled, filled_clusters, header_c, rows_c, testing, replace)
 
         filling_stats = {
-            'original_volume': original_volume, 'filled_volume': filled_volume,
-            'volume_change': volume_change, 'holes_filled': holes_filled,
-            'fill_percentage': fill_percentage, 'clusters_processed': clusters_processed,
-            'clusters_skipped': clusters_skipped
+            'original_volume': fill_stats['original_volume'],
+            'filled_volume': fill_stats['filled_volume'],
+            'volume_change': fill_stats['volume_change'],
+            'holes_filled': fill_stats['holes_filled'],
+            'fill_percentage': fill_percentage,
+            'clusters_processed': fill_stats['clusters_processed'],
+            'clusters_skipped': fill_stats['clusters_skipped']
         }
     else:
         # For deposition (or when filling is skipped), save cleaned results as _filled.csv
@@ -762,10 +975,10 @@ def generate_combined_report(location, resolution, threshold, min_volume, stats_
     report_path = os.path.join(report_dir, f"combined_report_{resolution}_{timestamp}.txt")
 
     with open(report_path, 'w') as f:
-        f.write(f"CLEANING + HOLE FILLING (Physical Coordinates)\n")
+        f.write(f"CLEANING + HOLE FILLING (Index-Based Diffusion)\n")
         f.write(f"=" * 80 + "\n")
         f.write(f"Location: {location}\nResolution: {resolution}\n")
-        f.write(f"Method: Vector (Alphashape) with Physical Coordinates\n")
+        f.write(f"Method: Diffusion fill with smoothed boundaries (conv_radius=4)\n")
         f.write(f"Output: _filled.csv files only (no intermediate _cleaned.csv)\n")
 
         if not stats_list:
