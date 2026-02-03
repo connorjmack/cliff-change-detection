@@ -135,8 +135,8 @@ def plot_event_heatmap(erosion_df: pd.DataFrame, deposition_df: pd.DataFrame,
     alongshore_zoom = alongshore_m[x_idx_min:x_idx_max]
     elevation_zoom = elevation_m[y_idx_min:y_idx_max]
 
-    # Determine color scale (symmetric around 0, capped at 5m)
-    cmap, norm = get_diverging_cmap(vmax=5.0)
+    # Determine color scale (symmetric around 0, capped at 2.5m)
+    cmap, norm = get_diverging_cmap(vmax=2.5)
 
     # Create figure
     fig, ax = plt.subplots(figsize=(12, 6))
