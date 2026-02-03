@@ -524,11 +524,13 @@ def fill_holes_diffusion(grid, clusters_grid, min_cluster_volume, cell_area,
     """
     Fill holes in grid using index-based diffusion with smoothed boundaries.
 
-    This approach:
-    1. Creates a morphological fill mask for each cluster
-    2. Smooths boundaries using circular convolution
-    3. Fills holes using iterative diffusion (neighbor averaging)
-    4. Falls back to nearest-neighbor for disconnected cells
+    This approach matches the tested algorithm in grid_fill_index_based.py:
+    1. Creates morphological fill masks for each qualifying cluster
+    2. Combines all masks into a single combined mask
+    3. Smooths the COMBINED boundary using circular convolution
+    4. Fills ALL holes at once using iterative diffusion (neighbor averaging)
+    5. Falls back to nearest-neighbor for disconnected cells
+    6. Assigns filled cells to nearest cluster
 
     Args:
         grid: M3C2 values grid
@@ -558,6 +560,11 @@ def fill_holes_diffusion(grid, clusters_grid, min_cluster_volume, cell_area,
 
     original_nonzero = np.sum((grid != 0) & ~np.isnan(grid))
 
+    # ========== STEP 1: Create COMBINED mask from all qualifying clusters ==========
+    # This matches the testing script's get_base_mask() approach
+    combined_mask = np.zeros_like(grid, dtype=bool)
+    qualifying_clusters = []
+
     for cluster_id in unique_clusters:
         cluster_id = int(cluster_id)
 
@@ -572,35 +579,58 @@ def fill_holes_diffusion(grid, clusters_grid, min_cluster_volume, cell_area,
                 stats['clusters_skipped'] += 1
                 continue
 
-        # Skip very small clusters
-        if np.sum(cluster_data_mask) < 4:
+        # Skip very small clusters (matching testing script's < 8 check)
+        if np.sum(cluster_data_mask) < 8:
             stats['clusters_skipped'] += 1
             continue
 
         stats['clusters_processed'] += 1
+        qualifying_clusters.append(cluster_id)
 
-        # Create smoothed boundary mask for this cluster
-        base_mask = get_morphological_fill_mask(cluster_data_mask, dilation=dilation)
-        boundary_mask = apply_circular_convolution(base_mask, radius=conv_radius)
+        # Create morphological fill mask for this cluster and ADD to combined mask
+        hull_mask = get_morphological_fill_mask(cluster_data_mask, dilation=dilation)
+        combined_mask |= hull_mask
 
-        # Count holes before filling
-        has_data = (filled_grid != 0) & ~np.isnan(filled_grid)
-        holes_before = np.sum(boundary_mask & ~has_data)
+    # ========== STEP 2: Smooth the COMBINED mask ==========
+    if not np.any(combined_mask):
+        # No qualifying clusters
+        stats['original_volume'] = np.nansum(np.abs(grid[(grid != 0) & ~np.isnan(grid)])) * cell_area
+        stats['filled_volume'] = stats['original_volume']
+        return filled_grid, filled_clusters, stats
 
-        # Fill holes using diffusion
-        filled_grid = iterative_diffusion_fill(filled_grid, boundary_mask)
+    boundary_mask = apply_circular_convolution(combined_mask, radius=conv_radius)
 
-        # Update cluster assignments for newly filled cells
-        has_data_after = (filled_grid != 0) & ~np.isnan(filled_grid)
-        new_data_mask = boundary_mask & has_data_after & (filled_clusters == 0)
-        filled_clusters[new_data_mask] = cluster_id
+    # ========== STEP 3: Count holes before filling ==========
+    has_data = (filled_grid != 0) & ~np.isnan(filled_grid)
+    holes_before = np.sum(boundary_mask & ~has_data)
 
-        # Count holes filled
-        holes_after = np.sum(boundary_mask & ~has_data_after)
-        stats['holes_filled'] += (holes_before - holes_after)
+    # ========== STEP 4: Fill ALL holes at once using diffusion ==========
+    filled_grid = iterative_diffusion_fill(filled_grid, boundary_mask)
 
-    # Calculate volume change
-    final_nonzero = np.sum((filled_grid != 0) & ~np.isnan(filled_grid))
+    # ========== STEP 5: Assign filled cells to nearest cluster ==========
+    has_data_after = (filled_grid != 0) & ~np.isnan(filled_grid)
+    new_data_mask = boundary_mask & has_data_after & (filled_clusters == 0)
+
+    if np.any(new_data_mask) and len(qualifying_clusters) > 0:
+        # Use distance transform to assign filled cells to nearest cluster
+        cluster_cells_mask = np.zeros_like(grid, dtype=bool)
+        for cid in qualifying_clusters:
+            cluster_cells_mask |= (clusters_grid == cid)
+
+        # For cells with no cluster, find nearest cluster cell
+        _, nearest_indices = distance_transform_edt(~cluster_cells_mask, return_indices=True)
+
+        new_rows, new_cols = np.where(new_data_mask)
+        for idx in range(len(new_rows)):
+            r, c = new_rows[idx], new_cols[idx]
+            nearest_r = nearest_indices[0, r, c]
+            nearest_c = nearest_indices[1, r, c]
+            filled_clusters[r, c] = clusters_grid[nearest_r, nearest_c]
+
+    # ========== STEP 6: Calculate statistics ==========
+    holes_after = np.sum(boundary_mask & ~has_data_after)
+    stats['holes_filled'] = holes_before - holes_after
+
     original_volume = np.nansum(np.abs(grid[(grid != 0) & ~np.isnan(grid)])) * cell_area
     filled_volume = np.nansum(np.abs(filled_grid[(filled_grid != 0) & ~np.isnan(filled_grid)])) * cell_area
     stats['volume_change'] = filled_volume - original_volume
