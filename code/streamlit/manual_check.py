@@ -2,7 +2,7 @@
 """
 Manual Check Tool - Streamlit GUI for re-checking "needs_check" events
 
-Displays M3C2 distances and DBSCAN clusters side-by-side in 2D cliff-planar view.
+Displays DBSCAN clusters in 2D cliff-planar view.
 Updates the input CSV in place when events are reclassified.
 
 Usage:
@@ -18,13 +18,18 @@ import streamlit as st
 import matplotlib.pyplot as plt
 from matplotlib.colors import Normalize
 from matplotlib import cm
-from datetime import datetime
 
 try:
     import laspy
     HAS_LASPY = True
 except ImportError:
     HAS_LASPY = False
+
+try:
+    import geopandas as gpd
+    HAS_GEOPANDAS = True
+except ImportError:
+    HAS_GEOPANDAS = False
 
 from utils.grid_loader import (
     infer_location_from_filename,
@@ -39,20 +44,211 @@ QC_FLAGS = ['real', 'noise', 'construction', 'veg_error', 'beach_error', 'other'
 
 # OS-aware base paths
 if platform.system() == "Darwin":
-    BASE_RESULTS_DIR = "/Volumes/group/LiDAR/LidarProcessing/LidarProcessingCliffs/results"
+    BASE_DIR = "/Volumes/group/LiDAR/LidarProcessing/LidarProcessingCliffs"
 else:
-    BASE_RESULTS_DIR = "/project/group/LiDAR/LidarProcessing/LidarProcessingCliffs/results"
+    BASE_DIR = "/project/group/LiDAR/LidarProcessing/LidarProcessingCliffs"
 
-# Approximate cliff orientation angles (degrees from north, clockwise)
-# Used to rotate UTM coordinates to cliff-planar view
-CLIFF_ORIENTATIONS = {
-    "DelMar": 342,      # Cliff faces roughly west
-    "Solana": 345,
-    "Encinitas": 350,
-    "SanElijo": 348,
-    "Torrey": 340,
-    "Blacks": 335,
-}
+BASE_RESULTS_DIR = os.path.join(BASE_DIR, "results")
+BASE_UTILITIES_DIR = os.path.join(BASE_DIR, "utilities")
+
+
+@st.cache_data
+def find_shapefile(location: str, resolution: str = "1m") -> str:
+    """Locate the shapefile for a given location and resolution."""
+    sf_root = os.path.join(BASE_UTILITIES_DIR, 'shape_files')
+    if not os.path.isdir(sf_root):
+        return None
+
+    candidates = [
+        d for d in os.listdir(sf_root)
+        if d.lower().startswith(location.lower())
+           and 'polygon' in d.lower()
+           and f'at{resolution}'.lower() in d.lower()
+           and os.path.isdir(os.path.join(sf_root, d))
+    ]
+
+    if not candidates:
+        return None
+
+    fld = candidates[0]
+    shp_path = os.path.join(sf_root, fld, fld + '.shp')
+    return shp_path if os.path.isfile(shp_path) else None
+
+
+@st.cache_data
+def load_shapefile_data(shp_path: str):
+    """
+    Load shapefile and compute cliff orientation for coordinate rotation.
+    Returns dict with: gdf, angle_rad, ref_point
+    """
+    if not HAS_GEOPANDAS or not shp_path:
+        return None
+
+    try:
+        gdf = gpd.read_file(shp_path)
+
+        # Use 0-based index as Polygon_ID (matches event CSV alongshore values)
+        gdf = gdf.reset_index(drop=True)
+        gdf["Polygon_ID"] = gdf.index
+
+        # Compute cliff orientation from polygon centroids
+        centroids = gdf.geometry.centroid
+        cx = centroids.x.values
+        cy = centroids.y.values
+
+        # Use first and last polygon centroids to define cliff direction
+        # (direction of increasing Polygon_ID = alongshore direction)
+        if len(cx) > 1:
+            dx = cx[-1] - cx[0]
+            dy = cy[-1] - cy[0]
+            angle_rad = np.arctan2(dy, dx)
+        else:
+            angle_rad = 0
+
+        # Reference point: first polygon centroid
+        ref_x = cx[0]
+        ref_y = cy[0]
+
+        return {
+            'gdf': gdf,
+            'angle_rad': angle_rad,
+            'ref_point': (ref_x, ref_y),
+        }
+
+    except Exception as e:
+        st.error(f"Error loading shapefile: {e}")
+        return None
+
+
+def rotate_to_cliff_coords(x, y, angle_rad, ref_point):
+    """
+    Rotate UTM coordinates to cliff-aligned coordinates.
+
+    Returns (alongshore, cross_shore) in meters where:
+    - alongshore: distance along the cliff (parallel to cliff face)
+    - cross_shore: distance perpendicular to cliff
+    """
+    ref_x, ref_y = ref_point
+
+    # Translate to origin
+    dx = x - ref_x
+    dy = y - ref_y
+
+    # Rotate by -angle to align cliff direction with X-axis
+    cos_a = np.cos(-angle_rad)
+    sin_a = np.sin(-angle_rad)
+
+    alongshore = dx * cos_a + dy * sin_a
+    cross_shore = -dx * sin_a + dy * cos_a
+
+    return alongshore, cross_shore
+
+
+def assign_polygon_ids(points: dict, gdf) -> np.ndarray:
+    """
+    Assign Polygon_ID (alongshore position) to each point via spatial join.
+    Returns array of Polygon_IDs (NaN for points outside polygons).
+    """
+    if not HAS_GEOPANDAS or gdf is None:
+        return None
+
+    # Create point geometries
+    points_gdf = gpd.GeoDataFrame(
+        geometry=gpd.points_from_xy(points['x'], points['y']),
+        crs=gdf.crs
+    )
+
+    # Spatial join
+    joined = gpd.sjoin(points_gdf, gdf[['Polygon_ID', 'geometry']],
+                       how='left', predicate='within')
+
+    return joined['Polygon_ID'].values
+
+
+def assign_polygon_ids_for_event(points: dict, gdf, event: pd.Series,
+                                  buffer_m: float = 10.0,
+                                  progress_bar=None) -> np.ndarray:
+    """
+    Optimized polygon ID assignment - only spatial joins points near the event.
+
+    1. Gets UTM bounding box from polygons in the event's alongshore range
+    2. Pre-filters points using fast numpy comparisons
+    3. Spatial joins only the filtered subset
+    4. Returns full array with NaN for points outside event region
+
+    This is much faster than joining millions of points.
+    """
+    if not HAS_GEOPANDAS or gdf is None:
+        return None
+
+    n_pts = len(points['x'])
+    result = np.full(n_pts, np.nan)
+
+    if progress_bar:
+        progress_bar.progress(96, text="Computing event bounding box...")
+
+    # Get event's alongshore range (Polygon_ID space)
+    along_min = event['alongshore_start_m'] - buffer_m
+    along_max = event['alongshore_end_m'] + buffer_m
+    z_min = max(0, event['elevation'] - event['height'] / 2 - buffer_m)
+    z_max = event['elevation'] + event['height'] / 2 + buffer_m
+
+    # Get polygons in the event's alongshore range
+    event_polygons = gdf[(gdf['Polygon_ID'] >= along_min) &
+                         (gdf['Polygon_ID'] <= along_max)]
+
+    if len(event_polygons) == 0:
+        return result
+
+    # Get UTM bounding box from those polygons
+    bounds = event_polygons.total_bounds  # [minx, miny, maxx, maxy]
+    utm_x_min, utm_y_min, utm_x_max, utm_y_max = bounds
+
+    # Add buffer to UTM bounds
+    utm_x_min -= buffer_m
+    utm_x_max += buffer_m
+    utm_y_min -= buffer_m
+    utm_y_max += buffer_m
+
+    if progress_bar:
+        progress_bar.progress(97, text="Pre-filtering points by bounding box...")
+
+    # Pre-filter points using fast numpy comparisons
+    x, y, z = points['x'], points['y'], points['z']
+    in_bbox = ((x >= utm_x_min) & (x <= utm_x_max) &
+               (y >= utm_y_min) & (y <= utm_y_max) &
+               (z >= z_min) & (z <= z_max))
+
+    bbox_indices = np.where(in_bbox)[0]
+    n_bbox = len(bbox_indices)
+
+    if n_bbox == 0:
+        return result
+
+    if progress_bar:
+        progress_bar.progress(98, text=f"Spatial join on {n_bbox:,} points (filtered from {n_pts:,})...")
+
+    # Create GeoDataFrame only for filtered points
+    filtered_gdf = gpd.GeoDataFrame(
+        {'orig_idx': bbox_indices},
+        geometry=gpd.points_from_xy(x[bbox_indices], y[bbox_indices]),
+        crs=gdf.crs
+    )
+
+    # Spatial join only on filtered subset
+    joined = gpd.sjoin(filtered_gdf, event_polygons[['Polygon_ID', 'geometry']],
+                       how='left', predicate='within')
+
+    if progress_bar:
+        progress_bar.progress(99, text="Mapping polygon IDs...")
+
+    # Map results back to full array (vectorized)
+    valid_mask = joined['Polygon_ID'].notna()
+    valid_indices = joined.loc[valid_mask, 'orig_idx'].values.astype(int)
+    valid_pids = joined.loc[valid_mask, 'Polygon_ID'].values
+    result[valid_indices] = valid_pids
+
+    return result
 
 
 def find_latest_pipeline_run(m3c2_base_dir: str) -> str:
@@ -74,34 +270,21 @@ def find_latest_pipeline_run(m3c2_base_dir: str) -> str:
 
 
 def find_m3c2_las_for_event(event: pd.Series, location: str, results_dir: str = None) -> str:
-    """
-    Find the M3C2 LAS file for a given event.
-
-    Args:
-        event: Event row with start_date and end_date
-        location: Location name (e.g., 'DelMar')
-        results_dir: Base results directory
-
-    Returns:
-        Path to M3C2 LAS file or None if not found
-    """
+    """Find the M3C2 LAS file for a given event."""
     if results_dir is None:
         results_dir = BASE_RESULTS_DIR
 
     date_folder = event_dates_to_folder(event['start_date'], event['end_date'])
     m3c2_base = os.path.join(results_dir, location, "m3c2")
 
-    # Find latest pipeline run
     pipeline_run = find_latest_pipeline_run(m3c2_base)
     if not pipeline_run:
         return None
 
-    # Look for M3C2 file in the date folder
     m3c2_dir = os.path.join(pipeline_run, date_folder)
     if not os.path.isdir(m3c2_dir):
         return None
 
-    # Find the m3c2.las file
     pattern = os.path.join(m3c2_dir, "*_m3c2.las")
     matches = glob.glob(pattern)
     return matches[0] if matches else None
@@ -109,18 +292,7 @@ def find_m3c2_las_for_event(event: pd.Series, location: str, results_dir: str = 
 
 def find_dbscan_las_for_event(event: pd.Series, location: str, event_type: str,
                                results_dir: str = None) -> str:
-    """
-    Find the DBSCAN clusters LAS file for a given event.
-
-    Args:
-        event: Event row with start_date and end_date
-        location: Location name
-        event_type: 'erosion' or 'deposition'
-        results_dir: Base results directory
-
-    Returns:
-        Path to clusters LAS file or None if not found
-    """
+    """Find the DBSCAN clusters LAS file for a given event."""
     if results_dir is None:
         results_dir = BASE_RESULTS_DIR
 
@@ -135,188 +307,33 @@ def find_dbscan_las_for_event(event: pd.Series, location: str, event_type: str,
     return clusters_path if os.path.exists(clusters_path) else None
 
 
-def load_las_subset(las_path: str, x_min: float, x_max: float,
-                    y_min: float, y_max: float,
-                    z_min: float = None, z_max: float = None) -> dict:
+def find_both_dbscan_files(event: pd.Series, location: str,
+                           results_dir: str = None) -> dict:
     """
-    Load points from LAS file within a bounding box.
-
-    Returns dict with 'x', 'y', 'z', 'm3c2_distance', 'cluster_id' arrays.
+    Find both erosion and deposition DBSCAN files for the same time period.
+    Returns dict with 'erosion' and 'deposition' paths (or None if not found).
     """
-    if not HAS_LASPY:
-        return None
+    if results_dir is None:
+        results_dir = BASE_RESULTS_DIR
 
-    try:
-        las = laspy.read(las_path)
-    except Exception as e:
-        st.error(f"Error reading LAS: {e}")
-        return None
+    date_folder = event_dates_to_folder(event['start_date'], event['end_date'])
 
-    x = np.array(las.x)
-    y = np.array(las.y)
-    z = np.array(las.z)
+    paths = {}
+    for etype, prefix in [('erosion', 'ero'), ('deposition', 'dep')]:
+        clusters_path = os.path.join(
+            results_dir, location, etype, date_folder,
+            f"{prefix}_clusters.las"
+        )
+        paths[etype] = clusters_path if os.path.exists(clusters_path) else None
 
-    # Spatial filter
-    mask = (x >= x_min) & (x <= x_max) & (y >= y_min) & (y <= y_max)
-    if z_min is not None:
-        mask &= (z >= z_min)
-    if z_max is not None:
-        mask &= (z <= z_max)
-
-    if np.sum(mask) == 0:
-        return None
-
-    result = {
-        'x': x[mask],
-        'y': y[mask],
-        'z': z[mask],
-    }
-
-    # Find M3C2 distance field
-    m3c2_field = None
-    for field in las.point_format.dimension_names:
-        if 'm3c2' in field.lower() and 'distance' in field.lower():
-            m3c2_field = field
-            break
-    if m3c2_field is None:
-        m3c2_field = next((f for f in las.point_format.dimension_names
-                          if 'm3c2' == f.lower()), None)
-
-    if m3c2_field:
-        result['m3c2_distance'] = getattr(las, m3c2_field)[mask]
-    else:
-        result['m3c2_distance'] = np.zeros(np.sum(mask))
-
-    # Find ClusterID field
-    cluster_field = next((f for f in las.point_format.dimension_names
-                         if 'cluster' in f.lower()), None)
-    if cluster_field:
-        result['cluster_id'] = getattr(las, cluster_field)[mask]
-    else:
-        result['cluster_id'] = np.zeros(np.sum(mask), dtype=int)
-
-    return result
+    return paths
 
 
-def rotate_to_cliff_plane(x: np.ndarray, y: np.ndarray, z: np.ndarray,
-                          orientation_deg: float) -> tuple:
+def load_las_simple(las_path: str) -> dict:
     """
-    Rotate UTM coordinates to cliff-planar view.
+    Load entire LAS file into memory (simple approach).
 
-    Args:
-        x, y, z: UTM coordinates
-        orientation_deg: Cliff orientation in degrees from north (clockwise)
-
-    Returns:
-        (alongshore, elevation) - 2D coordinates for plotting
-    """
-    # Convert to radians (orientation is clockwise from north)
-    theta = np.radians(orientation_deg)
-
-    # Center the coordinates
-    x_c = x - np.mean(x)
-    y_c = y - np.mean(y)
-
-    # Rotate to align cliff with Y axis (alongshore = rotated Y)
-    # Cross-shore = rotated X (perpendicular to cliff)
-    alongshore = x_c * np.sin(theta) + y_c * np.cos(theta)
-
-    return alongshore, z
-
-
-def estimate_utm_bbox_from_event(event: pd.Series, location: str,
-                                  buffer_m: float = 20) -> dict:
-    """
-    Estimate UTM bounding box from event's alongshore coordinates.
-
-    This is approximate - we use the event's alongshore extent plus a buffer.
-    The actual mapping from alongshore_m to UTM depends on the polygon shapefile,
-    but for subsetting purposes we can use a generous buffer.
-
-    Returns dict with x_min, x_max, y_min, y_max, z_min, z_max
-    """
-    # The alongshore positions in the event CSV are derived from polygon IDs
-    # which are based on MOP lines. The UTM coordinates are roughly:
-    # - Y (northing) varies along the coast
-    # - X (easting) varies perpendicular to coast
-
-    # We'll use the event's spatial extent with a large buffer
-    # This is imprecise but works for subsetting the point cloud
-
-    alongshore_min = event['alongshore_start_m']
-    alongshore_max = event['alongshore_end_m']
-    elevation_min = max(0, event['elevation'] - event['height'] / 2 - buffer_m)
-    elevation_max = event['elevation'] + event['height'] / 2 + buffer_m
-
-    # For UTM coordinates, we need to know the approximate mapping
-    # Based on typical San Diego cliffs, UTM Y increases northward
-    # and the alongshore coordinate roughly tracks Y
-    # We'll use a very generous X range (perpendicular to cliff)
-
-    return {
-        'y_min': alongshore_min * 1000 + 3600000,  # Rough estimate
-        'y_max': alongshore_max * 1000 + 3600000,
-        'x_min': 460000,  # Wide range to capture cliff
-        'x_max': 490000,
-        'z_min': elevation_min,
-        'z_max': elevation_max,
-    }
-
-
-def get_actual_utm_bbox(las_path: str, event: pd.Series, buffer_m: float = 15) -> dict:
-    """
-    Get UTM bounding box by reading the LAS file header and subsetting by elevation.
-    More accurate than estimate_utm_bbox_from_event.
-    """
-    if not HAS_LASPY:
-        return None
-
-    try:
-        las = laspy.read(las_path)
-    except Exception:
-        return None
-
-    # Get full extent from file
-    x_min_file, x_max_file = las.header.x_min, las.header.x_max
-    y_min_file, y_max_file = las.header.y_min, las.header.y_max
-
-    # Elevation bounds from event
-    z_min = max(0, event['elevation'] - event['height'] / 2 - buffer_m)
-    z_max = event['elevation'] + event['height'] / 2 + buffer_m
-
-    # For alongshore, we'll use the relative position in the file
-    # The event's alongshore_centroid_m is relative to MOP lines
-    # We approximate by assuming the file covers the same alongshore range
-    # and find the corresponding Y range
-
-    # Simplified: just filter by elevation and use some Y range based on event width
-    y_range = y_max_file - y_min_file
-
-    # Approximate the event's Y position based on alongshore centroid
-    # This assumes alongshore_m roughly maps to northing within the survey
-    alongshore_range = 200  # Typical survey alongshore extent in polygon units
-    event_along_center = event['alongshore_centroid_m']
-    event_along_start = event['alongshore_start_m']
-    event_along_end = event['alongshore_end_m']
-
-    # Use the event width plus buffer
-    width = event_along_end - event_along_start
-
-    return {
-        'x_min': x_min_file,
-        'x_max': x_max_file,
-        'y_min': y_min_file,  # Will filter further if needed
-        'y_max': y_max_file,
-        'z_min': z_min,
-        'z_max': z_max,
-        'alongshore_center': event_along_center,
-        'alongshore_width': width + 2 * buffer_m,
-    }
-
-
-def load_and_filter_las(las_path: str, event: pd.Series, buffer_m: float = 15) -> dict:
-    """
-    Load LAS file and filter to event region based on elevation and alongshore.
+    Returns dict with x, y, z, m3c2_distance, cluster_id arrays.
     """
     if not HAS_LASPY:
         return None
@@ -327,151 +344,379 @@ def load_and_filter_las(las_path: str, event: pd.Series, buffer_m: float = 15) -
         st.error(f"Error reading {las_path}: {e}")
         return None
 
-    x = np.array(las.x)
-    y = np.array(las.y)
-    z = np.array(las.z)
-
-    # Filter by elevation
-    z_min = max(0, event['elevation'] - event['height'] / 2 - buffer_m)
-    z_max = event['elevation'] + event['height'] / 2 + buffer_m
-    z_mask = (z >= z_min) & (z <= z_max)
-
-    if np.sum(z_mask) == 0:
-        return None
-
-    # Apply elevation filter first
-    x = x[z_mask]
-    y = y[z_mask]
-    z = z[z_mask]
-
-    # Now filter by alongshore position
-    # The alongshore_m in the event is derived from polygon IDs
-    # We'll subset to a Y range that's proportional to the event width
-    y_full_range = np.max(y) - np.min(y)
-
-    # Get event's alongshore extent relative to the file's extent
-    event_width = event['alongshore_end_m'] - event['alongshore_start_m']
-    event_center = event['alongshore_centroid_m']
-
-    # We need to find points within +-width/2 + buffer of the centroid
-    # Since we don't have the exact UTM->alongshore mapping, we'll estimate
-    # by using the relative position
-
-    # Simplified approach: sort points by Y and take a slice
-    y_sorted_idx = np.argsort(y)
-    n_points = len(y)
-
-    # Estimate what fraction of the file corresponds to the event
-    # This is approximate but usually works for focused events
-    keep_fraction = min(1.0, (event_width + 2 * buffer_m) / y_full_range)
-    n_keep = max(1000, int(n_points * keep_fraction * 2))  # 2x for safety
-
-    # Center the slice around the middle (approximate)
-    center_idx = n_points // 2
-    start_idx = max(0, center_idx - n_keep // 2)
-    end_idx = min(n_points, center_idx + n_keep // 2)
-
-    # Just use all points that pass elevation filter for now
-    # (the alongshore filtering is complex without the shapefile mapping)
+    result = {
+        'x': np.array(las.x),
+        'y': np.array(las.y),
+        'z': np.array(las.z),
+    }
 
     # Find M3C2 distance field
+    dim_names = [d.name for d in las.point_format.dimensions]
     m3c2_field = None
-    for field in las.point_format.dimension_names:
+    for field in dim_names:
         if 'm3c2' in field.lower() and 'distance' in field.lower():
             m3c2_field = field
             break
     if m3c2_field is None:
-        m3c2_field = next((f for f in las.point_format.dimension_names
-                          if 'm3c2' == f.lower()), None)
+        m3c2_field = next((f for f in dim_names if 'm3c2' == f.lower()), None)
 
     if m3c2_field:
-        m3c2_dist = getattr(las, m3c2_field)[z_mask]
+        result['m3c2_distance'] = np.array(getattr(las, m3c2_field))
     else:
-        m3c2_dist = np.zeros(len(x))
+        result['m3c2_distance'] = np.zeros(len(result['x']))
 
     # Find ClusterID field
-    cluster_field = next((f for f in las.point_format.dimension_names
-                         if 'cluster' in f.lower()), None)
+    cluster_field = next((f for f in dim_names if 'cluster' in f.lower()), None)
     if cluster_field:
-        cluster_id = getattr(las, cluster_field)[z_mask]
+        result['cluster_id'] = np.array(getattr(las, cluster_field))
     else:
-        cluster_id = np.zeros(len(x), dtype=int)
+        result['cluster_id'] = np.zeros(len(result['x']), dtype=int)
 
-    return {
-        'x': x,
-        'y': y,
-        'z': z,
-        'm3c2_distance': m3c2_dist,
-        'cluster_id': cluster_id,
-    }
+    return result
 
 
-def plot_cliff_view(points: dict, value_field: str, title: str,
-                    orientation_deg: float, cmap_name: str = 'RdBu_r',
-                    vmax: float = 2.0, ax=None) -> plt.Figure:
+def load_las_with_progress(las_path: str, progress_bar=None) -> dict:
     """
-    Plot points in cliff-planar 2D view.
+    Load LAS file with progress reporting using chunked reading.
+
+    Returns dict with x, y, z, m3c2_distance, cluster_id arrays.
+    """
+    if not HAS_LASPY:
+        return None
+
+    try:
+        # Get file info first
+        file_size_mb = os.path.getsize(las_path) / (1024 * 1024)
+        if progress_bar:
+            progress_bar.progress(0, text=f"Opening file ({file_size_mb:.1f} MB)...")
+
+        # Open file and get total points
+        with laspy.open(las_path) as las_file:
+            total_points = las_file.header.point_count
+
+            if progress_bar:
+                progress_bar.progress(5, text=f"Reading {total_points:,} points...")
+
+            # Read in chunks
+            chunk_size = 1_000_000  # 1M points per chunk
+            x_chunks, y_chunks, z_chunks = [], [], []
+            m3c2_chunks, cluster_chunks = [], []
+
+            m3c2_field = None
+            cluster_field = None
+            points_read = 0
+
+            for chunk in las_file.chunk_iterator(chunk_size):
+                # First chunk: identify field names
+                if m3c2_field is None:
+                    dim_names = [d.name for d in chunk.point_format.dimensions]
+                    for field in dim_names:
+                        if 'm3c2' in field.lower() and 'distance' in field.lower():
+                            m3c2_field = field
+                            break
+                    if m3c2_field is None:
+                        m3c2_field = next((f for f in dim_names if 'm3c2' == f.lower()), None)
+                    cluster_field = next((f for f in dim_names if 'cluster' in f.lower()), None)
+
+                # Extract coordinates
+                x_chunks.append(np.array(chunk.x))
+                y_chunks.append(np.array(chunk.y))
+                z_chunks.append(np.array(chunk.z))
+
+                # Extract M3C2 distance
+                if m3c2_field:
+                    m3c2_chunks.append(np.array(getattr(chunk, m3c2_field)))
+                else:
+                    m3c2_chunks.append(np.zeros(len(chunk)))
+
+                # Extract cluster ID
+                if cluster_field:
+                    cluster_chunks.append(np.array(getattr(chunk, cluster_field)))
+                else:
+                    cluster_chunks.append(np.zeros(len(chunk), dtype=int))
+
+                points_read += len(chunk)
+                if progress_bar:
+                    pct = min(5 + int(85 * points_read / total_points), 90)
+                    progress_bar.progress(pct, text=f"Read {points_read:,} / {total_points:,} points...")
+
+        if progress_bar:
+            progress_bar.progress(92, text="Concatenating arrays...")
+
+        result = {
+            'x': np.concatenate(x_chunks),
+            'y': np.concatenate(y_chunks),
+            'z': np.concatenate(z_chunks),
+            'm3c2_distance': np.concatenate(m3c2_chunks),
+            'cluster_id': np.concatenate(cluster_chunks),
+        }
+
+        if progress_bar:
+            progress_bar.progress(100, text=f"Loaded {len(result['x']):,} points")
+
+        return result
+
+    except Exception as e:
+        st.error(f"Error reading {las_path}: {e}")
+        return None
+
+
+def plot_dbscan_view(points: dict, event: pd.Series,
+                      polygon_ids: np.ndarray = None,
+                      alongshore_coords: np.ndarray = None,
+                      ax=None, buffer_m: float = 5) -> plt.Figure:
+    """
+    Plot DBSCAN clusters in 2D cliff-facing view (rotated alongshore vs elevation).
+
+    Uses polygon_ids to filter to event region, but plots actual rotated coordinates.
 
     Args:
-        points: Dict with 'x', 'y', 'z' and value field
-        value_field: 'm3c2_distance' or 'cluster_id'
-        title: Plot title
-        orientation_deg: Cliff orientation for rotation
-        cmap_name: Colormap name
-        vmax: Max value for colorbar (symmetric around 0 for M3C2)
-        ax: Matplotlib axis (optional)
-
-    Returns:
-        Figure object
+        points: dict with x, y, z, m3c2_distance arrays
+        event: pandas Series with event info
+        polygon_ids: Polygon_ID for each point (for filtering)
+        alongshore_coords: rotated alongshore coordinate for each point (for plotting)
+        buffer_m: buffer around event extent in meters
     """
     if ax is None:
-        fig, ax = plt.subplots(figsize=(10, 8))
+        fig, ax = plt.subplots(figsize=(14, 8))
     else:
         fig = ax.figure
 
-    # Rotate to cliff-planar view
-    alongshore, elevation = rotate_to_cliff_plane(
-        points['x'], points['y'], points['z'], orientation_deg
-    )
+    z = points['z']
+    m3c2 = points['m3c2_distance']
+    n_pts_total = len(z)
 
-    # Get values for coloring
-    values = points.get(value_field, np.zeros(len(alongshore)))
-
-    if value_field == 'm3c2_distance':
-        # Diverging colormap for M3C2 (negative=erosion, positive=deposition)
-        cmap = cm.get_cmap(cmap_name)
-        norm = Normalize(vmin=-vmax, vmax=vmax)
-        label = "M3C2 Distance (m)"
+    # Use rotated alongshore for plotting
+    if alongshore_coords is not None:
+        alongshore = alongshore_coords
     else:
-        # Categorical colormap for clusters
-        n_clusters = len(np.unique(values[values >= 0]))
-        cmap = cm.get_cmap('tab20', max(20, n_clusters))
-        norm = None
-        label = "Cluster ID"
+        # Fallback: use Y coordinate
+        alongshore = points['y'] - np.nanmean(points['y'])
+
+    # Filter to event extent using Polygon_IDs (which match event CSV)
+    if event is not None and polygon_ids is not None:
+        along_min_filter = event['alongshore_start_m'] - buffer_m
+        along_max_filter = event['alongshore_end_m'] + buffer_m
+        z_min = max(0, event['elevation'] - event['height'] / 2 - buffer_m)
+        z_max = event['elevation'] + event['height'] / 2 + buffer_m
+
+        # Filter using Polygon_ID (matches event CSV alongshore values)
+        valid_pid = ~np.isnan(polygon_ids)
+        in_region = valid_pid & \
+                    (polygon_ids >= along_min_filter) & \
+                    (polygon_ids <= along_max_filter) & \
+                    (z >= z_min) & (z <= z_max)
+
+        # Extract filtered points using rotated coords for plotting
+        alongshore_plot = alongshore[in_region]
+        z_plot = z[in_region]
+        m3c2_plot = m3c2[in_region]
+        n_pts = len(alongshore_plot)
+    else:
+        alongshore_plot = alongshore
+        z_plot = z
+        m3c2_plot = m3c2
+        n_pts = n_pts_total
+
+    if n_pts == 0:
+        ax.text(0.5, 0.5, "No points in event region",
+                ha='center', va='center', fontsize=14, transform=ax.transAxes)
+        ax.set_title("DBSCAN Clusters")
+        return fig
+
+    # Use M3C2 distance for coloring with diverging colormap
+    cmap = cm.get_cmap('RdBu_r')
+    norm = Normalize(vmin=-2.0, vmax=2.0)
 
     # Subsample if too many points
-    max_points = 50000
-    if len(alongshore) > max_points:
-        idx = np.random.choice(len(alongshore), max_points, replace=False)
-        alongshore = alongshore[idx]
-        elevation = elevation[idx]
-        values = values[idx]
+    max_points = 100000
+    if n_pts > max_points:
+        idx = np.random.choice(n_pts, max_points, replace=False)
+        alongshore_plot = alongshore_plot[idx]
+        z_plot = z_plot[idx]
+        m3c2_plot = m3c2_plot[idx]
 
+    # Larger points with black edge for visibility
     scatter = ax.scatter(
-        alongshore, elevation,
-        c=values, cmap=cmap, norm=norm,
-        s=1, alpha=0.7, rasterized=True
+        alongshore_plot, z_plot,
+        c=m3c2_plot, cmap=cmap, norm=norm,
+        s=25, alpha=0.9, edgecolors='black', linewidths=0.5, rasterized=True
     )
 
-    ax.set_xlabel("Alongshore (m, relative)", fontsize=11)
+    ax.set_xlabel("Alongshore (m, rotated)", fontsize=11)
     ax.set_ylabel("Elevation (m)", fontsize=11)
-    ax.set_title(title, fontsize=12, fontweight='bold')
+    ax.set_title(f"DBSCAN Clusters ({n_pts:,} of {n_pts_total:,} pts) - Cliff-Facing View",
+                 fontsize=12, fontweight='bold')
 
     cbar = plt.colorbar(scatter, ax=ax, shrink=0.8)
-    cbar.set_label(label, fontsize=10)
+    cbar.set_label("M3C2 Distance (m)", fontsize=10)
 
-    ax.set_aspect('equal', adjustable='box')
-    ax.invert_xaxis()  # Cliff-facing view
+    # Set view limits based on filtered points' bounding box (ensures all points visible)
+    if n_pts > 0:
+        # Get bounding box of filtered points
+        x_min, x_max = alongshore_plot.min(), alongshore_plot.max()
+        z_min_pts, z_max_pts = z_plot.min(), z_plot.max()
+
+        # Calculate range with small minimum to avoid divide-by-zero
+        x_range = max(x_max - x_min, 1)
+        z_range = max(z_max_pts - z_min_pts, 1)
+
+        # Add padding: 10% of range, minimum 1m
+        x_pad = max(x_range * 0.1, 1)
+        z_pad = max(z_range * 0.1, 1)
+
+        # Set limits with padding (X inverted for cliff-facing view)
+        ax.set_xlim(x_max + x_pad, x_min - x_pad)
+        ax.set_ylim(z_min_pts - z_pad, z_max_pts + z_pad)
+
+        # Draw crosshair at actual centroid of filtered points
+        centroid_along = np.median(alongshore_plot)
+        centroid_elev = np.median(z_plot)  # Use actual point median
+        event_elev = event['elevation'] if event is not None else centroid_elev
+
+        # Crosshair at actual point centroid
+        ax.axhline(centroid_elev, color='lime', linestyle='--',
+                   linewidth=1.5, alpha=0.7)
+        ax.axvline(centroid_along, color='lime', linestyle='--',
+                   linewidth=1.5, alpha=0.7)
+        ax.plot(centroid_along, centroid_elev, 'g+', markersize=15, markeredgewidth=2,
+                label=f"Points centroid: {centroid_elev:.1f}m")
+
+        # Also show event's recorded elevation if different
+        if event is not None and abs(event_elev - centroid_elev) > 0.5:
+            ax.axhline(event_elev, color='orange', linestyle=':',
+                       linewidth=1.5, alpha=0.7, label=f"Event CSV elev: {event_elev:.1f}m")
+
+        ax.legend(loc='upper right', fontsize=9)
+
+    return fig
+
+
+def plot_m3c2_view(points: dict, event: pd.Series,
+                    polygon_ids: np.ndarray = None,
+                    alongshore_coords: np.ndarray = None,
+                    view_extent: dict = None,
+                    ax=None, buffer_m: float = 5) -> plt.Figure:
+    """
+    Plot M3C2 point cloud in 2D cliff-facing view (rotated alongshore vs elevation).
+
+    Args:
+        points: dict with x, y, z, m3c2_distance arrays
+        event: pandas Series with event info
+        polygon_ids: Polygon_ID for each point (for filtering)
+        alongshore_coords: rotated alongshore coordinate for each point (for plotting)
+        view_extent: dict with x_min, x_max, z_min, z_max to match DBSCAN view
+        buffer_m: buffer around event extent in meters
+    """
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(14, 8))
+    else:
+        fig = ax.figure
+
+    z = points['z']
+    m3c2 = points['m3c2_distance']
+    n_pts_total = len(z)
+
+    # Use rotated alongshore for plotting
+    if alongshore_coords is not None:
+        alongshore = alongshore_coords
+    else:
+        # Fallback: use Y coordinate
+        alongshore = points['y'] - np.nanmean(points['y'])
+
+    # Filter to event extent using Polygon_IDs (which match event CSV)
+    if event is not None and polygon_ids is not None:
+        along_min_filter = event['alongshore_start_m'] - buffer_m
+        along_max_filter = event['alongshore_end_m'] + buffer_m
+        z_min = max(0, event['elevation'] - event['height'] / 2 - buffer_m)
+        z_max = event['elevation'] + event['height'] / 2 + buffer_m
+
+        # Filter using Polygon_ID (matches event CSV alongshore values)
+        valid_pid = ~np.isnan(polygon_ids)
+        in_region = valid_pid & \
+                    (polygon_ids >= along_min_filter) & \
+                    (polygon_ids <= along_max_filter) & \
+                    (z >= z_min) & (z <= z_max)
+
+        # Extract filtered points using rotated coords for plotting
+        alongshore_plot = alongshore[in_region]
+        z_plot = z[in_region]
+        m3c2_plot = m3c2[in_region]
+        n_pts = len(alongshore_plot)
+    else:
+        alongshore_plot = alongshore
+        z_plot = z
+        m3c2_plot = m3c2
+        n_pts = n_pts_total
+
+    if n_pts == 0:
+        ax.text(0.5, 0.5, "No M3C2 points in event region",
+                ha='center', va='center', fontsize=14, transform=ax.transAxes)
+        ax.set_title("M3C2 Point Cloud")
+        return fig
+
+    # Use M3C2 distance for coloring with diverging colormap
+    cmap = cm.get_cmap('RdBu_r')
+    norm = Normalize(vmin=-2.0, vmax=2.0)
+
+    # Subsample if too many points
+    max_points = 100000
+    if n_pts > max_points:
+        idx = np.random.choice(n_pts, max_points, replace=False)
+        alongshore_plot = alongshore_plot[idx]
+        z_plot = z_plot[idx]
+        m3c2_plot = m3c2_plot[idx]
+
+    # Smaller points for M3C2 (many more points) but still visible
+    scatter = ax.scatter(
+        alongshore_plot, z_plot,
+        c=m3c2_plot, cmap=cmap, norm=norm,
+        s=4, alpha=0.7, rasterized=True
+    )
+
+    ax.set_xlabel("Alongshore (m, rotated)", fontsize=11)
+    ax.set_ylabel("Elevation (m)", fontsize=11)
+    ax.set_title(f"M3C2 ({n_pts:,} of {n_pts_total:,} pts) - Cliff-Facing View",
+                 fontsize=12, fontweight='bold')
+
+    cbar = plt.colorbar(scatter, ax=ax, shrink=0.8)
+    cbar.set_label("M3C2 Distance (m)", fontsize=10)
+
+    # Use view_extent if provided (to match DBSCAN zoom), otherwise compute from points
+    if view_extent is not None:
+        ax.set_xlim(view_extent['x_max'], view_extent['x_min'])  # X inverted for cliff-facing
+        ax.set_ylim(view_extent['z_min'], view_extent['z_max'])
+    elif n_pts > 0:
+        # Compute from filtered points
+        x_min, x_max = alongshore_plot.min(), alongshore_plot.max()
+        z_min_pts, z_max_pts = z_plot.min(), z_plot.max()
+        x_range = max(x_max - x_min, 1)
+        z_range = max(z_max_pts - z_min_pts, 1)
+        x_pad = max(x_range * 0.1, 1)
+        z_pad = max(z_range * 0.1, 1)
+        ax.set_xlim(x_max + x_pad, x_min - x_pad)
+        ax.set_ylim(z_min_pts - z_pad, z_max_pts + z_pad)
+
+    # Draw crosshair at actual centroid of filtered points
+    if n_pts > 0:
+        centroid_along = np.median(alongshore_plot)
+        centroid_elev = np.median(z_plot)  # Use actual point median
+        event_elev = event['elevation'] if event is not None else centroid_elev
+
+        # Crosshair at actual point centroid
+        ax.axhline(centroid_elev, color='lime', linestyle='--',
+                   linewidth=1.5, alpha=0.7)
+        ax.axvline(centroid_along, color='lime', linestyle='--',
+                   linewidth=1.5, alpha=0.7)
+        ax.plot(centroid_along, centroid_elev, 'g+', markersize=15, markeredgewidth=2,
+                label=f"Points centroid: {centroid_elev:.1f}m")
+
+        # Also show event's recorded elevation if different
+        if event is not None and abs(event_elev - centroid_elev) > 0.5:
+            ax.axhline(event_elev, color='orange', linestyle=':',
+                       linewidth=1.5, alpha=0.7, label=f"Event CSV elev: {event_elev:.1f}m")
+
+        ax.legend(loc='upper right', fontsize=9)
 
     return fig
 
@@ -488,14 +733,24 @@ def init_session_state():
     defaults = {
         'events_df': None,
         'needs_check_indices': [],
-        'current_check_idx': 0,  # Index into needs_check_indices
+        'current_check_idx': 0,
         'qc_flags': {},
         'csv_path': None,
         'location': None,
         'event_type': 'erosion',
         'results_dir': BASE_RESULTS_DIR,
-        'm3c2_points': None,
         'dbscan_points': None,
+        'polygon_ids': None,
+        'alongshore_coords': None,
+        'cross_shore_coords': None,
+        'shapefile_data': None,
+        'shp_location': None,
+        'm3c2_points': None,
+        'm3c2_polygon_ids': None,
+        'm3c2_alongshore_coords': None,
+        'm3c2_cross_shore_coords': None,
+        'show_m3c2': False,
+        'dbscan_view_extent': None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -507,7 +762,7 @@ st.set_page_config(page_title="Manual Check Tool", layout="wide")
 init_session_state()
 
 st.title("Manual Check Tool")
-st.markdown("Re-check events flagged as 'needs_check' using M3C2 and DBSCAN point clouds")
+st.markdown("Re-check events flagged as 'needs_check' using DBSCAN point clouds")
 
 if not HAS_LASPY:
     st.error("laspy is required but not installed. Run: pip install laspy")
@@ -519,14 +774,13 @@ st.sidebar.header("Configuration")
 # File Selection
 st.sidebar.subheader("1. Load QC'd CSV")
 
-# Default to event_lists_qc directory
 base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 default_csv_dir = os.path.join(base_dir, "results", "event_lists_qc")
 
 csv_dir = st.sidebar.text_input(
     "CSV Directory",
     value=default_csv_dir,
-    help="Directory containing QC'd event CSVs with 'needs_check' flags"
+    help="Directory containing QC'd event CSVs"
 )
 
 if os.path.isdir(csv_dir):
@@ -544,6 +798,7 @@ if os.path.isdir(csv_dir):
                 st.session_state.csv_path = csv_path
                 st.session_state.location = infer_location_from_filename(csv_path)
                 st.session_state.event_type = infer_event_type_from_filename(csv_path)
+                st.session_state.dbscan_points = None
 
                 # Load existing flags
                 st.session_state.qc_flags = {
@@ -573,7 +828,7 @@ st.sidebar.subheader("2. Data Source")
 st.session_state.results_dir = st.sidebar.text_input(
     "Results Directory",
     value=st.session_state.results_dir,
-    help="Server results directory with M3C2 and DBSCAN outputs"
+    help="Server results directory with DBSCAN outputs"
 )
 
 # Navigation
@@ -585,11 +840,23 @@ if st.session_state.needs_check_indices:
     current = st.session_state.current_check_idx
 
     col1, col2, col3 = st.sidebar.columns([1, 2, 1])
+    def reset_point_data():
+        """Reset all point cloud data when changing events."""
+        st.session_state.dbscan_points = None
+        st.session_state.polygon_ids = None
+        st.session_state.alongshore_coords = None
+        st.session_state.cross_shore_coords = None
+        st.session_state.m3c2_points = None
+        st.session_state.m3c2_polygon_ids = None
+        st.session_state.m3c2_alongshore_coords = None
+        st.session_state.m3c2_cross_shore_coords = None
+        st.session_state.show_m3c2 = False
+        st.session_state.dbscan_view_extent = None
+
     with col1:
         if st.button("< Prev") and current > 0:
             st.session_state.current_check_idx -= 1
-            st.session_state.m3c2_points = None
-            st.session_state.dbscan_points = None
+            reset_point_data()
             st.rerun()
     with col2:
         new_idx = st.number_input(
@@ -601,14 +868,12 @@ if st.session_state.needs_check_indices:
         )
         if new_idx != current:
             st.session_state.current_check_idx = new_idx
-            st.session_state.m3c2_points = None
-            st.session_state.dbscan_points = None
+            reset_point_data()
             st.rerun()
     with col3:
         if st.button("Next >") and current < n_total - 1:
             st.session_state.current_check_idx += 1
-            st.session_state.m3c2_points = None
-            st.session_state.dbscan_points = None
+            reset_point_data()
             st.rerun()
 
     st.sidebar.markdown(f"**Checking {current + 1} / {n_total}**")
@@ -636,7 +901,7 @@ if st.session_state.needs_check_indices:
     # Event info
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.markdown(f"**Volume:** {event['volume']:.2f} m\u00b3")
+        st.markdown(f"**Volume:** {event['volume']:.2f} m³")
         st.markdown(f"**Elevation:** {event['elevation']:.1f} m")
     with col2:
         st.markdown(f"**Alongshore:** {event['alongshore_centroid_m']:.0f} m")
@@ -647,64 +912,218 @@ if st.session_state.needs_check_indices:
 
     st.markdown("---")
 
-    # Load point cloud data
-    if st.session_state.m3c2_points is None:
-        with st.spinner("Loading point clouds..."):
-            # Find M3C2 file
-            m3c2_path = find_m3c2_las_for_event(
-                event, location, st.session_state.results_dir
-            )
+    # Load shapefile for coordinate mapping (cached)
+    if 'shapefile_data' not in st.session_state or st.session_state.get('shp_location') != location:
+        shp_path = find_shapefile(location, "1m")
+        if shp_path:
+            shp_data = load_shapefile_data(shp_path)
+            st.session_state.shapefile_data = shp_data
+            st.session_state.shp_location = location
+        else:
+            st.session_state.shapefile_data = None
+            st.warning(f"Shapefile not found for {location}")
 
-            # Find DBSCAN file
-            dbscan_path = find_dbscan_las_for_event(
-                event, location, event_type, st.session_state.results_dir
-            )
+    shp_data = st.session_state.get('shapefile_data')
 
-            if m3c2_path:
-                st.session_state.m3c2_points = load_and_filter_las(m3c2_path, event)
+    # Debug: Show rotation diagnostics
+    if shp_data is not None:
+        with st.expander("Rotation Diagnostics", expanded=False):
+            gdf = shp_data['gdf']
+            angle_rad = shp_data['angle_rad']
+            ref_point = shp_data['ref_point']
+            angle_deg = np.degrees(angle_rad)
 
-            if dbscan_path:
-                st.session_state.dbscan_points = load_and_filter_las(dbscan_path, event)
+            # Get first and last polygon info
+            centroids = gdf.geometry.centroid
+            first_centroid = (centroids.iloc[0].x, centroids.iloc[0].y)
+            last_centroid = (centroids.iloc[-1].x, centroids.iloc[-1].y)
 
-    # Display point clouds
-    m3c2_pts = st.session_state.m3c2_points
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("**Shapefile Info:**")
+                st.markdown(f"- Polygons: {len(gdf)}")
+                st.markdown(f"- First centroid (UTM): ({first_centroid[0]:.1f}, {first_centroid[1]:.1f})")
+                st.markdown(f"- Last centroid (UTM): ({last_centroid[0]:.1f}, {last_centroid[1]:.1f})")
+            with col2:
+                st.markdown("**Rotation:**")
+                st.markdown(f"- Cliff angle: {angle_deg:.1f}° from East")
+                st.markdown(f"- Reference point: ({ref_point[0]:.1f}, {ref_point[1]:.1f})")
+
+            # Show event's polygon range and expected UTM bounds
+            along_min = event['alongshore_start_m']
+            along_max = event['alongshore_end_m']
+            event_polygons = gdf[(gdf['Polygon_ID'] >= along_min) & (gdf['Polygon_ID'] <= along_max)]
+
+            if len(event_polygons) > 0:
+                bounds = event_polygons.total_bounds
+                st.markdown(f"**Event Polygon Range:** {along_min:.0f} - {along_max:.0f}")
+                st.markdown(f"**Event UTM Bounds:** X=[{bounds[0]:.1f}, {bounds[2]:.1f}], Y=[{bounds[1]:.1f}, {bounds[3]:.1f}]")
+
+                # Compute what the rotated coords should be for event center
+                event_center_polygons = gdf[gdf['Polygon_ID'] == int(event['alongshore_centroid_m'])]
+                if len(event_center_polygons) > 0:
+                    center_geom = event_center_polygons.iloc[0].geometry.centroid
+                    rot_along, rot_cross = rotate_to_cliff_coords(
+                        center_geom.x, center_geom.y, angle_rad, ref_point
+                    )
+                    st.markdown(f"**Event center polygon centroid:**")
+                    st.markdown(f"- UTM: ({center_geom.x:.1f}, {center_geom.y:.1f})")
+                    st.markdown(f"- Rotated: alongshore={rot_along:.1f}m, cross-shore={rot_cross:.1f}m")
+
+    # Load DBSCAN files (both erosion and deposition for context)
+    if st.session_state.dbscan_points is None:
+        dbscan_paths = find_both_dbscan_files(
+            event, location, st.session_state.results_dir
+        )
+
+        # Load both erosion and deposition if available
+        all_points = {'x': [], 'y': [], 'z': [], 'm3c2_distance': [], 'cluster_id': []}
+        loaded_files = []
+
+        with st.spinner("Loading DBSCAN clusters..."):
+            for etype, path in dbscan_paths.items():
+                if path:
+                    pts = load_las_simple(path)
+                    if pts:
+                        for key in all_points:
+                            all_points[key].append(pts[key])
+                        loaded_files.append(f"{etype}: {len(pts['x']):,} pts")
+
+        if loaded_files:
+            # Combine all points
+            combined = {
+                key: np.concatenate(all_points[key]) if all_points[key] else np.array([])
+                for key in all_points
+            }
+            st.session_state.dbscan_points = combined
+            n_pts = len(combined['x'])
+            st.success(f"Loaded {n_pts:,} points ({', '.join(loaded_files)})")
+
+            if shp_data is not None:
+                with st.spinner("Computing cliff-facing coordinates..."):
+                    # Get Polygon_IDs for filtering to event region
+                    polygon_ids = assign_polygon_ids(
+                        st.session_state.dbscan_points, shp_data['gdf']
+                    )
+                    st.session_state.polygon_ids = polygon_ids
+
+                    # Rotate UTM to cliff-aligned coordinates for plotting
+                    alongshore, cross_shore = rotate_to_cliff_coords(
+                        st.session_state.dbscan_points['x'],
+                        st.session_state.dbscan_points['y'],
+                        shp_data['angle_rad'],
+                        shp_data['ref_point']
+                    )
+                    st.session_state.alongshore_coords = alongshore
+                    st.session_state.cross_shore_coords = cross_shore
+
+                valid_count = np.sum(~np.isnan(polygon_ids))
+                st.caption(f"Mapped {valid_count:,} of {n_pts:,} points")
+            else:
+                st.session_state.polygon_ids = None
+                st.session_state.alongshore_coords = None
+                st.session_state.cross_shore_coords = None
+        else:
+            st.warning("No DBSCAN cluster files found for this date range")
+
+    # Display DBSCAN plot
     dbscan_pts = st.session_state.dbscan_points
+    polygon_ids = st.session_state.get('polygon_ids')
+    alongshore_coords = st.session_state.get('alongshore_coords')
 
-    orientation = CLIFF_ORIENTATIONS.get(location, 345)
+    if dbscan_pts is not None:
+        fig = plot_dbscan_view(dbscan_pts, event, polygon_ids, alongshore_coords)
 
-    if m3c2_pts is not None or dbscan_pts is not None:
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
+        # Capture view extent from the DBSCAN plot for M3C2 to match
+        ax = fig.axes[0]
+        x_lim = ax.get_xlim()
+        y_lim = ax.get_ylim()
+        # Note: x_lim is inverted for cliff-facing view (x_lim[0] > x_lim[1])
+        st.session_state.dbscan_view_extent = {
+            'x_min': min(x_lim),
+            'x_max': max(x_lim),
+            'z_min': y_lim[0],
+            'z_max': y_lim[1],
+        }
 
-        # M3C2 distances
-        if m3c2_pts is not None:
-            plot_cliff_view(
-                m3c2_pts, 'm3c2_distance',
-                f"M3C2 Distances ({len(m3c2_pts['x']):,} pts)",
-                orientation, ax=ax1
-            )
-        else:
-            ax1.text(0.5, 0.5, "M3C2 data not found",
-                    ha='center', va='center', fontsize=14)
-            ax1.set_title("M3C2 Distances")
-
-        # DBSCAN clusters
-        if dbscan_pts is not None:
-            plot_cliff_view(
-                dbscan_pts, 'cluster_id',
-                f"DBSCAN Clusters ({len(dbscan_pts['x']):,} pts)",
-                orientation, ax=ax2
-            )
-        else:
-            ax2.text(0.5, 0.5, "DBSCAN data not found",
-                    ha='center', va='center', fontsize=14)
-            ax2.set_title("DBSCAN Clusters")
-
-        plt.tight_layout()
         st.pyplot(fig)
         plt.close(fig)
     else:
-        st.warning("Could not load point cloud data for this event")
-        st.info(f"Searched in: {st.session_state.results_dir}/{location}/")
+        st.warning("Could not load point cloud data")
+        st.info(f"Searched in: {st.session_state.results_dir}/{location}/{event_type}/")
+
+    # === M3C2 Section ===
+    st.markdown("---")
+
+    # Load M3C2 button
+    if st.button("Load M3C2 Point Cloud", type="secondary", use_container_width=False):
+        st.session_state.show_m3c2 = True
+        st.session_state.m3c2_points = None  # Force reload
+        st.rerun()
+
+    # Display M3C2 panel if toggled
+    if st.session_state.show_m3c2:
+        # Load M3C2 data if not already loaded
+        if st.session_state.m3c2_points is None:
+            m3c2_path = find_m3c2_las_for_event(event, location, st.session_state.results_dir)
+
+            if m3c2_path:
+                st.caption(f"Loading: {os.path.basename(m3c2_path)}")
+                progress_bar = st.progress(0, text="Initializing...")
+
+                m3c2_pts = load_las_with_progress(m3c2_path, progress_bar)
+
+                if m3c2_pts:
+                    st.session_state.m3c2_points = m3c2_pts
+                    n_pts = len(m3c2_pts['x'])
+
+                    # Compute rotated coordinates and polygon IDs for M3C2
+                    if shp_data is not None:
+                        # Use optimized spatial join - only joins points near event
+                        m3c2_polygon_ids = assign_polygon_ids_for_event(
+                            m3c2_pts, shp_data['gdf'], event,
+                            buffer_m=10.0, progress_bar=progress_bar
+                        )
+                        st.session_state.m3c2_polygon_ids = m3c2_polygon_ids
+
+                        # Rotate coordinates (vectorized, fast)
+                        m3c2_alongshore, m3c2_cross_shore = rotate_to_cliff_coords(
+                            m3c2_pts['x'],
+                            m3c2_pts['y'],
+                            shp_data['angle_rad'],
+                            shp_data['ref_point']
+                        )
+                        st.session_state.m3c2_alongshore_coords = m3c2_alongshore
+                        st.session_state.m3c2_cross_shore_coords = m3c2_cross_shore
+
+                        # Count how many points were mapped
+                        n_mapped = np.sum(~np.isnan(m3c2_polygon_ids))
+                        progress_bar.progress(100, text=f"Done - {n_mapped:,} points in event region")
+                        st.success(f"Loaded M3C2: {n_pts:,} total, {n_mapped:,} in event region")
+                    else:
+                        progress_bar.progress(100, text=f"Done - {n_pts:,} points loaded")
+                        st.success(f"Loaded M3C2: {n_pts:,} points")
+                else:
+                    st.error("Failed to load M3C2 file")
+            else:
+                st.warning("M3C2 file not found for this event")
+                st.caption(f"Searched in: {st.session_state.results_dir}/{location}/m3c2/pipeline_run_*/")
+
+        # Plot M3C2 if loaded
+        m3c2_pts = st.session_state.m3c2_points
+        m3c2_polygon_ids = st.session_state.get('m3c2_polygon_ids')
+        m3c2_alongshore = st.session_state.get('m3c2_alongshore_coords')
+        view_extent = st.session_state.get('dbscan_view_extent')
+
+        if m3c2_pts is not None:
+            st.markdown("**M3C2 Point Cloud (zoomed to DBSCAN extent)**")
+            fig_m3c2 = plot_m3c2_view(
+                m3c2_pts, event,
+                m3c2_polygon_ids, m3c2_alongshore,
+                view_extent=view_extent
+            )
+            st.pyplot(fig_m3c2)
+            plt.close(fig_m3c2)
 
     # Classification buttons
     st.markdown("---")
@@ -726,24 +1145,31 @@ if st.session_state.needs_check_indices:
                     st.session_state.qc_flags
                 )
 
-                # Move to next
+                # Move to next and reset all point data
                 if st.session_state.current_check_idx < len(st.session_state.needs_check_indices) - 1:
                     st.session_state.current_check_idx += 1
-                    st.session_state.m3c2_points = None
                     st.session_state.dbscan_points = None
+                    st.session_state.polygon_ids = None
+                    st.session_state.alongshore_coords = None
+                    st.session_state.cross_shore_coords = None
+                    st.session_state.m3c2_points = None
+                    st.session_state.m3c2_polygon_ids = None
+                    st.session_state.m3c2_alongshore_coords = None
+                    st.session_state.m3c2_cross_shore_coords = None
+                    st.session_state.show_m3c2 = False
+                    st.session_state.dbscan_view_extent = None
 
                 st.rerun()
 
 elif st.session_state.events_df is not None:
     st.success("No events marked as 'needs_check' in this file!")
-    st.info("All events have been classified.")
 else:
     st.info("Load a QC'd CSV file from the sidebar to begin.")
     st.markdown("""
     **Instructions:**
     1. Select a CSV file that has been through initial QC (must have `qc_flag` column)
     2. Only events marked as `needs_check` will be shown
-    3. View M3C2 distances and DBSCAN clusters side-by-side
+    3. View DBSCAN clusters colored by M3C2 distance
     4. Reclassify as: Real, Noise, Construction, Veg Error, Beach Error, or Other
     5. The CSV is updated in place after each classification
     """)
