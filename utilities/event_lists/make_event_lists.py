@@ -17,7 +17,7 @@ Output columns match the legacy format:
   - month: Calendar month
 
 Optional NPZ export:
-  --make-npz creates a 3D data cube (alongshore × elevation × time) from filled grids.
+  --make-npz additionally creates a 3D data cube (alongshore × elevation × time) from filled grids.
   Output: results/data_cubes/<location>_cube.npz with keys:
     - 'erosion': 3D array (alongshore, elevation, time) of M3C2 values
     - 'deposition': 3D array (alongshore, elevation, time) of M3C2 values
@@ -27,11 +27,11 @@ Optional NPZ export:
     - 'date_strings': 1D array of date strings (YYYYMMDD_to_YYYYMMDD)
 
 Usage:
-    python3 make_event_lists.py SanElijo
-    python3 make_event_lists.py --all
-    python3 make_event_lists.py SanElijo --erosion
-    python3 make_event_lists.py SanElijo --deposition
-    python3 make_event_lists.py SanElijo --make-npz
+    python3 make_event_lists.py SanElijo              # CSVs only
+    python3 make_event_lists.py --all                 # CSVs for all locations
+    python3 make_event_lists.py SanElijo --erosion    # Erosion CSVs only
+    python3 make_event_lists.py SanElijo --deposition # Deposition CSVs only
+    python3 make_event_lists.py --all --make-npz      # CSVs + NPZ cubes for all locations
 """
 import os
 import platform
@@ -663,70 +663,69 @@ def main():
         os.makedirs(deposition_dir, exist_ok=True)
         os.makedirs(combined_dir, exist_ok=True)
 
+    # Set up NPZ output directory (separate from CSV output)
+    npz_output_dir = os.path.join(os.path.dirname(output_dir), 'data_cubes')
+    if args.make_npz:
+        os.makedirs(npz_output_dir, exist_ok=True)
+
     print(f"\n{'='*60}")
     print(f"EVENT LIST GENERATION")
     print(f"Resolution: {RESOLUTION}")
     print(f"Output: {output_dir}")
-    # Set up NPZ output directory (separate from CSV output)
-    npz_output_dir = os.path.join(os.path.dirname(output_dir), 'data_cubes')
-
-    if not args.make_npz:
-        print(f"  - erosion/")
-        print(f"  - deposition/")
-        print(f"  - combined/")
-    else:
-        print(f"  Mode: NPZ cube generation")
-        print(f"  NPZ Output: {npz_output_dir}")
-        os.makedirs(npz_output_dir, exist_ok=True)
+    print(f"  - erosion/")
+    print(f"  - deposition/")
+    print(f"  - combined/")
+    if args.make_npz:
+        print(f"  + NPZ cubes: {npz_output_dir}")
     print(f"{'='*60}\n")
 
     for location in locations:
         print(f"\n--- {location} ---")
 
+        # Always generate event list CSVs
+        erosion_events, deposition_events = process_location(
+            location, base_dir,
+            process_erosion=process_erosion,
+            process_deposition=process_deposition
+        )
+
+        # Save erosion events
+        if erosion_events:
+            df_ero = pd.DataFrame(erosion_events).sort_values('mid_date')
+            ero_path = os.path.join(erosion_dir, f'{location}_events.csv')
+            df_ero.to_csv(ero_path, index=False)
+            print(f"  Erosion: {len(df_ero)} events -> {ero_path}")
+        else:
+            print(f"  Erosion: No events found")
+
+        # Save deposition events
+        if deposition_events:
+            df_dep = pd.DataFrame(deposition_events).sort_values('mid_date')
+            dep_path = os.path.join(deposition_dir, f'{location}_events.csv')
+            df_dep.to_csv(dep_path, index=False)
+            print(f"  Deposition: {len(df_dep)} events -> {dep_path}")
+        else:
+            print(f"  Deposition: No events found")
+
+        # Save combined events
+        all_events = erosion_events + deposition_events
+        if all_events:
+            df_all = pd.DataFrame(all_events).sort_values('mid_date')
+            combined_path = os.path.join(combined_dir, f'{location}_events.csv')
+            df_all.to_csv(combined_path, index=False)
+            print(f"  Combined: {len(df_all)} events -> {combined_path}")
+            print(f"    Date range: {df_all['start_date'].min()} to {df_all['end_date'].max()}")
+            print(f"    Volume range: {df_all['volume'].min():.2f} to {df_all['volume'].max():.2f} m³")
+        else:
+            print(f"  No events found for {location}")
+
+        # Additionally generate NPZ cubes if requested
         if args.make_npz:
-            # Build and save 3D data cubes
             save_data_cube_npz(
                 location, npz_output_dir, base_dir,
                 process_erosion=process_erosion,
                 process_deposition=process_deposition
             )
-        else:
-            # Generate event list CSVs
-            erosion_events, deposition_events = process_location(
-                location, base_dir,
-                process_erosion=process_erosion,
-                process_deposition=process_deposition
-            )
-
-            # Save erosion events
-            if erosion_events:
-                df_ero = pd.DataFrame(erosion_events).sort_values('mid_date')
-                ero_path = os.path.join(erosion_dir, f'{location}_events.csv')
-                df_ero.to_csv(ero_path, index=False)
-                print(f"  Erosion: {len(df_ero)} events -> {ero_path}")
-            else:
-                print(f"  Erosion: No events found")
-
-            # Save deposition events
-            if deposition_events:
-                df_dep = pd.DataFrame(deposition_events).sort_values('mid_date')
-                dep_path = os.path.join(deposition_dir, f'{location}_events.csv')
-                df_dep.to_csv(dep_path, index=False)
-                print(f"  Deposition: {len(df_dep)} events -> {dep_path}")
-            else:
-                print(f"  Deposition: No events found")
-
-            # Save combined events
-            all_events = erosion_events + deposition_events
-            if all_events:
-                df_all = pd.DataFrame(all_events).sort_values('mid_date')
-                combined_path = os.path.join(combined_dir, f'{location}_events.csv')
-                df_all.to_csv(combined_path, index=False)
-                print(f"  Combined: {len(df_all)} events -> {combined_path}")
-                print(f"    Date range: {df_all['start_date'].min()} to {df_all['end_date'].max()}")
-                print(f"    Volume range: {df_all['volume'].min():.2f} to {df_all['volume'].max():.2f} m³")
-            else:
-                print(f"  No events found for {location}")
 
     print(f"\n{'='*60}")
     print("Done!")
