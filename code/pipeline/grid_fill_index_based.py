@@ -968,10 +968,11 @@ def test_diffusion_fill(location: str, top_n: int = 10, start_idx: int = 0,
     output_dir = os.path.join(OUTPUT_DIR, 'diffusion_fill')
     os.makedirs(output_dir, exist_ok=True)
 
-    n_events = min(top_n, len(events_df))
-    print(f"  Processing top {n_events} events...\n")
+    end_idx = min(start_idx + top_n, len(events_df))
+    n_events = end_idx - start_idx
+    print(f"  Processing events {start_idx+1} to {end_idx}...\n")
 
-    for i in range(n_events):
+    for i in range(start_idx, end_idx):
         event = events_df.iloc[i]
         date_folder = event_dates_to_folder(event['start_date'], event['end_date'])
 
@@ -1614,7 +1615,9 @@ def main():
     parser.add_argument('--location', type=str, default='DelMar',
                         help='Location to process')
     parser.add_argument('--top', type=int, default=5,
-                        help='Number of top events to test')
+                        help='Number of events to test')
+    parser.add_argument('--start', type=int, default=0,
+                        help='Starting event index (0-based, after sorting by volume)')
     parser.add_argument('--test', action='store_true',
                         help='Run test mode with visualization')
     parser.add_argument('--test-boundary', action='store_true',
@@ -1638,6 +1641,7 @@ def main():
 
     if args.test_fill:
         test_diffusion_fill(args.location, args.top,
+                            start_idx=args.start,
                             dilation=args.dilation,
                             radius=4)
     elif args.test_radii:
