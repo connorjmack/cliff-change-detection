@@ -95,20 +95,23 @@ python3 code/pipeline/run_daily.py --force-all  # Force reprocessing
 
 ### Event List Generation
 ```bash
-# Generate event CSVs from 25cm filled grids
+# Step 1: Generate event CSVs from 25cm filled grids
 python3 utilities/event_lists/make_event_lists.py SanElijo
 python3 utilities/event_lists/make_event_lists.py --all
 
-# Generate 3D data cubes (alongshore × elevation × time)
+# Step 2: Generate 3D data cubes (separate command - flags are NOT additive)
 python3 utilities/event_lists/make_event_lists.py SanElijo --make-npz
+python3 utilities/event_lists/make_event_lists.py --all --make-npz
 
-# Filter for significant events (volume > 5 m³, elevation > 5 m)
+# Optional: Filter for significant events (volume > 5 m³, elevation > 5 m)
 python3 utilities/event_lists/make_sig_event_lists.py
 python3 utilities/event_lists/make_sig_event_lists.py --min_volume 10 --min_elevation 3
 
-# Generate filtered 3D data cubes
+# Optional: Generate filtered 3D data cubes
 python3 utilities/event_lists/make_sig_event_lists.py --make-npz
 ```
+**Note:** `--make-npz` is a separate mode that ONLY generates NPZ cubes, not CSVs. Run without `--make-npz` first to generate CSVs, then run with `--make-npz` to generate cubes.
+
 Output: CSVs in `results/event_lists/`, NPZ cubes in `results/data_cubes/`
 
 ## Location-Specific Configuration
