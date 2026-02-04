@@ -2,3 +2,13 @@
 *.npz
 *.csv
 *.png
+
+# Shapefiles and associated files
+*.shp
+*.shx
+*.dbf
+*.prj
+*.cpg
+*.sbn
+*.sbx
+*.shp.xml
