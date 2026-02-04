@@ -203,7 +203,7 @@ def process_location(location):
                     # Prepare CSV Row
                     new_row = {
                         "path": mac_path,
-                        "date": date_int, 
+                        "date": date_int,
                         "MOP1": mop1,
                         "MOP2": mop2,
                         "beach": location,

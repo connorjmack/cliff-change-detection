@@ -11,6 +11,8 @@ Output columns match the legacy format:
   - elevation: Volume-weighted elevation centroid (m)
   - alongshore_centroid_m: Alongshore position of centroid (m)
   - alongshore_start_m, alongshore_end_m: Alongshore extent
+  - mop_centroid: MOP coordinate of centroid (e.g., 567.005)
+  - mop_start, mop_end: MOP coordinate extent
   - width: Alongshore extent (m)
   - height: Vertical extent (m)
   - vol_unc: Volume uncertainty (m³)
@@ -101,6 +103,7 @@ def load_polygon_alongshore(shapefile_path):
 
     Returns:
         dict: Polygon_ID -> alongshore_position_m
+        dict: Polygon_ID -> MOP_ID (if available, else None)
         float: Alongshore cell width (spacing between adjacent polygons)
     """
     gdf = gpd.read_file(shapefile_path)
@@ -117,6 +120,18 @@ def load_polygon_alongshore(shapefile_path):
 
     alongshore = {pid: coord[1] - min_y for pid, coord in coords.items()}
 
+    # Load MOP_ID if available
+    mop_coords = {}
+    if 'MOP_ID' in gdf.columns:
+        for pid, mop_id in zip(gdf['Polygon_ID'], gdf['MOP_ID']):
+            try:
+                mop_coords[int(pid)] = float(mop_id)
+            except (ValueError, TypeError):
+                mop_coords[int(pid)] = np.nan
+    else:
+        # MOP_ID not available
+        mop_coords = {int(pid): np.nan for pid in gdf['Polygon_ID']}
+
     # Estimate cell width from polygon spacing
     sorted_positions = sorted(alongshore.values())
     if len(sorted_positions) > 1:
@@ -125,7 +140,7 @@ def load_polygon_alongshore(shapefile_path):
     else:
         cell_width = CELL_SIZE  # fallback
 
-    return alongshore, cell_width
+    return alongshore, mop_coords, cell_width
 
 
 def parse_elevation_from_header(header):
@@ -174,7 +189,7 @@ def load_stats_npz(filepath):
 # ============================================================================
 
 def extract_events_from_grids(grid_csv_path, cluster_csv_path, stats_npz_path,
-                               alongshore_positions, cell_width,
+                               alongshore_positions, mop_positions, cell_width,
                                date_str, event_type):
     """
     Extract individual cluster events from grid data.
@@ -184,6 +199,7 @@ def extract_events_from_grids(grid_csv_path, cluster_csv_path, stats_npz_path,
         cluster_csv_path: Path to *_clusters_25cm_filled.csv
         stats_npz_path: Path to *_stats_25cm.npz
         alongshore_positions: Dict mapping Polygon_ID -> alongshore_m
+        mop_positions: Dict mapping Polygon_ID -> MOP coordinate (float)
         cell_width: Alongshore width of each polygon cell (m)
         date_str: Survey pair date string (DATE1_to_DATE2)
         event_type: 'erosion' or 'deposition'
@@ -299,6 +315,30 @@ def extract_events_from_grids(grid_csv_path, cluster_csv_path, stats_npz_path,
 
         width = alongshore_end - alongshore_start
 
+        # MOP coordinates
+        mop_vals = [mop_positions.get(pid, np.nan) for pid in polygon_ids]
+        mop_vals_valid = [v for v in mop_vals if not np.isnan(v)]
+
+        if len(mop_vals_valid) > 0:
+            mop_start = min(mop_vals_valid)
+            mop_end = max(mop_vals_valid)
+
+            # MOP centroid (volume-weighted)
+            cell_mop = np.array([mop_positions.get(rows_g[r], np.nan)
+                                 for r in row_indices])
+            valid_mop_mask = ~np.isnan(cell_mop) & ~np.isnan(m3c2_values)
+            if np.sum(valid_mop_mask) > 0:
+                mop_centroid = np.average(
+                    cell_mop[valid_mop_mask],
+                    weights=np.abs(m3c2_values[valid_mop_mask])
+                )
+            else:
+                mop_centroid = (mop_start + mop_end) / 2
+        else:
+            mop_start = np.nan
+            mop_end = np.nan
+            mop_centroid = np.nan
+
         event = {
             'mid_date': mid_date,
             'start_date': start_date,
@@ -308,6 +348,9 @@ def extract_events_from_grids(grid_csv_path, cluster_csv_path, stats_npz_path,
             'alongshore_centroid_m': alongshore_centroid,
             'alongshore_start_m': alongshore_start,
             'alongshore_end_m': alongshore_end,
+            'mop_centroid': mop_centroid,
+            'mop_start': mop_start,
+            'mop_end': mop_end,
             'width': width,
             'height': height,
             'vol_unc': vol_unc,
@@ -349,7 +392,7 @@ def build_data_cube(location, base_dir, event_type='erosion'):
     # Load shapefile for alongshore positions
     try:
         shp_path = find_shapefile(util_dir, location, RESOLUTION)
-        alongshore_positions, _ = load_polygon_alongshore(shp_path)
+        alongshore_positions, _, _ = load_polygon_alongshore(shp_path)
     except FileNotFoundError as e:
         print(f"  [ERROR] {e}")
         return None, None, None, None, None
@@ -535,8 +578,10 @@ def process_location(location, base_dir, process_erosion=True, process_depositio
     # Load shapefile for alongshore positions
     try:
         shp_path = find_shapefile(util_dir, location, RESOLUTION)
-        alongshore_positions, cell_width = load_polygon_alongshore(shp_path)
-        print(f"  Loaded {len(alongshore_positions)} polygons, cell width: {cell_width:.2f}m")
+        alongshore_positions, mop_positions, cell_width = load_polygon_alongshore(shp_path)
+        has_mop = any(not np.isnan(v) for v in mop_positions.values())
+        mop_status = "with MOP_ID" if has_mop else "no MOP_ID"
+        print(f"  Loaded {len(alongshore_positions)} polygons, cell width: {cell_width:.2f}m ({mop_status})")
     except FileNotFoundError as e:
         print(f"  [ERROR] {e}")
         return [], []
@@ -573,7 +618,7 @@ def process_location(location, base_dir, process_erosion=True, process_depositio
                 if grid_file and cluster_file:
                     events = extract_events_from_grids(
                         grid_file, cluster_file, stats_file,
-                        alongshore_positions, cell_width,
+                        alongshore_positions, mop_positions, cell_width,
                         date_str, 'erosion'
                     )
                     erosion_events.extend(events)
@@ -606,7 +651,7 @@ def process_location(location, base_dir, process_erosion=True, process_depositio
                 if grid_file and cluster_file:
                     events = extract_events_from_grids(
                         grid_file, cluster_file, stats_file,
-                        alongshore_positions, cell_width,
+                        alongshore_positions, mop_positions, cell_width,
                         date_str, 'deposition'
                     )
                     deposition_events.extend(events)
