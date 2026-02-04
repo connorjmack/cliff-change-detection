@@ -171,6 +171,33 @@ def load_polygon_centroids(shapefile_path):
     return {int(pid): (c.x, c.y) for pid, c in zip(gdf['Polygon_ID'], centroids)}
 
 
+def compute_alongshore_positions(polygon_centroids):
+    """
+    Compute alongshore positions from polygon centroids.
+
+    Alongshore position is computed as UTM_Y - min(UTM_Y), giving
+    physical distance in meters from the southernmost polygon.
+
+    This ensures that distance calculations work correctly regardless
+    of whether Polygon_IDs are ordered by physical position.
+
+    Args:
+        polygon_centroids: Dict mapping Polygon_ID -> (UTM_X, UTM_Y)
+
+    Returns:
+        Dict mapping Polygon_ID -> alongshore_m (physical position in meters)
+    """
+    if not polygon_centroids:
+        return {}
+
+    # Get all Y coordinates
+    all_y = [coord[1] for coord in polygon_centroids.values()]
+    min_y = min(all_y)
+
+    # Compute alongshore position as Y - min_Y
+    return {pid: coord[1] - min_y for pid, coord in polygon_centroids.items()}
+
+
 def parse_elevation_from_header(header):
     """
     Extracts elevation value from header like 'M3C2_0.10m' -> 0.10
@@ -520,7 +547,8 @@ def iterative_diffusion_fill(grid, boundary_mask, max_iterations=1000):
 
 
 def fill_holes_diffusion(grid, clusters_grid, min_cluster_volume, cell_area,
-                         dilation=1, conv_radius=4):
+                         dilation=1, conv_radius=4,
+                         alongshore_positions=None, row_labels=None, col_elevations=None):
     """
     Fill holes in grid using index-based diffusion with smoothed boundaries.
 
@@ -530,7 +558,7 @@ def fill_holes_diffusion(grid, clusters_grid, min_cluster_volume, cell_area,
     3. Smooths the COMBINED boundary using circular convolution
     4. Fills ALL holes at once using iterative diffusion (neighbor averaging)
     5. Falls back to nearest-neighbor for disconnected cells
-    6. Assigns filled cells to nearest cluster
+    6. Assigns filled cells to nearest cluster using PHYSICAL coordinates
 
     Args:
         grid: M3C2 values grid
@@ -539,6 +567,9 @@ def fill_holes_diffusion(grid, clusters_grid, min_cluster_volume, cell_area,
         cell_area: Area of each grid cell (m²)
         dilation: Dilation iterations for base mask (default: 1)
         conv_radius: Radius for circular convolution smoothing (default: 4)
+        alongshore_positions: Dict mapping Polygon_ID -> alongshore_m (physical position)
+        row_labels: List of Polygon_ID strings for each grid row
+        col_elevations: Array of elevation values for each grid column
 
     Returns:
         filled_grid, filled_clusters, stats_dict
@@ -608,24 +639,76 @@ def fill_holes_diffusion(grid, clusters_grid, min_cluster_volume, cell_area,
     filled_grid = iterative_diffusion_fill(filled_grid, boundary_mask)
 
     # ========== STEP 5: Assign filled cells to nearest cluster ==========
+    # Uses PHYSICAL coordinates (alongshore_m, elevation) instead of grid indices
+    # to correctly handle cases where Polygon_IDs are not ordered by position
     has_data_after = (filled_grid != 0) & ~np.isnan(filled_grid)
     new_data_mask = boundary_mask & has_data_after & (filled_clusters == 0)
 
     if np.any(new_data_mask) and len(qualifying_clusters) > 0:
-        # Use distance transform to assign filled cells to nearest cluster
-        cluster_cells_mask = np.zeros_like(grid, dtype=bool)
-        for cid in qualifying_clusters:
-            cluster_cells_mask |= (clusters_grid == cid)
+        # Check if we have physical coordinate info
+        use_physical = (alongshore_positions is not None and
+                        row_labels is not None and
+                        col_elevations is not None)
 
-        # For cells with no cluster, find nearest cluster cell
-        _, nearest_indices = distance_transform_edt(~cluster_cells_mask, return_indices=True)
+        if use_physical:
+            # Build list of cluster cell positions in PHYSICAL coordinates
+            cluster_physical_coords = []
+            cluster_ids_list = []
 
-        new_rows, new_cols = np.where(new_data_mask)
-        for idx in range(len(new_rows)):
-            r, c = new_rows[idx], new_cols[idx]
-            nearest_r = nearest_indices[0, r, c]
-            nearest_c = nearest_indices[1, r, c]
-            filled_clusters[r, c] = clusters_grid[nearest_r, nearest_c]
+            for cid in qualifying_clusters:
+                cluster_mask = (clusters_grid == cid)
+                cluster_rows, cluster_cols = np.where(cluster_mask)
+
+                for r, c in zip(cluster_rows, cluster_cols):
+                    try:
+                        pid = int(row_labels[r])
+                        alongshore_m = alongshore_positions.get(pid, None)
+                        if alongshore_m is not None:
+                            elevation_m = col_elevations[c]
+                            cluster_physical_coords.append((alongshore_m, elevation_m))
+                            cluster_ids_list.append(cid)
+                    except (ValueError, IndexError):
+                        continue
+
+            if len(cluster_physical_coords) > 0:
+                # Build KD-tree in physical (alongshore, elevation) space
+                cluster_physical_coords = np.array(cluster_physical_coords)
+                tree = cKDTree(cluster_physical_coords)
+
+                # Get positions of cells to assign
+                new_rows, new_cols = np.where(new_data_mask)
+
+                for idx in range(len(new_rows)):
+                    r, c = new_rows[idx], new_cols[idx]
+                    try:
+                        pid = int(row_labels[r])
+                        alongshore_m = alongshore_positions.get(pid, None)
+                        if alongshore_m is not None:
+                            elevation_m = col_elevations[c]
+                            # Find nearest cluster cell in physical space
+                            _, nearest_idx = tree.query([alongshore_m, elevation_m])
+                            filled_clusters[r, c] = cluster_ids_list[nearest_idx]
+                    except (ValueError, IndexError):
+                        continue
+            else:
+                # Fallback to grid-index distance if no valid physical coords
+                use_physical = False
+
+        if not use_physical:
+            # Fallback: Use grid-index-based distance transform
+            # (for backwards compatibility or if physical coords unavailable)
+            cluster_cells_mask = np.zeros_like(grid, dtype=bool)
+            for cid in qualifying_clusters:
+                cluster_cells_mask |= (clusters_grid == cid)
+
+            _, nearest_indices = distance_transform_edt(~cluster_cells_mask, return_indices=True)
+
+            new_rows, new_cols = np.where(new_data_mask)
+            for idx in range(len(new_rows)):
+                r, c = new_rows[idx], new_cols[idx]
+                nearest_r = nearest_indices[0, r, c]
+                nearest_c = nearest_indices[1, r, c]
+                filled_clusters[r, c] = clusters_grid[nearest_r, nearest_c]
 
     # ========== STEP 6: Calculate statistics ==========
     holes_after = np.sum(boundary_mask & ~has_data_after)
@@ -941,13 +1024,24 @@ def worker(task):
 
     # ========== STEP 2: DIFFUSION HOLE FILLING (EROSION ONLY) ==========
     if not skip_filling and ftype == 'erosion':
+        # Compute alongshore positions from polygon centroids
+        # This ensures correct distance calculations regardless of Polygon_ID ordering
+        alongshore_positions = compute_alongshore_positions(polygon_centroids)
+
+        # Parse elevation values from column headers (e.g., 'M3C2_0.25m' -> 0.25)
+        col_elevations = np.array([parse_elevation_from_header(h) for h in header_g])
+
         # Use new index-based diffusion fill with smoothed boundaries
+        # Now uses PHYSICAL coordinates (alongshore_m, elevation) for cluster assignment
         filled_grid, filled_clusters, fill_stats = fill_holes_diffusion(
             cleaned_grid, cleaned_clusters,
             min_cluster_volume=min_volume,
             cell_area=res_params['cell_area'],
             dilation=1,
-            conv_radius=4
+            conv_radius=4,
+            alongshore_positions=alongshore_positions,
+            row_labels=rows_g,
+            col_elevations=col_elevations
         )
 
         # ========== STEP 3: MORPHOLOGICAL CLEANUP ==========

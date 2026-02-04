@@ -79,7 +79,9 @@ def find_shapefile(location: str, resolution: str = "1m") -> str:
 def load_shapefile_data(shp_path: str):
     """
     Load shapefile and compute cliff orientation for coordinate rotation.
-    Returns dict with: gdf, angle_rad, ref_point
+    Also computes alongshore position mapping (Polygon_ID -> meters).
+
+    Returns dict with: gdf, angle_rad, ref_point, alongshore_map, cell_width
     """
     if not HAS_GEOPANDAS or not shp_path:
         return None
@@ -87,7 +89,7 @@ def load_shapefile_data(shp_path: str):
     try:
         gdf = gpd.read_file(shp_path)
 
-        # Use 0-based index as Polygon_ID (matches event CSV alongshore values)
+        # Use 0-based index as Polygon_ID
         gdf = gdf.reset_index(drop=True)
         gdf["Polygon_ID"] = gdf.index
 
@@ -95,6 +97,23 @@ def load_shapefile_data(shp_path: str):
         centroids = gdf.geometry.centroid
         cx = centroids.x.values
         cy = centroids.y.values
+
+        # Compute alongshore position for each polygon (in meters from min Y)
+        # This matches how make_event_lists.py computes alongshore values
+        min_y = cy.min()
+        alongshore_m = cy - min_y  # Physical distance in meters
+        gdf['alongshore_m'] = alongshore_m
+
+        # Create mapping: Polygon_ID -> alongshore_m
+        alongshore_map = dict(zip(gdf['Polygon_ID'], alongshore_m))
+
+        # Estimate cell width from polygon spacing
+        sorted_positions = np.sort(alongshore_m)
+        if len(sorted_positions) > 1:
+            spacings = np.diff(sorted_positions)
+            cell_width = np.median(spacings)
+        else:
+            cell_width = 0.1  # fallback
 
         # Use first and last polygon centroids to define cliff direction
         # (direction of increasing Polygon_ID = alongshore direction)
@@ -113,6 +132,8 @@ def load_shapefile_data(shp_path: str):
             'gdf': gdf,
             'angle_rad': angle_rad,
             'ref_point': (ref_x, ref_y),
+            'alongshore_map': alongshore_map,
+            'cell_width': cell_width,
         }
 
     except Exception as e:
@@ -144,13 +165,24 @@ def rotate_to_cliff_coords(x, y, angle_rad, ref_point):
     return alongshore, cross_shore
 
 
-def assign_polygon_ids(points: dict, gdf) -> np.ndarray:
+def assign_polygon_ids(points: dict, gdf) -> tuple:
     """
-    Assign Polygon_ID (alongshore position) to each point via spatial join.
-    Returns array of Polygon_IDs (NaN for points outside polygons).
+    Assign Polygon_ID and alongshore_m to each point via spatial join.
+
+    Returns:
+        tuple: (polygon_ids, alongshore_m) arrays
+               - polygon_ids: integer index of polygon (NaN for points outside)
+               - alongshore_m: physical alongshore distance in meters (NaN for points outside)
     """
     if not HAS_GEOPANDAS or gdf is None:
-        return None
+        return None, None
+
+    # Ensure alongshore_m column exists
+    if 'alongshore_m' not in gdf.columns:
+        centroids = gdf.geometry.centroid
+        min_y = centroids.y.min()
+        gdf = gdf.copy()
+        gdf['alongshore_m'] = centroids.y - min_y
 
     # Create point geometries
     points_gdf = gpd.GeoDataFrame(
@@ -158,47 +190,63 @@ def assign_polygon_ids(points: dict, gdf) -> np.ndarray:
         crs=gdf.crs
     )
 
-    # Spatial join
-    joined = gpd.sjoin(points_gdf, gdf[['Polygon_ID', 'geometry']],
+    # Spatial join - include both Polygon_ID and alongshore_m
+    joined = gpd.sjoin(points_gdf, gdf[['Polygon_ID', 'alongshore_m', 'geometry']],
                        how='left', predicate='within')
 
-    return joined['Polygon_ID'].values
+    return joined['Polygon_ID'].values, joined['alongshore_m'].values
 
 
 def assign_polygon_ids_for_event(points: dict, gdf, event: pd.Series,
                                   buffer_m: float = 10.0,
-                                  progress_bar=None) -> np.ndarray:
+                                  progress_bar=None) -> tuple:
     """
     Optimized polygon ID assignment - only spatial joins points near the event.
 
-    1. Gets UTM bounding box from polygons in the event's alongshore range
+    1. Gets UTM bounding box from polygons in the event's alongshore range (meters)
     2. Pre-filters points using fast numpy comparisons
     3. Spatial joins only the filtered subset
-    4. Returns full array with NaN for points outside event region
+    4. Returns full arrays with NaN for points outside event region
 
     This is much faster than joining millions of points.
+
+    NOTE: Event CSV stores alongshore_start_m and alongshore_end_m as PHYSICAL
+    DISTANCES in meters (computed from UTM Y - min_Y), NOT Polygon_ID indices.
+    We must filter using gdf['alongshore_m'], not gdf['Polygon_ID'].
+
+    Returns:
+        tuple: (polygon_ids, alongshore_m) arrays
     """
     if not HAS_GEOPANDAS or gdf is None:
-        return None
+        return None, None
 
     n_pts = len(points['x'])
-    result = np.full(n_pts, np.nan)
+    result_pid = np.full(n_pts, np.nan)
+    result_along = np.full(n_pts, np.nan)
 
     if progress_bar:
         progress_bar.progress(96, text="Computing event bounding box...")
 
-    # Get event's alongshore range (Polygon_ID space)
+    # Get event's alongshore range (PHYSICAL METERS, not Polygon_ID!)
     along_min = event['alongshore_start_m'] - buffer_m
     along_max = event['alongshore_end_m'] + buffer_m
     z_min = max(0, event['elevation'] - event['height'] / 2 - buffer_m)
     z_max = event['elevation'] + event['height'] / 2 + buffer_m
 
-    # Get polygons in the event's alongshore range
-    event_polygons = gdf[(gdf['Polygon_ID'] >= along_min) &
-                         (gdf['Polygon_ID'] <= along_max)]
+    # Get polygons in the event's alongshore range using PHYSICAL distance
+    # The 'alongshore_m' column was computed as (UTM_Y - min_Y) in load_shapefile_data()
+    if 'alongshore_m' not in gdf.columns:
+        # Fallback: compute it now (shouldn't happen with updated load_shapefile_data)
+        centroids = gdf.geometry.centroid
+        min_y = centroids.y.min()
+        gdf = gdf.copy()
+        gdf['alongshore_m'] = centroids.y - min_y
+
+    event_polygons = gdf[(gdf['alongshore_m'] >= along_min) &
+                         (gdf['alongshore_m'] <= along_max)]
 
     if len(event_polygons) == 0:
-        return result
+        return result_pid, result_along
 
     # Get UTM bounding box from those polygons
     bounds = event_polygons.total_bounds  # [minx, miny, maxx, maxy]
@@ -223,7 +271,7 @@ def assign_polygon_ids_for_event(points: dict, gdf, event: pd.Series,
     n_bbox = len(bbox_indices)
 
     if n_bbox == 0:
-        return result
+        return result_pid, result_along
 
     if progress_bar:
         progress_bar.progress(98, text=f"Spatial join on {n_bbox:,} points (filtered from {n_pts:,})...")
@@ -235,20 +283,23 @@ def assign_polygon_ids_for_event(points: dict, gdf, event: pd.Series,
         crs=gdf.crs
     )
 
-    # Spatial join only on filtered subset
-    joined = gpd.sjoin(filtered_gdf, event_polygons[['Polygon_ID', 'geometry']],
+    # Spatial join only on filtered subset - include alongshore_m
+    joined = gpd.sjoin(filtered_gdf, event_polygons[['Polygon_ID', 'alongshore_m', 'geometry']],
                        how='left', predicate='within')
 
     if progress_bar:
-        progress_bar.progress(99, text="Mapping polygon IDs...")
+        progress_bar.progress(99, text="Mapping polygon IDs and alongshore...")
 
-    # Map results back to full array (vectorized)
+    # Map results back to full arrays (vectorized)
     valid_mask = joined['Polygon_ID'].notna()
     valid_indices = joined.loc[valid_mask, 'orig_idx'].values.astype(int)
     valid_pids = joined.loc[valid_mask, 'Polygon_ID'].values
-    result[valid_indices] = valid_pids
+    valid_along = joined.loc[valid_mask, 'alongshore_m'].values
 
-    return result
+    result_pid[valid_indices] = valid_pids
+    result_along[valid_indices] = valid_along
+
+    return result_pid, result_along
 
 
 def find_latest_pipeline_run(m3c2_base_dir: str) -> str:
@@ -462,18 +513,19 @@ def load_las_with_progress(las_path: str, progress_bar=None) -> dict:
 
 
 def plot_dbscan_view(points: dict, event: pd.Series,
-                      polygon_ids: np.ndarray = None,
+                      alongshore_m: np.ndarray = None,
                       alongshore_coords: np.ndarray = None,
                       ax=None, buffer_m: float = 5) -> plt.Figure:
     """
     Plot DBSCAN clusters in 2D cliff-facing view (rotated alongshore vs elevation).
 
-    Uses polygon_ids to filter to event region, but plots actual rotated coordinates.
+    Uses alongshore_m (physical distance) to filter to event region,
+    plots using rotated coordinates.
 
     Args:
         points: dict with x, y, z, m3c2_distance arrays
         event: pandas Series with event info
-        polygon_ids: Polygon_ID for each point (for filtering)
+        alongshore_m: physical alongshore distance in meters for each point (for filtering)
         alongshore_coords: rotated alongshore coordinate for each point (for plotting)
         buffer_m: buffer around event extent in meters
     """
@@ -493,18 +545,18 @@ def plot_dbscan_view(points: dict, event: pd.Series,
         # Fallback: use Y coordinate
         alongshore = points['y'] - np.nanmean(points['y'])
 
-    # Filter to event extent using Polygon_IDs (which match event CSV)
-    if event is not None and polygon_ids is not None:
+    # Filter to event extent using alongshore_m (physical meters from event CSV)
+    if event is not None and alongshore_m is not None:
         along_min_filter = event['alongshore_start_m'] - buffer_m
         along_max_filter = event['alongshore_end_m'] + buffer_m
         z_min = max(0, event['elevation'] - event['height'] / 2 - buffer_m)
         z_max = event['elevation'] + event['height'] / 2 + buffer_m
 
-        # Filter using Polygon_ID (matches event CSV alongshore values)
-        valid_pid = ~np.isnan(polygon_ids)
-        in_region = valid_pid & \
-                    (polygon_ids >= along_min_filter) & \
-                    (polygon_ids <= along_max_filter) & \
+        # Filter using physical alongshore distance (meters)
+        valid_along = ~np.isnan(alongshore_m)
+        in_region = valid_along & \
+                    (alongshore_m >= along_min_filter) & \
+                    (alongshore_m <= along_max_filter) & \
                     (z >= z_min) & (z <= z_max)
 
         # Extract filtered points using rotated coords for plotting
@@ -593,7 +645,7 @@ def plot_dbscan_view(points: dict, event: pd.Series,
 
 
 def plot_m3c2_view(points: dict, event: pd.Series,
-                    polygon_ids: np.ndarray = None,
+                    alongshore_m: np.ndarray = None,
                     alongshore_coords: np.ndarray = None,
                     view_extent: dict = None,
                     ax=None, buffer_m: float = 5) -> plt.Figure:
@@ -603,7 +655,7 @@ def plot_m3c2_view(points: dict, event: pd.Series,
     Args:
         points: dict with x, y, z, m3c2_distance arrays
         event: pandas Series with event info
-        polygon_ids: Polygon_ID for each point (for filtering)
+        alongshore_m: physical alongshore distance in meters for each point (for filtering)
         alongshore_coords: rotated alongshore coordinate for each point (for plotting)
         view_extent: dict with x_min, x_max, z_min, z_max to match DBSCAN view
         buffer_m: buffer around event extent in meters
@@ -624,18 +676,18 @@ def plot_m3c2_view(points: dict, event: pd.Series,
         # Fallback: use Y coordinate
         alongshore = points['y'] - np.nanmean(points['y'])
 
-    # Filter to event extent using Polygon_IDs (which match event CSV)
-    if event is not None and polygon_ids is not None:
+    # Filter to event extent using alongshore_m (physical meters from event CSV)
+    if event is not None and alongshore_m is not None:
         along_min_filter = event['alongshore_start_m'] - buffer_m
         along_max_filter = event['alongshore_end_m'] + buffer_m
         z_min = max(0, event['elevation'] - event['height'] / 2 - buffer_m)
         z_max = event['elevation'] + event['height'] / 2 + buffer_m
 
-        # Filter using Polygon_ID (matches event CSV alongshore values)
-        valid_pid = ~np.isnan(polygon_ids)
-        in_region = valid_pid & \
-                    (polygon_ids >= along_min_filter) & \
-                    (polygon_ids <= along_max_filter) & \
+        # Filter using physical alongshore distance (meters)
+        valid_along = ~np.isnan(alongshore_m)
+        in_region = valid_along & \
+                    (alongshore_m >= along_min_filter) & \
+                    (alongshore_m <= along_max_filter) & \
                     (z >= z_min) & (z <= z_max)
 
         # Extract filtered points using rotated coords for plotting
@@ -741,12 +793,14 @@ def init_session_state():
         'results_dir': BASE_RESULTS_DIR,
         'dbscan_points': None,
         'polygon_ids': None,
+        'alongshore_m': None,  # Physical alongshore distance in meters (for filtering)
         'alongshore_coords': None,
         'cross_shore_coords': None,
         'shapefile_data': None,
         'shp_location': None,
         'm3c2_points': None,
         'm3c2_polygon_ids': None,
+        'm3c2_alongshore_m': None,  # Physical alongshore distance in meters (for filtering)
         'm3c2_alongshore_coords': None,
         'm3c2_cross_shore_coords': None,
         'show_m3c2': False,
@@ -844,10 +898,12 @@ if st.session_state.needs_check_indices:
         """Reset all point cloud data when changing events."""
         st.session_state.dbscan_points = None
         st.session_state.polygon_ids = None
+        st.session_state.alongshore_m = None
         st.session_state.alongshore_coords = None
         st.session_state.cross_shore_coords = None
         st.session_state.m3c2_points = None
         st.session_state.m3c2_polygon_ids = None
+        st.session_state.m3c2_alongshore_m = None
         st.session_state.m3c2_alongshore_coords = None
         st.session_state.m3c2_cross_shore_coords = None
         st.session_state.show_m3c2 = False
@@ -949,26 +1005,35 @@ if st.session_state.needs_check_indices:
                 st.markdown(f"- Cliff angle: {angle_deg:.1f}° from East")
                 st.markdown(f"- Reference point: ({ref_point[0]:.1f}, {ref_point[1]:.1f})")
 
-            # Show event's polygon range and expected UTM bounds
+            # Show event's alongshore range (PHYSICAL METERS, not Polygon_ID!)
             along_min = event['alongshore_start_m']
             along_max = event['alongshore_end_m']
-            event_polygons = gdf[(gdf['Polygon_ID'] >= along_min) & (gdf['Polygon_ID'] <= along_max)]
+
+            # Use alongshore_m for filtering (physical distance), NOT Polygon_ID
+            event_polygons = gdf[(gdf['alongshore_m'] >= along_min) & (gdf['alongshore_m'] <= along_max)]
+
+            st.markdown(f"**Event Alongshore Range:** {along_min:.1f}m - {along_max:.1f}m (physical distance)")
+            st.markdown(f"**Matching Polygons:** {len(event_polygons)} polygons")
 
             if len(event_polygons) > 0:
                 bounds = event_polygons.total_bounds
-                st.markdown(f"**Event Polygon Range:** {along_min:.0f} - {along_max:.0f}")
-                st.markdown(f"**Event UTM Bounds:** X=[{bounds[0]:.1f}, {bounds[2]:.1f}], Y=[{bounds[1]:.1f}, {bounds[3]:.1f}]")
+                pid_min = event_polygons['Polygon_ID'].min()
+                pid_max = event_polygons['Polygon_ID'].max()
+                st.markdown(f"**Polygon_ID Range:** {pid_min} - {pid_max} (0-based indices)")
+                st.markdown(f"**UTM Bounds:** X=[{bounds[0]:.1f}, {bounds[2]:.1f}], Y=[{bounds[1]:.1f}, {bounds[3]:.1f}]")
 
-                # Compute what the rotated coords should be for event center
-                event_center_polygons = gdf[gdf['Polygon_ID'] == int(event['alongshore_centroid_m'])]
-                if len(event_center_polygons) > 0:
-                    center_geom = event_center_polygons.iloc[0].geometry.centroid
-                    rot_along, rot_cross = rotate_to_cliff_coords(
-                        center_geom.x, center_geom.y, angle_rad, ref_point
-                    )
-                    st.markdown(f"**Event center polygon centroid:**")
-                    st.markdown(f"- UTM: ({center_geom.x:.1f}, {center_geom.y:.1f})")
-                    st.markdown(f"- Rotated: alongshore={rot_along:.1f}m, cross-shore={rot_cross:.1f}m")
+                # Find polygon closest to event center
+                center_along = event['alongshore_centroid_m']
+                closest_idx = (gdf['alongshore_m'] - center_along).abs().idxmin()
+                center_polygon = gdf.loc[closest_idx]
+                center_geom = center_polygon.geometry.centroid
+                rot_along, rot_cross = rotate_to_cliff_coords(
+                    center_geom.x, center_geom.y, angle_rad, ref_point
+                )
+                st.markdown(f"**Event center (alongshore={center_along:.1f}m):**")
+                st.markdown(f"- Closest Polygon_ID: {center_polygon['Polygon_ID']}")
+                st.markdown(f"- UTM: ({center_geom.x:.1f}, {center_geom.y:.1f})")
+                st.markdown(f"- Rotated: alongshore={rot_along:.1f}m, cross-shore={rot_cross:.1f}m")
 
     # Load DBSCAN files (both erosion and deposition for context)
     if st.session_state.dbscan_points is None:
@@ -1001,11 +1066,12 @@ if st.session_state.needs_check_indices:
 
             if shp_data is not None:
                 with st.spinner("Computing cliff-facing coordinates..."):
-                    # Get Polygon_IDs for filtering to event region
-                    polygon_ids = assign_polygon_ids(
+                    # Get Polygon_IDs and alongshore_m (physical meters) for filtering
+                    polygon_ids, alongshore_m = assign_polygon_ids(
                         st.session_state.dbscan_points, shp_data['gdf']
                     )
                     st.session_state.polygon_ids = polygon_ids
+                    st.session_state.alongshore_m = alongshore_m
 
                     # Rotate UTM to cliff-aligned coordinates for plotting
                     alongshore, cross_shore = rotate_to_cliff_coords(
@@ -1028,11 +1094,11 @@ if st.session_state.needs_check_indices:
 
     # Display DBSCAN plot
     dbscan_pts = st.session_state.dbscan_points
-    polygon_ids = st.session_state.get('polygon_ids')
-    alongshore_coords = st.session_state.get('alongshore_coords')
+    alongshore_m = st.session_state.get('alongshore_m')  # Physical meters for filtering
+    alongshore_coords = st.session_state.get('alongshore_coords')  # Rotated coords for plotting
 
     if dbscan_pts is not None:
-        fig = plot_dbscan_view(dbscan_pts, event, polygon_ids, alongshore_coords)
+        fig = plot_dbscan_view(dbscan_pts, event, alongshore_m, alongshore_coords)
 
         # Capture view extent from the DBSCAN plot for M3C2 to match
         ax = fig.axes[0]
@@ -1080,24 +1146,26 @@ if st.session_state.needs_check_indices:
                     # Compute rotated coordinates and polygon IDs for M3C2
                     if shp_data is not None:
                         # Use optimized spatial join - only joins points near event
-                        m3c2_polygon_ids = assign_polygon_ids_for_event(
+                        # Returns both polygon_ids and alongshore_m (physical meters)
+                        m3c2_polygon_ids, m3c2_alongshore_m = assign_polygon_ids_for_event(
                             m3c2_pts, shp_data['gdf'], event,
                             buffer_m=10.0, progress_bar=progress_bar
                         )
                         st.session_state.m3c2_polygon_ids = m3c2_polygon_ids
+                        st.session_state.m3c2_alongshore_m = m3c2_alongshore_m
 
-                        # Rotate coordinates (vectorized, fast)
-                        m3c2_alongshore, m3c2_cross_shore = rotate_to_cliff_coords(
+                        # Rotate coordinates (vectorized, fast) for plotting
+                        m3c2_alongshore_coords, m3c2_cross_shore = rotate_to_cliff_coords(
                             m3c2_pts['x'],
                             m3c2_pts['y'],
                             shp_data['angle_rad'],
                             shp_data['ref_point']
                         )
-                        st.session_state.m3c2_alongshore_coords = m3c2_alongshore
+                        st.session_state.m3c2_alongshore_coords = m3c2_alongshore_coords
                         st.session_state.m3c2_cross_shore_coords = m3c2_cross_shore
 
                         # Count how many points were mapped
-                        n_mapped = np.sum(~np.isnan(m3c2_polygon_ids))
+                        n_mapped = np.sum(~np.isnan(m3c2_alongshore_m))
                         progress_bar.progress(100, text=f"Done - {n_mapped:,} points in event region")
                         st.success(f"Loaded M3C2: {n_pts:,} total, {n_mapped:,} in event region")
                     else:
@@ -1111,15 +1179,15 @@ if st.session_state.needs_check_indices:
 
         # Plot M3C2 if loaded
         m3c2_pts = st.session_state.m3c2_points
-        m3c2_polygon_ids = st.session_state.get('m3c2_polygon_ids')
-        m3c2_alongshore = st.session_state.get('m3c2_alongshore_coords')
+        m3c2_alongshore_m = st.session_state.get('m3c2_alongshore_m')  # Physical meters for filtering
+        m3c2_alongshore_coords = st.session_state.get('m3c2_alongshore_coords')  # Rotated for plotting
         view_extent = st.session_state.get('dbscan_view_extent')
 
         if m3c2_pts is not None:
             st.markdown("**M3C2 Point Cloud (zoomed to DBSCAN extent)**")
             fig_m3c2 = plot_m3c2_view(
                 m3c2_pts, event,
-                m3c2_polygon_ids, m3c2_alongshore,
+                m3c2_alongshore_m, m3c2_alongshore_coords,
                 view_extent=view_extent
             )
             st.pyplot(fig_m3c2)
@@ -1150,10 +1218,12 @@ if st.session_state.needs_check_indices:
                     st.session_state.current_check_idx += 1
                     st.session_state.dbscan_points = None
                     st.session_state.polygon_ids = None
+                    st.session_state.alongshore_m = None
                     st.session_state.alongshore_coords = None
                     st.session_state.cross_shore_coords = None
                     st.session_state.m3c2_points = None
                     st.session_state.m3c2_polygon_ids = None
+                    st.session_state.m3c2_alongshore_m = None
                     st.session_state.m3c2_alongshore_coords = None
                     st.session_state.m3c2_cross_shore_coords = None
                     st.session_state.show_m3c2 = False
