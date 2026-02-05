@@ -135,8 +135,15 @@ def plot_event_heatmap(erosion_df: pd.DataFrame, deposition_df: pd.DataFrame,
     alongshore_zoom = alongshore_m[x_idx_min:x_idx_max]
     elevation_zoom = elevation_m[y_idx_min:y_idx_max]
 
-    # Determine color scale (symmetric around 0, capped at 2.5m)
-    cmap, norm = get_diverging_cmap(vmax=2.5)
+    # Determine color scale dynamically from the event data (15th-85th percentile)
+    nonzero = matrix_zoom[matrix_zoom != 0]
+    if nonzero.size > 0:
+        p15 = np.percentile(np.abs(nonzero), 15)
+        p85 = np.percentile(np.abs(nonzero), 85)
+        vmax = max(p85, 0.1)  # Floor to avoid degenerate colorbar
+    else:
+        vmax = 2.5  # Fallback when no data
+    cmap, norm = get_diverging_cmap(vmax=vmax)
 
     # Create figure
     fig, ax = plt.subplots(figsize=(12, 6))
