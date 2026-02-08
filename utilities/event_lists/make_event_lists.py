@@ -500,9 +500,42 @@ def build_data_cube(location, base_dir, event_type='erosion'):
     return cube, alongshore_m, elevation_m, mid_dates, valid_dates
 
 
+def _align_cube_to_dates(cube, source_dates, target_dates):
+    """
+    Re-index a 3D cube's time axis to align with a target date list.
+
+    Dates present in target but missing from source get NaN slices.
+
+    Args:
+        cube: 3D numpy array (alongshore, elevation, time)
+        source_dates: List of date strings matching cube's current time axis
+        target_dates: List of date strings for the desired time axis
+
+    Returns:
+        New 3D numpy array aligned to target_dates
+    """
+    if cube is None:
+        return None
+
+    n_along, n_elev, _ = cube.shape
+    n_time = len(target_dates)
+    aligned = np.full((n_along, n_elev, n_time), np.nan, dtype=np.float32)
+
+    source_to_idx = {d: i for i, d in enumerate(source_dates)}
+    for t_new, date_str in enumerate(target_dates):
+        if date_str in source_to_idx:
+            aligned[:, :, t_new] = cube[:, :, source_to_idx[date_str]]
+
+    return aligned
+
+
 def save_data_cube_npz(location, output_dir, base_dir, process_erosion=True, process_deposition=True):
     """
     Build and save 3D data cubes to NPZ file.
+
+    Both erosion and deposition cubes are aligned to a unified time axis
+    (the sorted union of their date folders) so that a single date_strings
+    index can safely address both cubes.
 
     Args:
         location: Location name
@@ -516,42 +549,83 @@ def save_data_cube_npz(location, output_dir, base_dir, process_erosion=True, pro
     """
     print(f"  Building data cubes for {location}...")
 
-    data = {}
+    # Build both cubes independently
+    ero_cube = ero_along = ero_elev = ero_dates = ero_date_strs = None
+    dep_cube = dep_along = dep_elev = dep_dates = dep_date_strs = None
 
     if process_erosion:
         result = build_data_cube(location, base_dir, 'erosion')
         if result[0] is not None:
-            cube, alongshore, elevation, dates, date_strs = result
-            data['erosion'] = cube
-            data['alongshore_m'] = alongshore
-            data['elevation_m'] = elevation
-            data['dates'] = np.array([d.toordinal() if d else 0 for d in dates])
-            data['date_strings'] = np.array(date_strs, dtype=object)
-            print(f"    Erosion cube: {cube.shape} (alongshore, elevation, time)")
-            print(f"      Non-NaN values: {np.sum(~np.isnan(cube)):,}")
+            ero_cube, ero_along, ero_elev, ero_dates, ero_date_strs = result
+            print(f"    Erosion cube: {ero_cube.shape} (alongshore, elevation, time)")
+            print(f"      Non-NaN values: {np.sum(~np.isnan(ero_cube)):,}")
 
     if process_deposition:
         result = build_data_cube(location, base_dir, 'deposition')
         if result[0] is not None:
-            cube, alongshore, elevation, dates, date_strs = result
-            data['deposition'] = cube
-            # Only set axes if not already set from erosion
-            if 'alongshore_m' not in data:
-                data['alongshore_m'] = alongshore
-                data['elevation_m'] = elevation
-                data['dates'] = np.array([d.toordinal() if d else 0 for d in dates])
-                data['date_strings'] = np.array(date_strs, dtype=object)
-            print(f"    Deposition cube: {cube.shape} (alongshore, elevation, time)")
-            print(f"      Non-NaN values: {np.sum(~np.isnan(cube)):,}")
+            dep_cube, dep_along, dep_elev, dep_dates, dep_date_strs = result
+            print(f"    Deposition cube: {dep_cube.shape} (alongshore, elevation, time)")
+            print(f"      Non-NaN values: {np.sum(~np.isnan(dep_cube)):,}")
 
-    if not data:
+    if ero_cube is None and dep_cube is None:
         print(f"  [WARNING] No data cubes built for {location}")
         return None
+
+    # Build unified time axis from the sorted union of both date lists
+    if ero_date_strs and dep_date_strs:
+        unified_dates = sorted(set(ero_date_strs) | set(dep_date_strs))
+        if len(unified_dates) != len(ero_date_strs) or len(unified_dates) != len(dep_date_strs):
+            n_ero_only = len(set(ero_date_strs) - set(dep_date_strs))
+            n_dep_only = len(set(dep_date_strs) - set(ero_date_strs))
+            print(f"    [INFO] Date mismatch: erosion={len(ero_date_strs)}, "
+                  f"deposition={len(dep_date_strs)}, unified={len(unified_dates)} "
+                  f"({n_ero_only} erosion-only, {n_dep_only} deposition-only)")
+    elif ero_date_strs:
+        unified_dates = list(ero_date_strs)
+    else:
+        unified_dates = list(dep_date_strs)
+
+    # Align both cubes to the unified time axis
+    if ero_cube is not None:
+        ero_cube = _align_cube_to_dates(ero_cube, ero_date_strs, unified_dates)
+    if dep_cube is not None:
+        dep_cube = _align_cube_to_dates(dep_cube, dep_date_strs, unified_dates)
+
+    # Compute mid-dates for the unified date list
+    mid_dates_ordinal = []
+    for date_str in unified_dates:
+        parts = date_str.split('_to_')
+        if len(parts) == 2:
+            try:
+                start = datetime.strptime(parts[0], '%Y%m%d').date()
+                end = datetime.strptime(parts[1], '%Y%m%d').date()
+                mid = start + (end - start) / 2
+                mid_dates_ordinal.append(mid.toordinal())
+            except ValueError:
+                mid_dates_ordinal.append(0)
+        else:
+            mid_dates_ordinal.append(0)
+
+    # Use spatial axes from whichever cube is available (prefer erosion)
+    alongshore = ero_along if ero_along is not None else dep_along
+    elevation = ero_elev if ero_elev is not None else dep_elev
+
+    # Assemble output
+    data = {
+        'alongshore_m': alongshore,
+        'elevation_m': elevation,
+        'dates': np.array(mid_dates_ordinal),
+        'date_strings': np.array(unified_dates, dtype=object),
+    }
+    if ero_cube is not None:
+        data['erosion'] = ero_cube
+    if dep_cube is not None:
+        data['deposition'] = dep_cube
 
     # Save to NPZ
     npz_path = os.path.join(output_dir, f'{location}_cube.npz')
     np.savez_compressed(npz_path, **data)
-    print(f"  Saved: {npz_path}")
+    print(f"  Saved: {npz_path} (unified time steps: {len(unified_dates)})")
 
     return npz_path
 

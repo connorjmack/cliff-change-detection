@@ -16,7 +16,10 @@
       "Bash(md5:*)",
       "Bash(# Check for Torrey grid files on the LiDAR volume ls -la /Volumes/group/LiDAR/LidarProcessing/LidarProcessingCliffs/results/Torrey/erosion/)",
       "Bash(# Check if the 2025 date folder exists and look at its contents ls -la \"\"/Volumes/group/LiDAR/LidarProcessing/LidarProcessingCliffs/results/Torrey/erosion/20250505_to_20250514/25cm/\"\")",
-      "Bash(# Find the Torrey shapefile ls -la /Volumes/group/LiDAR/LidarProcessing/LidarProcessingCliffs/utilities/shape_files/*Torrey*)"
+      "Bash(# Find the Torrey shapefile ls -la /Volumes/group/LiDAR/LidarProcessing/LidarProcessingCliffs/utilities/shape_files/*Torrey*)",
+      "Bash(git log:*)",
+      "Bash(find:*)",
+      "Bash(done)"
     ]
   }
 }
