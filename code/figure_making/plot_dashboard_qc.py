@@ -69,9 +69,9 @@ MATCH_TOL = 0.02
 
 def get_base_dir():
     if platform.system() == 'Darwin':
-        return "/Volumes/group/LiDAR/LidarProcessing/LidarProcessingCliffs"
+        return "/Volumes/group/LiDAR/LidarProcessing/LidarProcessingCliffs/github/cliff-change-detection"
     else:
-        return "/project/group/LiDAR/LidarProcessing/LidarProcessingCliffs"
+        return "/project/group/LiDAR/LidarProcessing/LidarProcessingCliffs/github/cliff-change-detection"
 
 def get_output_dir(base_dir):
     return os.path.join(base_dir, "figures", "dashboards")
