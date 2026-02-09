@@ -184,8 +184,9 @@ def assign_polygon_ids(points: dict, gdf) -> tuple:
         gdf = gdf.copy()
         gdf['alongshore_m'] = centroids.y - min_y
 
-    # Create point geometries
+    # Create point geometries with explicit index
     points_gdf = gpd.GeoDataFrame(
+        {'point_idx': np.arange(len(points['x']))},
         geometry=gpd.points_from_xy(points['x'], points['y']),
         crs=gdf.crs
     )
@@ -194,7 +195,18 @@ def assign_polygon_ids(points: dict, gdf) -> tuple:
     joined = gpd.sjoin(points_gdf, gdf[['Polygon_ID', 'alongshore_m', 'geometry']],
                        how='left', predicate='within')
 
-    return joined['Polygon_ID'].values, joined['alongshore_m'].values
+    # Remove duplicates caused by overlapping polygons (keep first match only)
+    joined = joined[~joined.index.duplicated(keep='first')]
+
+    # Ensure output arrays match input length
+    n_pts = len(points['x'])
+    result_pids = np.full(n_pts, np.nan)
+    result_along = np.full(n_pts, np.nan)
+
+    result_pids[joined.index] = joined['Polygon_ID'].values
+    result_along[joined.index] = joined['alongshore_m'].values
+
+    return result_pids, result_along
 
 
 def assign_polygon_ids_for_event(points: dict, gdf, event: pd.Series,
