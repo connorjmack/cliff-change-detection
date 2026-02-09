@@ -68,10 +68,18 @@ MATCH_TOL = 0.02
 # ==============================================================================
 
 def get_base_dir():
+    """Base directory for QC event CSVs (in github repo)."""
     if platform.system() == 'Darwin':
         return "/Volumes/group/LiDAR/LidarProcessing/LidarProcessingCliffs/github/cliff-change-detection"
     else:
         return "/project/group/LiDAR/LidarProcessing/LidarProcessingCliffs/github/cliff-change-detection"
+
+def get_results_dir():
+    """Base directory for grid data (on mounted drive, not in github repo)."""
+    if platform.system() == 'Darwin':
+        return "/Volumes/group/LiDAR/LidarProcessing/LidarProcessingCliffs"
+    else:
+        return "/project/group/LiDAR/LidarProcessing/LidarProcessingCliffs"
 
 def get_output_dir(base_dir):
     return os.path.join(base_dir, "figures", "dashboards")
@@ -360,10 +368,10 @@ def clean_and_snap_grid(df, resolution_val):
 # 4. COLLECT DATA (grid loading + QC filtering)
 # ==============================================================================
 
-def collect_dashboard_data(base_dir, location, qc_df):
+def collect_dashboard_data(results_dir, location, qc_df):
     """Load grid data from the drive and apply QC filtering per interval."""
     print(f"\nCollecting data for {location} ({RESOLUTION})...")
-    erosion_dir = os.path.join(base_dir, 'results', location, 'erosion')
+    erosion_dir = os.path.join(results_dir, 'results', location, 'erosion')
     if not os.path.isdir(erosion_dir):
         return [], None, [], []
 
@@ -675,7 +683,8 @@ def main():
                              f"Available: {', '.join(LOCATIONS_ALL)}")
     args = parser.parse_args()
 
-    base_dir = get_base_dir()
+    base_dir = get_base_dir()  # For QC event CSVs
+    results_dir = get_results_dir()  # For grid data
     out_dir = get_output_dir(base_dir)
     locations = (LOCATIONS_ALL if args.location.lower() == 'all'
                  else [args.location])
@@ -694,7 +703,7 @@ def main():
             continue
 
         stats, cum_grid, all_events, missing = collect_dashboard_data(
-            base_dir, loc, qc_df)
+            results_dir, loc, qc_df)
         if missing:
             all_missing_surveys.extend(missing)
         if stats and all_events:
