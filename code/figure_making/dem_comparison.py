@@ -295,7 +295,7 @@ def run_comparison(n_events=5, dem_res=DEM_RES, lod=LOD_THRESHOLD):
 #  FIGURES
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def find_largest_dod_cluster(dod, dem_res, buffer_m=30.0):
+def find_largest_dod_cluster(dod, dem_res, buffer_m=10.0):
     """Find the largest erosion cluster in the DoD.
 
     Uses connected-component labeling on erosion cells (DoD < 0,
@@ -526,8 +526,8 @@ def make_multi_panel_figure(results_df):
             ax_top.text(0.5, 0.5, "No cube data", transform=ax_top.transAxes,
                         ha='center', va='center', fontsize=7)
 
-        ax_top.set_title(f"{d1} \u2192 {d2}\nV = {ev['volume']:.1f} m\u00b3",
-                          fontsize=7, fontweight='bold')
+        ax_top.set_title(f"{d1} \u2192 {d2}\nVolume from presented workflow: {ev['volume']:.1f} m\u00b3",
+                          fontsize=9, fontweight='bold')
 
         # ── Bottom row: DoD (top-down) ──────────────────────────────
         match = ok[(ok["start_date"] == d1) & (ok["end_date"] == d2)]
@@ -558,30 +558,23 @@ def make_multi_panel_figure(results_df):
                 ax_bot.text(0.5, 0.5, "No erosion\nin DoD", ha='center',
                             va='center', transform=ax_bot.transAxes, fontsize=7)
 
-            ratio = r['V_M3C2'] / r['V_DoD_ero'] if r['V_DoD_ero'] > 0 else np.inf
             ax_bot.set_title(
-                f"DoD ero = {r['V_DoD_ero']:.0f} m\u00b3 | ratio = {ratio:.1f}\u00d7",
-                fontsize=6, fontweight='bold')
+                f"Volume from DoD: {r['V_DoD_ero']:.1f} m\u00b3",
+                fontsize=9, fontweight='bold')
         else:
             ax_bot.text(0.5, 0.5, "No DoD data", ha='center',
                         va='center', transform=ax_bot.transAxes, fontsize=7)
-            ax_bot.set_title(f"DoD: no data", fontsize=6)
+            ax_bot.set_title(f"Volume from DoD: no data", fontsize=9)
 
-    # Axis labels on leftmost panels
-    axes[0, 0].set_ylabel("Elevation (m)", fontsize=8, fontweight='bold')
-    axes[1, 0].set_ylabel("Northing (m)", fontsize=8, fontweight='bold')
-
-    # Row labels on the left margin
-    fig.text(0.008, 0.72, "M3C2 Grid\n(cliff-face)", fontsize=10,
-             fontweight='bold', ha='left', va='center', rotation=90)
-    fig.text(0.008, 0.28, "DoD\n(top-down)", fontsize=10,
-             fontweight='bold', ha='left', va='center', rotation=90)
+    # Y-axis labels on leftmost panels
+    axes[0, 0].set_ylabel("M3C2 Grid", fontsize=10, fontweight='bold')
+    axes[1, 0].set_ylabel("DoD", fontsize=10, fontweight='bold')
 
     fig.suptitle(
         "M3C2 vs DEM-of-Difference \u2014 Top 3 Erosion Events (Del Mar)\n"
         "Red = erosion, Blue = deposition in both rows",
         fontsize=12, fontweight='bold')
-    plt.tight_layout(rect=[0.03, 0, 1, 0.93])
+    plt.tight_layout(rect=[0, 0, 1, 0.93])
 
     out = os.path.join(dem_dir, "multi-panel.png")
     plt.savefig(out, dpi=200, bbox_inches="tight", facecolor="white", edgecolor="none")
