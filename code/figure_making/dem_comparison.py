@@ -259,7 +259,24 @@ def run_comparison(n_events=5, dem_res=DEM_RES, lod=LOD_THRESHOLD):
         v_dod = dod_erosion_volume(dod, cell_area)
         ratio = v_m3c2 / v_dod if v_dod > 0 else np.inf
 
-        print(f"  V_DoD = {v_dod:.1f} m³  |  ratio = {ratio:.1f}×\n")
+        # Raw DoD (no LoD threshold) for diagnostics
+        valid_both = ~np.isnan(dem1) & ~np.isnan(dem2)
+        raw_diff = dem2[valid_both] - dem1[valid_both]
+        dod_raw = np.full_like(dem1, np.nan)
+        dod_raw[valid_both] = raw_diff
+
+        print(f"  DEM1 data cells: {np.sum(~np.isnan(dem1)):,} / {nx*ny:,}")
+        print(f"  DEM2 data cells: {np.sum(~np.isnan(dem2)):,} / {nx*ny:,}")
+        print(f"  Overlap cells  : {np.sum(valid_both):,}")
+        print(f"  Raw DoD range  : {raw_diff.min():.3f} to {raw_diff.max():.3f} m")
+        print(f"  Raw DoD mean   : {raw_diff.mean():.4f} m")
+        print(f"  Cells |DoD|>{lod}m: {np.sum(np.abs(raw_diff) >= lod):,}")
+        print(f"  Cells DoD<-{lod}m : {np.sum(raw_diff <= -lod):,}  (erosion)")
+        print(f"  V_DoD = {v_dod:.1f} m³  |  ratio = {ratio:.1f}×")
+        print(f"  Files used:")
+        print(f"    before: {os.path.basename(f1)}")
+        print(f"    after:  {os.path.basename(f2)}")
+        print(f"  Clip window: UTM Y = {y_lo:.1f} to {y_hi:.1f}\n")
 
         results.append({
             "event": i + 1,
@@ -267,7 +284,8 @@ def run_comparison(n_events=5, dem_res=DEM_RES, lod=LOD_THRESHOLD):
             "V_M3C2": v_m3c2, "V_DoD": v_dod,
             "ratio": ratio, "status": "ok",
             # stash arrays for figures
-            "_dem1": dem1, "_dem2": dem2, "_dod": dod,
+            "_dem1": dem1, "_dem2": dem2,
+            "_dod": dod, "_dod_raw": dod_raw,
             "_x_edges": x_edges, "_y_edges": y_edges,
         })
 
@@ -402,7 +420,11 @@ def make_figure(results_df):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def make_event_figures(results_df):
-    """Save a 3-panel diagnostic figure for each event: DEM1, DEM2, DoD."""
+    """Save a 4-panel diagnostic figure for each event.
+
+    Panels: DEM before, DEM after, raw DoD (no threshold), thresholded DoD.
+    Red = negative (erosion), Blue = positive (deposition).
+    """
 
     dem_dir = os.path.join(FIG_DIR, "dems")
     os.makedirs(dem_dir, exist_ok=True)
@@ -417,22 +439,26 @@ def make_event_figures(results_df):
         dem1 = row["_dem1"]
         dem2 = row["_dem2"]
         dod = row["_dod"]
+        dod_raw = row["_dod_raw"]
         x_edges = row["_x_edges"]
         y_edges = row["_y_edges"]
 
-        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+        fig, axes = plt.subplots(2, 2, figsize=(14, 12))
 
         # -- shared elevation colour range for DEM panels --
         z_lo = np.nanmin([np.nanmin(dem1), np.nanmin(dem2)])
         z_hi = np.nanmax([np.nanmax(dem1), np.nanmax(dem2)])
 
+        # -- shared DoD colour range for both DoD panels --
+        raw_abs_max = max(abs(np.nanmin(dod_raw)), abs(np.nanmax(dod_raw)), 0.5)
+
         # Panel 1: DEM before
-        ax = axes[0]
+        ax = axes[0, 0]
         im1 = ax.pcolormesh(x_edges, y_edges, dem1,
                             cmap="terrain", vmin=z_lo, vmax=z_hi,
                             shading="flat")
         plt.colorbar(im1, ax=ax, shrink=0.7, label="Elevation (m)")
-        ax.set_title(f"DEM before  ({row['start_date']})",
+        ax.set_title(f"(a) DEM before  ({row['start_date']})",
                      fontweight="bold", fontsize=10)
         ax.set_xlabel("Easting (m)")
         ax.set_ylabel("Northing (m)")
@@ -441,12 +467,12 @@ def make_event_figures(results_df):
         ax.tick_params(labelsize=7, labelrotation=30)
 
         # Panel 2: DEM after
-        ax = axes[1]
+        ax = axes[0, 1]
         im2 = ax.pcolormesh(x_edges, y_edges, dem2,
                             cmap="terrain", vmin=z_lo, vmax=z_hi,
                             shading="flat")
         plt.colorbar(im2, ax=ax, shrink=0.7, label="Elevation (m)")
-        ax.set_title(f"DEM after  ({row['end_date']})",
+        ax.set_title(f"(b) DEM after  ({row['end_date']})",
                      fontweight="bold", fontsize=10)
         ax.set_xlabel("Easting (m)")
         ax.set_ylabel("Northing (m)")
@@ -454,18 +480,34 @@ def make_event_figures(results_df):
         ax.ticklabel_format(useOffset=False, style="plain")
         ax.tick_params(labelsize=7, labelrotation=30)
 
-        # Panel 3: DoD (negative=red=erosion, positive=blue=deposition)
-        ax = axes[2]
-        vmax_dod = max(abs(np.nanmin(dod)), abs(np.nanmax(dod)), 0.5)
-        # RdBu_r: red for negative, blue for positive
-        im3 = ax.pcolormesh(x_edges, y_edges, dod,
-                            cmap="RdBu", vmin=-vmax_dod, vmax=vmax_dod,
+        # Panel 3: Raw DoD (NO LoD threshold)
+        ax = axes[1, 0]
+        im3 = ax.pcolormesh(x_edges, y_edges, dod_raw,
+                            cmap="RdBu", vmin=-raw_abs_max, vmax=raw_abs_max,
                             shading="flat")
-        cb = plt.colorbar(im3, ax=ax, shrink=0.7, label="DoD (m)")
+        plt.colorbar(im3, ax=ax, shrink=0.7, label="DoD (m)")
+        raw_ero = dod_raw[dod_raw < 0]
+        raw_ero_vol = float(np.sum(np.abs(raw_ero))) * (row.get("_res", DEM_RES) ** 2) if len(raw_ero) > 0 else 0.0
+        ax.set_title(f"(c) Raw DoD (no threshold)  —  "
+                     f"ero cells: {len(raw_ero):,}",
+                     fontweight="bold", fontsize=9)
+        ax.set_xlabel("Easting (m)")
+        ax.set_ylabel("Northing (m)")
+        ax.set_aspect("equal")
+        ax.ticklabel_format(useOffset=False, style="plain")
+        ax.tick_params(labelsize=7, labelrotation=30)
+
+        # Panel 4: Thresholded DoD (LoD applied)
+        ax = axes[1, 1]
+        im4 = ax.pcolormesh(x_edges, y_edges, dod,
+                            cmap="RdBu", vmin=-raw_abs_max, vmax=raw_abs_max,
+                            shading="flat")
+        plt.colorbar(im4, ax=ax, shrink=0.7, label="DoD (m)")
         ax.set_title(
-            f"DoD  (V_DoD={row['V_DoD']:.1f} m³,  "
-            f"V_M3C2={row['V_M3C2']:.1f} m³,  "
-            f"ratio={row['ratio']:.1f}×)",
+            f"(d) DoD (LoD={LOD_THRESHOLD}m)  —  "
+            f"V_DoD={row['V_DoD']:.1f} m³  vs  "
+            f"V_M3C2={row['V_M3C2']:.1f} m³  "
+            f"({row['ratio']:.0f}×)",
             fontweight="bold", fontsize=9)
         ax.set_xlabel("Easting (m)")
         ax.set_ylabel("Northing (m)")
@@ -475,10 +517,11 @@ def make_event_figures(results_df):
 
         fig.suptitle(
             f"Event E{ev}:  {row['start_date']} → {row['end_date']}",
-            fontsize=13, fontweight="bold", y=1.02)
+            fontsize=13, fontweight="bold")
         plt.tight_layout()
 
-        out = os.path.join(dem_dir, f"event_{ev}_{row['start_date']}_to_{row['end_date']}.png")
+        out = os.path.join(dem_dir,
+                           f"event_{ev}_{row['start_date']}_to_{row['end_date']}.png")
         plt.savefig(out, dpi=150, bbox_inches="tight",
                     facecolor="white", edgecolor="none")
         plt.close()
