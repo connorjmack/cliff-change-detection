@@ -266,8 +266,8 @@ def run_comparison(n_events=5, dem_res=DEM_RES, lod=LOD_THRESHOLD):
             "start_date": d1_str, "end_date": d2_str,
             "V_M3C2": v_m3c2, "V_DoD": v_dod,
             "ratio": ratio, "status": "ok",
-            # stash arrays for figure
-            "_dod": dod,
+            # stash arrays for figures
+            "_dem1": dem1, "_dem2": dem2, "_dod": dod,
             "_x_edges": x_edges, "_y_edges": y_edges,
         })
 
@@ -398,6 +398,96 @@ def make_figure(results_df):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  PER-EVENT DIAGNOSTIC FIGURES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def make_event_figures(results_df):
+    """Save a 3-panel diagnostic figure for each event: DEM1, DEM2, DoD."""
+
+    dem_dir = os.path.join(FIG_DIR, "dems")
+    os.makedirs(dem_dir, exist_ok=True)
+
+    ok = results_df[results_df["status"] == "ok"]
+    if ok.empty:
+        print("No valid events to plot.")
+        return
+
+    for _, row in ok.iterrows():
+        ev = int(row["event"])
+        dem1 = row["_dem1"]
+        dem2 = row["_dem2"]
+        dod = row["_dod"]
+        x_edges = row["_x_edges"]
+        y_edges = row["_y_edges"]
+
+        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+
+        # -- shared elevation colour range for DEM panels --
+        z_lo = np.nanmin([np.nanmin(dem1), np.nanmin(dem2)])
+        z_hi = np.nanmax([np.nanmax(dem1), np.nanmax(dem2)])
+
+        # Panel 1: DEM before
+        ax = axes[0]
+        im1 = ax.pcolormesh(x_edges, y_edges, dem1,
+                            cmap="terrain", vmin=z_lo, vmax=z_hi,
+                            shading="flat")
+        plt.colorbar(im1, ax=ax, shrink=0.7, label="Elevation (m)")
+        ax.set_title(f"DEM before  ({row['start_date']})",
+                     fontweight="bold", fontsize=10)
+        ax.set_xlabel("Easting (m)")
+        ax.set_ylabel("Northing (m)")
+        ax.set_aspect("equal")
+        ax.ticklabel_format(useOffset=False, style="plain")
+        ax.tick_params(labelsize=7, labelrotation=30)
+
+        # Panel 2: DEM after
+        ax = axes[1]
+        im2 = ax.pcolormesh(x_edges, y_edges, dem2,
+                            cmap="terrain", vmin=z_lo, vmax=z_hi,
+                            shading="flat")
+        plt.colorbar(im2, ax=ax, shrink=0.7, label="Elevation (m)")
+        ax.set_title(f"DEM after  ({row['end_date']})",
+                     fontweight="bold", fontsize=10)
+        ax.set_xlabel("Easting (m)")
+        ax.set_ylabel("Northing (m)")
+        ax.set_aspect("equal")
+        ax.ticklabel_format(useOffset=False, style="plain")
+        ax.tick_params(labelsize=7, labelrotation=30)
+
+        # Panel 3: DoD (negative=red=erosion, positive=blue=deposition)
+        ax = axes[2]
+        vmax_dod = max(abs(np.nanmin(dod)), abs(np.nanmax(dod)), 0.5)
+        # RdBu_r: red for negative, blue for positive
+        im3 = ax.pcolormesh(x_edges, y_edges, dod,
+                            cmap="RdBu", vmin=-vmax_dod, vmax=vmax_dod,
+                            shading="flat")
+        cb = plt.colorbar(im3, ax=ax, shrink=0.7, label="DoD (m)")
+        ax.set_title(
+            f"DoD  (V_DoD={row['V_DoD']:.1f} m³,  "
+            f"V_M3C2={row['V_M3C2']:.1f} m³,  "
+            f"ratio={row['ratio']:.1f}×)",
+            fontweight="bold", fontsize=9)
+        ax.set_xlabel("Easting (m)")
+        ax.set_ylabel("Northing (m)")
+        ax.set_aspect("equal")
+        ax.ticklabel_format(useOffset=False, style="plain")
+        ax.tick_params(labelsize=7, labelrotation=30)
+
+        fig.suptitle(
+            f"Event E{ev}:  {row['start_date']} → {row['end_date']}",
+            fontsize=13, fontweight="bold", y=1.02)
+        plt.tight_layout()
+
+        out = os.path.join(dem_dir, f"event_{ev}_{row['start_date']}_to_{row['end_date']}.png")
+        plt.savefig(out, dpi=150, bbox_inches="tight",
+                    facecolor="white", edgecolor="none")
+        plt.close()
+        print(f"  Saved: {out}")
+
+    print(f"\nAll event DEMs saved to: {dem_dir}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  CLI
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -427,6 +517,7 @@ def main():
     print()
 
     if not args.no_figure:
+        make_event_figures(results)
         make_figure(results)
 
 
