@@ -285,49 +285,33 @@ def _fit_log_range(vols_sorted, fst, v_lower, v_upper):
     return -slope, 10**intercept, r2, n
 
 
-def _find_stable_index(values, window=3, threshold=0.05):
-    """Return index of first stable plateau (rolling std of β < threshold)."""
-    arr = np.asarray(values, dtype=float)
-    # Try to find first window where std < threshold
-    for i in range(len(arr) - window + 1):
-        chunk = arr[i:i + window]
-        if np.all(~np.isnan(chunk)) and np.std(chunk) < threshold:
-            return i
-    # Fallback: index of minimum rolling std
-    best_i, best_std = 0, np.inf
-    for i in range(len(arr) - window + 1):
-        chunk = arr[i:i + window]
-        if np.all(~np.isnan(chunk)):
-            s = np.std(chunk)
-            if s < best_std:
-                best_std = s
-                best_i = i
-    return best_i
-
-
-def progressive_power_law_fit(volumes, area_hm2, t_years,
-                               n_lower=20, n_upper=20,
-                               stability_window=3, stability_threshold=0.05):
+def dual_regime_power_law_fit(volumes, area_hm2, t_years,
+                               lower_bound=0.25,
+                               bp_range=(1.5, 8.0), n_bp=30,
+                               upper_range=(50.0, None), n_upper=20):
     """
-    Progressive trimming approach for robust power law fitting on normalized CCDF.
+    Fit two separate power law regimes on the normalized CCDF.
 
-    Step 1 — Sweep lower cutoff upward; find where β stabilizes (true power law onset).
-    Step 2 — Fix lower cutoff, sweep upper cutoff downward; find stabilization.
-    Step 3 — Final fit on the identified range.
+    Regime 1: [lower_bound, breakpoint]  — rollover / detection-limited regime
+    Regime 2: [breakpoint, upper_cutoff] — true power law tail
+
+    The breakpoint and upper cutoff are jointly optimized to maximize
+    a point-count-weighted average R² across both regimes.
 
     Parameters
     ----------
-    volumes    : event volumes (m³)
-    area_hm2   : monitored cliff face area (hm²)
-    t_years    : observation period (yr)
-    n_lower    : number of lower-cutoff candidates to evaluate
-    n_upper    : number of upper-cutoff candidates to evaluate
-    stability_window    : consecutive fits that must agree for "stable"
-    stability_threshold : max std(β) within window to count as stable
+    volumes     : event volumes (m³)
+    area_hm2    : monitored cliff face area (hm²)
+    t_years     : observation period (yr)
+    lower_bound : fixed lower bound for Regime 1 (m³)
+    bp_range    : (min, max) search range for breakpoint (m³)
+    n_bp        : number of breakpoint candidates
+    upper_range : (min, max) search range for upper cutoff; None = v_max
+    n_upper     : number of upper cutoff candidates
 
     Returns
     -------
-    dict with fit results and diagnostic arrays, or None on failure.
+    dict with both regime fits, or None on failure.
     """
     if len(volumes) == 0:
         return None
@@ -336,134 +320,69 @@ def progressive_power_law_fit(volumes, area_hm2, t_years,
     raw_n = np.arange(1, len(vols_sorted) + 1, dtype=float)
     fst = raw_n / (area_hm2 * t_years)
 
-    v_min, v_max = vols_sorted[-1], vols_sorted[0]
-    log_min = np.log10(max(v_min, 0.1))
-    log_max = np.log10(v_max)
+    v_max = vols_sorted[0]
 
-    # --- Step 1: Progressive lower trim ---
-    log_upper_bound = log_min + 0.5 * (log_max - log_min)
-    lower_candidates = np.logspace(log_min, log_upper_bound, n_lower)
+    # Candidate breakpoints (log-spaced)
+    bp_lo = max(bp_range[0], lower_bound * 2)  # breakpoint must be > lower_bound
+    bp_hi = min(bp_range[1], v_max * 0.5)
+    bp_candidates = np.logspace(np.log10(bp_lo), np.log10(bp_hi), n_bp)
 
-    lower_betas, lower_r2s, lower_alphas, lower_ns = [], [], [], []
-    for lc in lower_candidates:
-        B, alpha, r2, n = _fit_log_range(vols_sorted, fst, lc, v_max)
-        lower_betas.append(B)
-        lower_r2s.append(r2)
-        lower_alphas.append(alpha)
-        lower_ns.append(n)
+    # Candidate upper cutoffs (log-spaced)
+    uc_lo = upper_range[0]
+    uc_hi = v_max if upper_range[1] is None else min(upper_range[1], v_max)
+    if uc_lo >= uc_hi:
+        uc_lo = uc_hi * 0.5
+    upper_candidates = np.logspace(np.log10(uc_lo), np.log10(uc_hi), n_upper)
 
-    lower_betas = np.array(lower_betas)
-    lower_r2s = np.array(lower_r2s)
+    best_score = -np.inf
+    best = None
 
-    si_lower = _find_stable_index(lower_betas, stability_window, stability_threshold)
-    optimal_lower = lower_candidates[si_lower]
+    for bp in bp_candidates:
+        for uc in upper_candidates:
+            if bp >= uc:
+                continue
 
-    # --- Step 2: Progressive upper trim ---
-    log_lower_fixed = np.log10(optimal_lower)
-    log_lb = log_lower_fixed + 0.3 * (log_max - log_lower_fixed)
-    upper_candidates = np.logspace(log_max, log_lb, n_upper)  # decreasing
+            B1, a1, r2_1, n1 = _fit_log_range(vols_sorted, fst, lower_bound, bp)
+            B2, a2, r2_2, n2 = _fit_log_range(vols_sorted, fst, bp, uc)
 
-    upper_betas, upper_r2s, upper_alphas, upper_ns = [], [], [], []
-    for uc in upper_candidates:
-        B, alpha, r2, n = _fit_log_range(vols_sorted, fst, optimal_lower, uc)
-        upper_betas.append(B)
-        upper_r2s.append(r2)
-        upper_alphas.append(alpha)
-        upper_ns.append(n)
+            if np.isnan(r2_1) or np.isnan(r2_2):
+                continue
 
-    upper_betas = np.array(upper_betas)
-    upper_r2s = np.array(upper_r2s)
+            score = (n1 * r2_1 + n2 * r2_2) / (n1 + n2)
 
-    si_upper = _find_stable_index(upper_betas, stability_window, stability_threshold)
-    optimal_upper = upper_candidates[si_upper]
+            if score > best_score:
+                best_score = score
+                best = {
+                    'breakpoint': bp, 'upper_cutoff': uc,
+                    'B1': B1, 'alpha1': a1, 'r2_1': r2_1, 'n1': n1,
+                    'B2': B2, 'alpha2': a2, 'r2_2': r2_2, 'n2': n2,
+                }
 
-    # Sanity: ensure lower < upper
-    if optimal_lower >= optimal_upper:
-        optimal_lower = lower_candidates[0]
-        optimal_upper = v_max
-
-    # --- Step 3: Final fit ---
-    B, alpha, r2, n_fit = _fit_log_range(vols_sorted, fst, optimal_lower, optimal_upper)
-    if np.isnan(B):
+    if best is None:
         return None
 
-    mask = (vols_sorted >= optimal_lower) & (vols_sorted <= optimal_upper)
-    fit_v = vols_sorted[mask]
-    fit_fst = alpha * fit_v**(-B)
+    # Generate fit lines for both regimes
+    bp = best['breakpoint']
+    uc = best['upper_cutoff']
 
-    return {
+    mask1 = (vols_sorted >= lower_bound) & (vols_sorted <= bp)
+    mask2 = (vols_sorted >= bp) & (vols_sorted <= uc)
+
+    fit_v1   = vols_sorted[mask1]
+    fit_fst1 = best['alpha1'] * fit_v1 ** (-best['B1'])
+
+    fit_v2   = vols_sorted[mask2]
+    fit_fst2 = best['alpha2'] * fit_v2 ** (-best['B2'])
+
+    best.update({
         'vols_sorted': vols_sorted, 'raw_n': raw_n, 'fst': fst,
-        'fit_v': fit_v, 'fit_fst': fit_fst,
-        'B': B, 'alpha': alpha, 'r2': r2, 'n_fit': n_fit,
-        'lower_cutoff': optimal_lower, 'upper_cutoff': optimal_upper,
-        # Diagnostic arrays
-        'lower_candidates': lower_candidates,
-        'lower_betas': lower_betas, 'lower_r2s': lower_r2s,
-        'upper_candidates': upper_candidates,
-        'upper_betas': upper_betas, 'upper_r2s': upper_r2s,
-        'stable_lower_idx': si_lower, 'stable_upper_idx': si_upper,
-    }
+        'fit_v1': fit_v1, 'fit_fst1': fit_fst1,
+        'fit_v2': fit_v2, 'fit_fst2': fit_fst2,
+        'lower_bound': lower_bound,
+        'combined_r2': best_score,
+    })
 
-
-def plot_trim_diagnostics(result, out_dir, title_prefix):
-    """
-    2-panel diagnostic figure showing β stabilization during progressive trimming.
-    Left: β vs lower volume cutoff.  Right: β vs upper volume cutoff.
-    Cf. Figure 7 in Janeras et al. (2023).
-    """
-    fig, (ax_l, ax_r) = plt.subplots(1, 2, figsize=(16, 6))
-
-    # --- Left panel: lower trim ---
-    lc = result['lower_candidates']
-    lb = result['lower_betas']
-    lr = result['lower_r2s']
-
-    ax_l.plot(lc, lb, 'o-', color='black', markersize=6, linewidth=1.5, label=r'$\beta$')
-    ax_l.axvline(result['lower_cutoff'], color=COLOR_ACCENT, linestyle='--', linewidth=2,
-                 label=f"$V_{{lower}}$ = {result['lower_cutoff']:.1f} m$^3$")
-    ax_l.set_xscale('log')
-    ax_l.set_xlabel(r'Lower Volume Cutoff (m$^3$)', fontweight='bold')
-    ax_l.set_ylabel(r'$\beta$', fontweight='bold')
-    ax_l.legend(loc='upper left', fontsize=12)
-    ax_l.set_title('Step 1: Lower Cutoff Sweep', fontweight='bold')
-    ax_l.grid(True, ls=':', alpha=0.4)
-
-    ax_l2 = ax_l.twinx()
-    ax_l2.plot(lc, lr, 's-', color=COLOR_ACCENT, markersize=4, alpha=0.5, label='R$^2$')
-    ax_l2.set_ylabel('R$^2$', color=COLOR_ACCENT, fontweight='bold')
-    ax_l2.tick_params(axis='y', labelcolor=COLOR_ACCENT)
-    ax_l2.legend(loc='lower right', fontsize=12)
-
-    # --- Right panel: upper trim ---
-    uc = result['upper_candidates']
-    ub = result['upper_betas']
-    ur = result['upper_r2s']
-
-    ax_r.plot(uc, ub, 'o-', color='black', markersize=6, linewidth=1.5, label=r'$\beta$')
-    ax_r.axvline(result['upper_cutoff'], color=COLOR_ACCENT, linestyle='--', linewidth=2,
-                 label=f"$V_{{upper}}$ = {result['upper_cutoff']:.0f} m$^3$")
-    ax_r.set_xscale('log')
-    ax_r.set_xlabel(r'Upper Volume Cutoff (m$^3$)', fontweight='bold')
-    ax_r.set_ylabel(r'$\beta$', fontweight='bold')
-    ax_r.legend(loc='upper left', fontsize=12)
-    ax_r.set_title('Step 2: Upper Cutoff Sweep', fontweight='bold')
-    ax_r.grid(True, ls=':', alpha=0.4)
-
-    ax_r2 = ax_r.twinx()
-    ax_r2.plot(uc, ur, 's-', color=COLOR_ACCENT, markersize=4, alpha=0.5, label='R$^2$')
-    ax_r2.set_ylabel('R$^2$', color=COLOR_ACCENT, fontweight='bold')
-    ax_r2.tick_params(axis='y', labelcolor=COLOR_ACCENT)
-    ax_r2.legend(loc='lower right', fontsize=12)
-
-    fig.suptitle(f'{title_prefix} — Power Law Trim Diagnostics', fontsize=16, fontweight='bold')
-    fig.tight_layout()
-
-    os.makedirs(out_dir, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-    save_path = os.path.join(out_dir, f"{title_prefix}_Trim_Diagnostics_{timestamp}.png")
-    fig.savefig(save_path, dpi=200, bbox_inches='tight', facecolor='white')
-    print(f"[Diagnostics] Saved to: {save_path}")
-    plt.close(fig)
+    return best
 
 
 # ==============================================================================
@@ -553,58 +472,65 @@ def plot_geomorph_stats(df, out_dir, title_prefix, area_hm2=None, normalized=Tru
     ax1 = fig.add_subplot(gs[0, 0])
 
     if normalized:
-        # --- Progressive trimming power law fit (Janeras et al. 2023) ---
-        result = progressive_power_law_fit(df_clean['volume'], area_hm2, t_years)
+        # --- Dual-regime power law fit (Janeras et al. 2023) ---
+        result = dual_regime_power_law_fit(df_clean['volume'], area_hm2, t_years)
 
         if result is not None:
             vs  = result['vols_sorted']
             fst = result['fst']
-            lc  = result['lower_cutoff']
+            lb  = result['lower_bound']
+            bp  = result['breakpoint']
             uc  = result['upper_cutoff']
 
-            # Three zones: below lower cutoff, fit range, above upper cutoff
-            below    = vs < lc
-            in_range = (vs >= lc) & (vs <= uc)
-            above    = vs > uc
+            # Four zones: below lower bound, regime 1, regime 2, above upper
+            zone_below = vs < lb
+            zone_r1    = (vs >= lb) & (vs <= bp)
+            zone_r2    = (vs > bp) & (vs <= uc)
+            zone_above = vs > uc
 
-            outside_labeled = False
-            if np.any(below):
-                ax1.loglog(vs[below], fst[below],
-                           'o', color='gray', alpha=0.35, markersize=7,
-                           label='Outside fit range')
-                outside_labeled = True
-            if np.any(above):
-                ax1.loglog(vs[above], fst[above],
-                           'o', color='gray', alpha=0.35, markersize=7,
-                           label=None if outside_labeled else 'Outside fit range')
+            if np.any(zone_below):
+                ax1.loglog(vs[zone_below], fst[zone_below],
+                           'o', color='gray', alpha=0.30, markersize=6)
+            if np.any(zone_above):
+                ax1.loglog(vs[zone_above], fst[zone_above],
+                           'o', color='gray', alpha=0.30, markersize=6)
 
-            ax1.loglog(vs[in_range], fst[in_range],
+            ax1.loglog(vs[zone_r1], fst[zone_r1],
+                       'o', color='black', markersize=7, alpha=0.6,
+                       label='Regime 1 data')
+            ax1.loglog(vs[zone_r2], fst[zone_r2],
                        'o', color='black', markersize=8,
-                       label=f'Fit range ({lc:.1f}' + r'$-$' + f'{uc:.0f} m' + r'$^3$' + ')')
+                       label='Regime 2 data')
 
-            if result['fit_v'] is not None and len(result['fit_v']) > 0:
-                ax1.loglog(result['fit_v'], result['fit_fst'], '--',
+            # Regime 1 fit line
+            if len(result['fit_v1']) > 0:
+                ax1.loglog(result['fit_v1'], result['fit_fst1'], '--',
+                           color=COLOR_MAIN, linewidth=3.5,
+                           label=(r'R1: $\beta_1$' + f' = {result["B1"]:.2f}'
+                                  f'  (R$^2$={result["r2_1"]:.3f})'))
+
+            # Regime 2 fit line
+            if len(result['fit_v2']) > 0:
+                ax1.loglog(result['fit_v2'], result['fit_fst2'], '--',
                            color=COLOR_ACCENT, linewidth=3.5,
-                           label=(f'$F_{{st}} = {result["alpha"]:.2f}'
-                                  f'\\,V^{{-{result["B"]:.2f}}}$'
-                                  f'  (R$^2$={result["r2"]:.3f})'))
+                           label=(r'R2: $\beta_2$' + f' = {result["B2"]:.2f}'
+                                  f'  (R$^2$={result["r2_2"]:.3f})'))
 
-            ax1.axvline(lc, color=COLOR_ACCENT, linestyle=':', alpha=0.55,
-                        linewidth=2.5, label=f'$V_{{lower}} = {lc:.1f}$ m$^3$')
-            ax1.axvline(uc, color=COLOR_ACCENT, linestyle=':', alpha=0.55,
-                        linewidth=2.5, label=f'$V_{{upper}} = {uc:.0f}$ m$^3$')
+            # Breakpoint and upper cutoff lines
+            ax1.axvline(bp, color='black', linestyle=':', alpha=0.6,
+                        linewidth=2.5, label=f'Breakpoint = {bp:.1f} m$^3$')
+            ax1.axvline(uc, color=COLOR_ACCENT, linestyle=':', alpha=0.45,
+                        linewidth=2, label=f'Upper cutoff = {uc:.0f} m$^3$')
 
             # Terminal report
-            print(f"\n  Progressive Trimming Power Law Fit:")
-            print(f"    - Lower cutoff: {lc:.2f} m^3")
-            print(f"    - Upper cutoff: {uc:.1f} m^3")
-            print(f"    - B (CCDF exponent): {result['B']:.3f}")
-            print(f"    - alpha (activity rate): {result['alpha']:.3f}")
-            print(f"    - R^2: {result['r2']:.4f}")
-            print(f"    - N events in fit: {result['n_fit']}")
-
-            # Save diagnostic figure alongside the main dashboard
-            plot_trim_diagnostics(result, out_dir, title_prefix)
+            print(f"\n  Dual-Regime Power Law Fit:")
+            print(f"    Regime 1 [{lb:.2f} - {bp:.1f} m^3]:")
+            print(f"      B1 = {result['B1']:.3f}, alpha1 = {result['alpha1']:.3f}, "
+                  f"R^2 = {result['r2_1']:.4f}, N = {result['n1']}")
+            print(f"    Regime 2 [{bp:.1f} - {uc:.0f} m^3]:")
+            print(f"      B2 = {result['B2']:.3f}, alpha2 = {result['alpha2']:.3f}, "
+                  f"R^2 = {result['r2_2']:.4f}, N = {result['n2']}")
+            print(f"    Combined weighted R^2 = {result['combined_r2']:.4f}")
 
         ax1.text(0.97, 0.97,
                  f'$A_{{st}} = {area_hm2:.2f}$ hm$^2$\n'
