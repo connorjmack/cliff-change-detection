@@ -108,7 +108,9 @@ def find_noveg_file(date_str):
 def load_and_clip(las_path, y_min, y_max):
     """Load a LAS file and return (x, y, z) clipped to y_min <= y <= y_max."""
     las = laspy.read(las_path)
-    x, y, z = las.x, las.y, las.z
+    x = np.asarray(las.x, dtype=np.float64)
+    y = np.asarray(las.y, dtype=np.float64)
+    z = np.asarray(las.z, dtype=np.float64)
     mask = (y >= y_min) & (y <= y_max)
     return x[mask], y[mask], z[mask]
 
@@ -127,10 +129,10 @@ def rasterise_to_common_grid(x, y, z, x_min, y_min, dem_res, nx, ny):
     -------
     dem : 2-D ndarray (ny, nx), NaN where no data
     """
-    xi = np.clip(((x - x_min) / dem_res).astype(int), 0, nx - 1)
-    yi = np.clip(((y - y_min) / dem_res).astype(int), 0, ny - 1)
+    xi = np.clip(((np.asarray(x, dtype=np.float64) - x_min) / dem_res).astype(int), 0, nx - 1)
+    yi = np.clip(((np.asarray(y, dtype=np.float64) - y_min) / dem_res).astype(int), 0, ny - 1)
     flat = yi * nx + xi
-    df_pts = pd.DataFrame({"flat": flat, "z": z})
+    df_pts = pd.DataFrame({"flat": flat, "z": np.asarray(z, dtype=np.float64)})
     maxz = df_pts.groupby("flat")["z"].max()
     dem = np.full(ny * nx, np.nan)
     dem[maxz.index.values] = maxz.values
