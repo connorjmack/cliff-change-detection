@@ -5,6 +5,12 @@ dem_comparison.py
 Compares M3C2-based volumes (this study) against traditional DEM-of-Difference
 (DoD) volumes for the top-N largest QC'd erosion events at Del Mar.
 
+The top-down DEM (max Z per XY cell) is intentionally a naive representation
+of the cliff — it captures the cliff top and beach surfaces but compresses the
+near-vertical face into a 1-3 cell wide strip.  This is exactly the limitation
+of classical DEM differencing for vertical cliffs, and the comparison quantifies
+how much volume is missed.
+
 For each event the script:
   1. Loads the two noveg LAS point clouds bracketing the event.
   2. Clips to the event's alongshore footprint (+ buffer).
@@ -29,7 +35,6 @@ import laspy
 import geopandas as gpd
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
-from matplotlib.patches import FancyArrowPatch
 
 # ── paths ──────────────────────────────────────────────────────────────────────
 SYSTEM = platform.system()
@@ -44,14 +49,10 @@ SHP_DIR = os.path.join(BASE, "utilities", "shape_files",
                        "DelMarPolygons595to620at25cm")
 SHP_FILE = os.path.join(SHP_DIR, "DelMarPolygons595to620at25cm.shp")
 
-# QC event list (repo-relative)
+# QC event list (repo-relative, auto-detect most recent)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", ".."))
-QC_CSV = os.path.join(REPO_ROOT, "results", "event_lists_qc", "erosion",
-                      "DelMar_events_qc_20260203_085647.csv")
-
-# Filled-grid directory (for spatial map of M3C2 scar)
-GRID_BASE = os.path.join(BASE, "results", LOCATION, "erosion")
+QC_DIR = os.path.join(REPO_ROOT, "results", "event_lists_qc", "erosion")
 
 # Output
 FIG_DIR = os.path.join(REPO_ROOT, "figures", "appendix")
@@ -60,12 +61,21 @@ FIG_DIR = os.path.join(REPO_ROOT, "figures", "appendix")
 DEM_RES = 0.25          # m – top-down DEM cell size (default)
 LOD_THRESHOLD = 0.25    # m – Level of Detection for DoD
 ALONG_BUFFER = 20.0     # m – buffer around event footprint (UTM Y)
-M3C2_CELL_AREA = 0.25 * 0.25   # m² – grid cell area used in M3C2 volumes
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  HELPERS
 # ═══════════════════════════════════════════════════════════════════════════════
+
+def find_qc_csv():
+    """Find the most recent DelMar QC event list CSV."""
+    pattern = os.path.join(QC_DIR, "DelMar_events_qc_*.csv")
+    matches = sorted(glob.glob(pattern))
+    if not matches:
+        raise FileNotFoundError(
+            f"No DelMar QC event list found in {QC_DIR}")
+    return matches[-1]
+
 
 def build_alongshore_to_utm(shp_path):
     """Return arrays (alongshore_m, centroid_y) sorted by alongshore_m.
@@ -87,17 +97,7 @@ def alongshore_to_utm_y(along_m, along_arr, utm_y_arr):
 
 
 def find_noveg_file(date_str):
-    """Find the noveg LAS file whose name starts with *date_str* (YYYYMMDD).
-
-    Parameters
-    ----------
-    date_str : str
-        Eight-character date, e.g. '20181002'.
-
-    Returns
-    -------
-    str or None
-    """
+    """Find the noveg LAS file whose name starts with *date_str* (YYYYMMDD)."""
     pattern = os.path.join(NOVEG_DIR, f"{date_str}*.las")
     matches = sorted(glob.glob(pattern))
     if not matches:
@@ -113,64 +113,28 @@ def load_and_clip(las_path, y_min, y_max):
     return x[mask], y[mask], z[mask]
 
 
-def rasterise_dem(x, y, z, res):
-    """Create a top-down DSM (max Z per XY cell).
+def rasterise_to_common_grid(x, y, z, x_min, y_min, dem_res, nx, ny):
+    """Rasterise points to a top-down DSM (max Z per cell) on a pre-defined grid.
+
+    Parameters
+    ----------
+    x, y, z : 1-D arrays of point coordinates
+    x_min, y_min : float – origin of the grid
+    dem_res : float – cell size (m)
+    nx, ny : int – number of cells in X and Y
 
     Returns
     -------
-    dem : 2-D ndarray (ny, nx) with NaN where no data
-    x_edges, y_edges : 1-D arrays of bin edges
+    dem : 2-D ndarray (ny, nx), NaN where no data
     """
-    x_min, x_max = x.min(), x.max()
-    y_min, y_max = y.min(), y.max()
-
-    # Edges
-    x_edges = np.arange(x_min, x_max + res, res)
-    y_edges = np.arange(y_min, y_max + res, res)
-    nx = len(x_edges) - 1
-    ny = len(y_edges) - 1
-
-    # Bin indices
-    xi = np.clip(((x - x_min) / res).astype(int), 0, nx - 1)
-    yi = np.clip(((y - y_min) / res).astype(int), 0, ny - 1)
-
-    # Max Z per cell
-    dem = np.full((ny, nx), np.nan)
-    flat_idx = yi * nx + xi
-    for idx in range(len(z)):
-        fi = flat_idx[idx]
-        r, c = divmod(fi, nx)
-        if np.isnan(dem[r, c]) or z[idx] > dem[r, c]:
-            dem[r, c] = z[idx]
-
-    return dem, x_edges, y_edges
-
-
-def rasterise_dem_fast(x, y, z, res):
-    """Vectorised DSM rasterisation using pandas groupby.
-
-    Much faster than the per-point loop for large clouds.
-    """
-    x_min, x_max = x.min(), x.max()
-    y_min, y_max = y.min(), y.max()
-
-    x_edges = np.arange(x_min, x_max + res, res)
-    y_edges = np.arange(y_min, y_max + res, res)
-    nx = len(x_edges) - 1
-    ny = len(y_edges) - 1
-
-    xi = np.clip(((x - x_min) / res).astype(int), 0, nx - 1)
-    yi = np.clip(((y - y_min) / res).astype(int), 0, ny - 1)
-
+    xi = np.clip(((x - x_min) / dem_res).astype(int), 0, nx - 1)
+    yi = np.clip(((y - y_min) / dem_res).astype(int), 0, ny - 1)
     flat = yi * nx + xi
-    df = pd.DataFrame({"flat": flat, "z": z})
-    maxz = df.groupby("flat")["z"].max()
-
+    df_pts = pd.DataFrame({"flat": flat, "z": z})
+    maxz = df_pts.groupby("flat")["z"].max()
     dem = np.full(ny * nx, np.nan)
     dem[maxz.index.values] = maxz.values
-    dem = dem.reshape(ny, nx)
-
-    return dem, x_edges, y_edges
+    return dem.reshape(ny, nx)
 
 
 def compute_dod(dem_before, dem_after, lod):
@@ -178,13 +142,12 @@ def compute_dod(dem_before, dem_after, lod):
 
     Returns
     -------
-    dod : 2-D array (positive = deposition, negative = erosion), NaN = no data
+    dod : 2-D array (positive = deposition, negative = erosion), NaN = no data.
+          NaN cells are preserved (np.abs(NaN) < lod is False, so they stay NaN).
     """
-    # Both DEMs must have data
     valid = ~np.isnan(dem_before) & ~np.isnan(dem_after)
     dod = np.full_like(dem_before, np.nan)
     dod[valid] = dem_after[valid] - dem_before[valid]
-    # Apply LoD
     below_lod = np.abs(dod) < lod
     dod[below_lod] = 0.0
     return dod
@@ -199,40 +162,6 @@ def dod_erosion_volume(dod, cell_area):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  GRID LOADING (for spatial map panel)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def load_m3c2_grid(start_date, end_date):
-    """Load the filled erosion grid CSV for a date pair.
-
-    Returns
-    -------
-    grid : 2-D ndarray (polygons × elevation bins)
-    poly_ids : 1-D array of polygon row indices
-    elevations : 1-D array of elevation values (m)
-    """
-    d1 = start_date.strftime("%Y%m%d")
-    d2 = end_date.strftime("%Y%m%d")
-    folder = os.path.join(GRID_BASE, f"{d1}_to_{d2}", "25cm")
-    grid_file = os.path.join(folder,
-                             f"{d1}_to_{d2}_ero_grid_25cm_filled.csv")
-    if not os.path.isfile(grid_file):
-        return None, None, None
-
-    df = pd.read_csv(grid_file, index_col=0, na_values=["", "nan", "NaN"])
-    elevations = []
-    for c in df.columns:
-        try:
-            elevations.append(float(c.replace("M3C2_", "").replace("m", "")))
-        except ValueError:
-            elevations.append(np.nan)
-    elevations = np.array(elevations)
-    grid = df.values.astype(float)
-    poly_ids = df.index.values
-    return grid, poly_ids, elevations
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
 #  MAIN COMPARISON
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -241,8 +170,11 @@ def run_comparison(n_events=5, dem_res=DEM_RES, lod=LOD_THRESHOLD):
 
     Returns a DataFrame with one row per event.
     """
-    # Load QC events, keep only 'real'
-    df = pd.read_csv(QC_CSV, parse_dates=["mid_date", "start_date", "end_date"])
+    qc_csv = find_qc_csv()
+    print(f"Using QC file: {os.path.basename(qc_csv)}")
+
+    df = pd.read_csv(qc_csv,
+                     parse_dates=["mid_date", "start_date", "end_date"])
     real = (df[df["qc_flag"] == "real"]
             .sort_values("volume", ascending=False)
             .head(n_events)
@@ -303,30 +235,22 @@ def run_comparison(n_events=5, dem_res=DEM_RES, lod=LOD_THRESHOLD):
             })
             continue
 
-        # --- rasterise to DEMs (use common extent) ---
+        # --- common-extent grid for both DEMs ---
         all_x = np.concatenate([x1, x2])
         all_y = np.concatenate([y1, y2])
         x_min, x_max = all_x.min(), all_x.max()
         y_min, y_max = all_y.min(), all_y.max()
 
-        x_edges = np.arange(x_min, x_max + dem_res, dem_res)
-        y_edges = np.arange(y_min, y_max + dem_res, dem_res)
-        nx = len(x_edges) - 1
-        ny = len(y_edges) - 1
-
-        def _raster(x, y, z):
-            xi = np.clip(((x - x_min) / dem_res).astype(int), 0, nx - 1)
-            yi = np.clip(((y - y_min) / dem_res).astype(int), 0, ny - 1)
-            flat = yi * nx + xi
-            df_pts = pd.DataFrame({"flat": flat, "z": z})
-            maxz = df_pts.groupby("flat")["z"].max()
-            dem = np.full(ny * nx, np.nan)
-            dem[maxz.index.values] = maxz.values
-            return dem.reshape(ny, nx)
+        nx = int(np.ceil((x_max - x_min) / dem_res))
+        ny = int(np.ceil((y_max - y_min) / dem_res))
+        x_edges = np.linspace(x_min, x_min + nx * dem_res, nx + 1)
+        y_edges = np.linspace(y_min, y_min + ny * dem_res, ny + 1)
 
         print(f"  Rasterising DEMs ({nx}×{ny} cells) ...")
-        dem1 = _raster(x1, y1, z1)
-        dem2 = _raster(x2, y2, z2)
+        dem1 = rasterise_to_common_grid(x1, y1, z1,
+                                        x_min, y_min, dem_res, nx, ny)
+        dem2 = rasterise_to_common_grid(x2, y2, z2,
+                                        x_min, y_min, dem_res, nx, ny)
 
         # --- DoD ---
         dod = compute_dod(dem1, dem2, lod)
@@ -340,13 +264,9 @@ def run_comparison(n_events=5, dem_res=DEM_RES, lod=LOD_THRESHOLD):
             "start_date": d1_str, "end_date": d2_str,
             "V_M3C2": v_m3c2, "V_DoD": v_dod,
             "ratio": ratio, "status": "ok",
-            # stash for figure
-            "_dod": dod, "_dem1": dem1, "_dem2": dem2,
+            # stash arrays for figure
+            "_dod": dod,
             "_x_edges": x_edges, "_y_edges": y_edges,
-            "_along_start": row["alongshore_start_m"],
-            "_along_end": row["alongshore_end_m"],
-            "_elev": row["elevation"],
-            "_height": row["height"],
         })
 
     return pd.DataFrame(results)
@@ -390,18 +310,18 @@ def make_figure(results_df):
         ax_bar.text(j, y_top * 1.05, ratio_str, ha="center", va="bottom",
                     fontsize=8, color="#333")
 
-    ax_bar.set_ylim(0, ok["V_M3C2"].max() * 1.25)
+    y_ceil = max(ok["V_M3C2"].max(), ok["V_DoD"].max()) * 1.25
+    ax_bar.set_ylim(0, y_ceil)
 
     # ── Panel B: spatial map of largest event ──────────────────────────────
     ax_map = fig.add_subplot(gs[1])
     biggest = ok.iloc[0]
 
-    if "_dod" in biggest and biggest["_dod"] is not None:
-        dod = biggest["_dod"]
+    dod = biggest["_dod"]
+    if dod is not None and not np.all(np.isnan(dod)):
         x_edges = biggest["_x_edges"]
         y_edges = biggest["_y_edges"]
 
-        # Plot DoD
         vmax = max(abs(np.nanmin(dod)), abs(np.nanmax(dod)), 0.5)
         im = ax_map.pcolormesh(x_edges, y_edges, dod,
                                cmap="RdBu", vmin=-vmax, vmax=vmax,
@@ -428,13 +348,13 @@ def make_figure(results_df):
     ax_xs.set_title("(c) Why DEMs miss\n     cliff-face change",
                      fontweight="bold", loc="left", fontsize=9)
 
-    # Draw cliff profile (before)
+    # Cliff profile (before)
     cliff_x = [0, 0, 0.5, 0.5, 0, 0, 8, 8]
     cliff_z = [0, 4, 4, 9, 9, 12, 12, 0]
     ax_xs.fill(cliff_x, cliff_z, color="#d9c6a5", edgecolor="#333",
                linewidth=1.5, label="Cliff (before)")
 
-    # Draw eroded notch
+    # Eroded notch
     notch_x = [0, 0.8, 0.8, 0]
     notch_z = [4, 4, 9, 9]
     ax_xs.fill(notch_x, notch_z, color="#ef8a62", edgecolor="#b2182b",
