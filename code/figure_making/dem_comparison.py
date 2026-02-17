@@ -2,22 +2,15 @@
 """
 dem_comparison.py
 
-Compares M3C2-based volumes (this study) against traditional DEM-of-Difference
+Compares M3C2-based erosion volumes against traditional DEM-of-Difference
 (DoD) volumes for the top-N largest QC'd erosion events at Del Mar.
 
-The top-down DEM (max Z per XY cell) is intentionally a naive representation
-of the cliff — it captures the cliff top and beach surfaces but compresses the
-near-vertical face into a 1-3 cell wide strip.  This is exactly the limitation
-of classical DEM differencing for vertical cliffs, and the comparison quantifies
-how much volume is missed.
-
-For each event the script:
-  1. Loads the two noveg LAS point clouds bracketing the event.
-  2. Clips to the event's alongshore footprint (+ buffer).
-  3. Rasterises both clouds to top-down DEMs (max Z per XY cell).
-  4. Computes DoD = DEM_after - DEM_before, applies a LoD threshold.
-  5. Computes V_DoD from the negative (erosion) cells.
-  6. Compares V_DoD to V_M3C2 from the QC'd event list.
+For each date pair the script:
+  1. Loads both full noveg LAS point clouds (no spatial clipping).
+  2. Rasterises both to top-down DEMs (max Z per XY cell) on a common grid.
+  3. Computes DoD = DEM_after - DEM_before, applies a LoD threshold.
+  4. Reports per-survey total erosion volume from the DoD.
+  5. Compares V_DoD to the sum of all M3C2 erosion events for that date pair.
 
 Usage:
     python3 dem_comparison.py
@@ -32,7 +25,6 @@ import argparse
 import numpy as np
 import pandas as pd
 import laspy
-import geopandas as gpd
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 
@@ -45,9 +37,6 @@ else:
 
 LOCATION = "DelMar"
 NOVEG_DIR = os.path.join(BASE, "results", LOCATION, "noveg")
-SHP_DIR = os.path.join(BASE, "utilities", "shape_files",
-                       "DelMarPolygons595to620at25cm")
-SHP_FILE = os.path.join(SHP_DIR, "DelMarPolygons595to620at25cm.shp")
 
 # QC event list (repo-relative, auto-detect most recent)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -60,7 +49,6 @@ FIG_DIR = os.path.join(REPO_ROOT, "figures", "appendix")
 # ── constants ──────────────────────────────────────────────────────────────────
 DEM_RES = 0.25          # m – top-down DEM cell size (default)
 LOD_THRESHOLD = 0.25    # m – Level of Detection for DoD
-ALONG_BUFFER = 20.0     # m – buffer around event footprint (UTM Y)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -77,25 +65,6 @@ def find_qc_csv():
     return matches[-1]
 
 
-def build_alongshore_to_utm(shp_path):
-    """Return arrays (alongshore_m, centroid_y) sorted by alongshore_m.
-
-    alongshore_m = centroid_Y - min(centroid_Y), matching the data-cube
-    coordinate system used in the event lists.
-    """
-    gdf = gpd.read_file(shp_path)
-    cy = gdf.geometry.centroid.y.values
-    min_y = cy.min()
-    along = cy - min_y
-    order = np.argsort(along)
-    return along[order], cy[order]
-
-
-def alongshore_to_utm_y(along_m, along_arr, utm_y_arr):
-    """Convert an alongshore_m value to UTM Y via linear interpolation."""
-    return np.interp(along_m, along_arr, utm_y_arr)
-
-
 def find_noveg_file(date_str):
     """Find the noveg LAS file whose name starts with *date_str* (YYYYMMDD)."""
     pattern = os.path.join(NOVEG_DIR, f"{date_str}*.las")
@@ -105,25 +74,17 @@ def find_noveg_file(date_str):
     return matches[0]
 
 
-def load_and_clip(las_path, y_min, y_max):
-    """Load a LAS file and return (x, y, z) clipped to y_min <= y <= y_max."""
+def load_full(las_path):
+    """Load a LAS file and return (x, y, z) as float64 arrays."""
     las = laspy.read(las_path)
     x = np.asarray(las.x, dtype=np.float64)
     y = np.asarray(las.y, dtype=np.float64)
     z = np.asarray(las.z, dtype=np.float64)
-    mask = (y >= y_min) & (y <= y_max)
-    return x[mask], y[mask], z[mask]
+    return x, y, z
 
 
 def rasterise_to_common_grid(x, y, z, x_min, y_min, dem_res, nx, ny):
     """Rasterise points to a top-down DSM (max Z per cell) on a pre-defined grid.
-
-    Parameters
-    ----------
-    x, y, z : 1-D arrays of point coordinates
-    x_min, y_min : float – origin of the grid
-    dem_res : float – cell size (m)
-    nx, ny : int – number of cells in X and Y
 
     Returns
     -------
@@ -145,7 +106,6 @@ def compute_dod(dem_before, dem_after, lod):
     Returns
     -------
     dod : 2-D array (positive = deposition, negative = erosion), NaN = no data.
-          NaN cells are preserved (np.abs(NaN) < lod is False, so they stay NaN).
     """
     valid = ~np.isnan(dem_before) & ~np.isnan(dem_after)
     dod = np.full_like(dem_before, np.nan)
@@ -163,42 +123,81 @@ def dod_erosion_volume(dod, cell_area):
     return float(np.sum(np.abs(dod[ero_mask])) * cell_area)
 
 
+def dod_deposition_volume(dod, cell_area):
+    """Total deposition volume from a DoD (sum of positive cells)."""
+    dep_mask = dod > 0
+    if not np.any(dep_mask):
+        return 0.0
+    return float(np.sum(dod[dep_mask]) * cell_area)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  MAIN COMPARISON
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def run_comparison(n_events=5, dem_res=DEM_RES, lod=LOD_THRESHOLD):
-    """Run the DEM-vs-M3C2 comparison for the top-N events.
+    """Run the DEM-vs-M3C2 comparison for the top-N event date pairs.
 
-    Returns a DataFrame with one row per event.
+    Uses the full survey extent (no spatial clipping).
+    Returns a DataFrame with one row per date pair.
     """
     qc_csv = find_qc_csv()
     print(f"Using QC file: {os.path.basename(qc_csv)}")
 
     df = pd.read_csv(qc_csv,
                      parse_dates=["mid_date", "start_date", "end_date"])
-    real = (df[df["qc_flag"] == "real"]
-            .sort_values("volume", ascending=False)
-            .head(n_events)
-            .reset_index(drop=True))
+    real = df[df["qc_flag"] == "real"].copy()
+
+    # Get top N events by volume to determine which date pairs to process
+    top_events = (real.sort_values("volume", ascending=False)
+                  .head(n_events)
+                  .reset_index(drop=True))
+
+    # For each date pair, sum ALL real M3C2 erosion events (not just the top one)
+    date_pairs = []
+    for _, row in top_events.iterrows():
+        d1 = row["start_date"]
+        d2 = row["end_date"]
+        # Sum all real events for this date pair
+        pair_mask = (real["start_date"] == d1) & (real["end_date"] == d2)
+        total_m3c2 = real.loc[pair_mask, "volume"].sum()
+        n_events_pair = pair_mask.sum()
+        date_pairs.append({
+            "start_date": d1,
+            "end_date": d2,
+            "V_M3C2_total": total_m3c2,
+            "V_M3C2_top_event": row["volume"],
+            "n_m3c2_events": n_events_pair,
+        })
+
+    # Deduplicate in case the same date pair appears for multiple top events
+    seen = set()
+    unique_pairs = []
+    for dp in date_pairs:
+        key = (dp["start_date"], dp["end_date"])
+        if key not in seen:
+            seen.add(key)
+            unique_pairs.append(dp)
+    date_pairs = unique_pairs[:n_events]
 
     print(f"\n{'='*70}")
-    print(f"DEM-of-Difference vs M3C2 Comparison  —  Del Mar, top {n_events}")
+    print(f"DEM-of-Difference vs M3C2 Comparison  —  Del Mar (full survey)")
     print(f"DEM resolution: {dem_res} m  |  LoD threshold: {lod} m")
+    print(f"Using {len(date_pairs)} unique date pairs from top {n_events} events")
     print(f"{'='*70}\n")
 
-    # Build alongshore → UTM mapping from shapefile
-    along_arr, utm_y_arr = build_alongshore_to_utm(SHP_FILE)
     cell_area = dem_res * dem_res
-
     results = []
 
-    for i, row in real.iterrows():
-        d1_str = row["start_date"].strftime("%Y%m%d")
-        d2_str = row["end_date"].strftime("%Y%m%d")
-        v_m3c2 = row["volume"]
+    for i, dp in enumerate(date_pairs):
+        d1_str = dp["start_date"].strftime("%Y%m%d")
+        d2_str = dp["end_date"].strftime("%Y%m%d")
+        v_m3c2 = dp["V_M3C2_total"]
 
-        print(f"Event {i+1}: {d1_str} → {d2_str}  |  V_M3C2 = {v_m3c2:.1f} m³")
+        print(f"Survey pair {i+1}: {d1_str} → {d2_str}")
+        print(f"  M3C2: {dp['n_m3c2_events']} real events, "
+              f"total V = {v_m3c2:.1f} m³ "
+              f"(top event: {dp['V_M3C2_top_event']:.1f} m³)")
 
         # --- find noveg files ---
         f1 = find_noveg_file(d1_str)
@@ -206,86 +205,85 @@ def run_comparison(n_events=5, dem_res=DEM_RES, lod=LOD_THRESHOLD):
         if f1 is None or f2 is None:
             print(f"  !! Missing noveg file(s): d1={f1}, d2={f2}")
             results.append({
-                "event": i + 1,
+                "pair": i + 1,
                 "start_date": d1_str, "end_date": d2_str,
-                "V_M3C2": v_m3c2, "V_DoD": np.nan,
-                "ratio": np.nan, "status": "missing_file"
+                "V_M3C2": v_m3c2, "V_DoD_ero": np.nan,
+                "V_DoD_dep": np.nan, "ratio": np.nan,
+                "n_m3c2_events": dp["n_m3c2_events"],
+                "status": "missing_file"
             })
             continue
 
-        # --- spatial clip bounds (UTM Y) ---
-        y_lo = alongshore_to_utm_y(row["alongshore_start_m"],
-                                   along_arr, utm_y_arr) - ALONG_BUFFER
-        y_hi = alongshore_to_utm_y(row["alongshore_end_m"],
-                                   along_arr, utm_y_arr) + ALONG_BUFFER
-
+        # --- load full files ---
         print(f"  Loading {os.path.basename(f1)} ...")
-        x1, y1, z1 = load_and_clip(f1, y_lo, y_hi)
-        print(f"    → {len(x1):,} points in clip window")
+        x1, y1, z1 = load_full(f1)
+        print(f"    → {len(x1):,} points")
 
         print(f"  Loading {os.path.basename(f2)} ...")
-        x2, y2, z2 = load_and_clip(f2, y_lo, y_hi)
-        print(f"    → {len(x2):,} points in clip window")
-
-        if len(x1) == 0 or len(x2) == 0:
-            print("  !! No points in clip window")
-            results.append({
-                "event": i + 1,
-                "start_date": d1_str, "end_date": d2_str,
-                "V_M3C2": v_m3c2, "V_DoD": np.nan,
-                "ratio": np.nan, "status": "no_points"
-            })
-            continue
+        x2, y2, z2 = load_full(f2)
+        print(f"    → {len(x2):,} points")
 
         # --- common-extent grid for both DEMs ---
         all_x = np.concatenate([x1, x2])
         all_y = np.concatenate([y1, y2])
         x_min, x_max = all_x.min(), all_x.max()
         y_min, y_max = all_y.min(), all_y.max()
+        del all_x, all_y  # free memory
 
         nx = int(np.ceil((x_max - x_min) / dem_res))
         ny = int(np.ceil((y_max - y_min) / dem_res))
         x_edges = np.linspace(x_min, x_min + nx * dem_res, nx + 1)
         y_edges = np.linspace(y_min, y_min + ny * dem_res, ny + 1)
 
-        print(f"  Rasterising DEMs ({nx}×{ny} cells) ...")
-        dem1 = rasterise_to_common_grid(x1, y1, z1,
-                                        x_min, y_min, dem_res, nx, ny)
-        dem2 = rasterise_to_common_grid(x2, y2, z2,
-                                        x_min, y_min, dem_res, nx, ny)
+        print(f"  Grid: {nx} × {ny} cells ({nx*ny:,} total)")
+        print(f"  Extent: X [{x_min:.1f}, {x_max:.1f}], Y [{y_min:.1f}, {y_max:.1f}]")
+        print(f"  Rasterising DEMs ...")
+
+        dem1 = rasterise_to_common_grid(x1, y1, z1, x_min, y_min, dem_res, nx, ny)
+        del x1, y1, z1
+        dem2 = rasterise_to_common_grid(x2, y2, z2, x_min, y_min, dem_res, nx, ny)
+        del x2, y2, z2
 
         # --- DoD ---
         dod = compute_dod(dem1, dem2, lod)
-        v_dod = dod_erosion_volume(dod, cell_area)
-        ratio = v_m3c2 / v_dod if v_dod > 0 else np.inf
+        v_dod_ero = dod_erosion_volume(dod, cell_area)
+        v_dod_dep = dod_deposition_volume(dod, cell_area)
+        ratio = v_m3c2 / v_dod_ero if v_dod_ero > 0 else np.inf
 
-        # Raw DoD (no LoD threshold) for diagnostics
+        # Raw DoD for diagnostics
         valid_both = ~np.isnan(dem1) & ~np.isnan(dem2)
         raw_diff = dem2[valid_both] - dem1[valid_both]
-        dod_raw = np.full_like(dem1, np.nan)
-        dod_raw[valid_both] = raw_diff
 
-        print(f"  DEM1 data cells: {np.sum(~np.isnan(dem1)):,} / {nx*ny:,}")
-        print(f"  DEM2 data cells: {np.sum(~np.isnan(dem2)):,} / {nx*ny:,}")
-        print(f"  Overlap cells  : {np.sum(valid_both):,}")
-        print(f"  Raw DoD range  : {raw_diff.min():.3f} to {raw_diff.max():.3f} m")
-        print(f"  Raw DoD mean   : {raw_diff.mean():.4f} m")
-        print(f"  Cells |DoD|>{lod}m: {np.sum(np.abs(raw_diff) >= lod):,}")
-        print(f"  Cells DoD<-{lod}m : {np.sum(raw_diff <= -lod):,}  (erosion)")
-        print(f"  V_DoD = {v_dod:.1f} m³  |  ratio = {ratio:.1f}×")
-        print(f"  Files used:")
-        print(f"    before: {os.path.basename(f1)}")
-        print(f"    after:  {os.path.basename(f2)}")
-        print(f"  Clip window: UTM Y = {y_lo:.1f} to {y_hi:.1f}\n")
+        n_dem1 = np.sum(~np.isnan(dem1))
+        n_dem2 = np.sum(~np.isnan(dem2))
+        n_overlap = np.sum(valid_both)
+
+        print(f"  DEM1 data cells: {n_dem1:,} / {nx*ny:,} "
+              f"({100*n_dem1/(nx*ny):.1f}%)")
+        print(f"  DEM2 data cells: {n_dem2:,} / {nx*ny:,} "
+              f"({100*n_dem2/(nx*ny):.1f}%)")
+        print(f"  Overlap cells:   {n_overlap:,}")
+        print(f"  Raw DoD range:   {raw_diff.min():.3f} to {raw_diff.max():.3f} m")
+        print(f"  Raw DoD mean:    {raw_diff.mean():.4f} m")
+        print(f"  Cells |DoD|>{lod}m:  {np.sum(np.abs(raw_diff) >= lod):,}")
+        print(f"  Cells DoD<-{lod}m:   {np.sum(raw_diff <= -lod):,}  (erosion)")
+        print(f"  Cells DoD>{lod}m:    {np.sum(raw_diff >= lod):,}  (deposition)")
+        print(f"  V_DoD_erosion  = {v_dod_ero:.1f} m³")
+        print(f"  V_DoD_deposition = {v_dod_dep:.1f} m³")
+        print(f"  V_M3C2_total   = {v_m3c2:.1f} m³")
+        print(f"  Ratio (M3C2/DoD) = {ratio:.1f}×")
+        print()
 
         results.append({
-            "event": i + 1,
+            "pair": i + 1,
             "start_date": d1_str, "end_date": d2_str,
-            "V_M3C2": v_m3c2, "V_DoD": v_dod,
-            "ratio": ratio, "status": "ok",
+            "V_M3C2": v_m3c2, "V_DoD_ero": v_dod_ero,
+            "V_DoD_dep": v_dod_dep, "ratio": ratio,
+            "n_m3c2_events": dp["n_m3c2_events"],
+            "status": "ok",
             # stash arrays for figures
             "_dem1": dem1, "_dem2": dem2,
-            "_dod": dod, "_dod_raw": dod_raw,
+            "_dod": dod,
             "_x_edges": x_edges, "_y_edges": y_edges,
         })
 
@@ -293,47 +291,135 @@ def run_comparison(n_events=5, dem_res=DEM_RES, lod=LOD_THRESHOLD):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  FIGURE
+#  FIGURES
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def make_figure(results_df):
-    """Three-panel comparison figure."""
+def make_event_figures(results_df):
+    """Save a 3-panel diagnostic figure for each survey pair.
 
+    Panels: DEM before, DEM after, thresholded DoD.
+    """
+    dem_dir = os.path.join(FIG_DIR, "dems")
+    os.makedirs(dem_dir, exist_ok=True)
+
+    ok = results_df[results_df["status"] == "ok"]
+    if ok.empty:
+        print("No valid survey pairs to plot.")
+        return
+
+    for _, row in ok.iterrows():
+        pair = int(row["pair"])
+        dem1 = row["_dem1"]
+        dem2 = row["_dem2"]
+        dod = row["_dod"]
+        x_edges = row["_x_edges"]
+        y_edges = row["_y_edges"]
+
+        fig, axes = plt.subplots(1, 3, figsize=(20, 8))
+
+        # Shared elevation colour range
+        z_lo = np.nanmin([np.nanmin(dem1), np.nanmin(dem2)])
+        z_hi = np.nanmax([np.nanmax(dem1), np.nanmax(dem2)])
+
+        # Panel 1: DEM before
+        ax = axes[0]
+        im1 = ax.pcolormesh(x_edges, y_edges, dem1,
+                            cmap="terrain", vmin=z_lo, vmax=z_hi,
+                            shading="flat")
+        plt.colorbar(im1, ax=ax, shrink=0.7, label="Elevation (m)")
+        ax.set_title(f"(a) DEM before  ({row['start_date']})",
+                     fontweight="bold", fontsize=10)
+        ax.set_xlabel("Easting (m)")
+        ax.set_ylabel("Northing (m)")
+        ax.set_aspect("equal")
+        ax.ticklabel_format(useOffset=False, style="plain")
+        ax.tick_params(labelsize=7, labelrotation=30)
+
+        # Panel 2: DEM after
+        ax = axes[1]
+        im2 = ax.pcolormesh(x_edges, y_edges, dem2,
+                            cmap="terrain", vmin=z_lo, vmax=z_hi,
+                            shading="flat")
+        plt.colorbar(im2, ax=ax, shrink=0.7, label="Elevation (m)")
+        ax.set_title(f"(b) DEM after  ({row['end_date']})",
+                     fontweight="bold", fontsize=10)
+        ax.set_xlabel("Easting (m)")
+        ax.set_ylabel("Northing (m)")
+        ax.set_aspect("equal")
+        ax.ticklabel_format(useOffset=False, style="plain")
+        ax.tick_params(labelsize=7, labelrotation=30)
+
+        # Panel 3: Thresholded DoD
+        ax = axes[2]
+        dod_abs_max = max(abs(np.nanmin(dod)), abs(np.nanmax(dod)), 0.5)
+        im3 = ax.pcolormesh(x_edges, y_edges, dod,
+                            cmap="RdBu", vmin=-dod_abs_max, vmax=dod_abs_max,
+                            shading="flat")
+        plt.colorbar(im3, ax=ax, shrink=0.7, label="DoD (m)")
+        ax.set_title(
+            f"(c) DoD (LoD={LOD_THRESHOLD}m)  —  "
+            f"V_DoD={row['V_DoD_ero']:.1f} m³  vs  "
+            f"V_M3C2={row['V_M3C2']:.1f} m³  "
+            f"({row['ratio']:.1f}×)",
+            fontweight="bold", fontsize=9)
+        ax.set_xlabel("Easting (m)")
+        ax.set_ylabel("Northing (m)")
+        ax.set_aspect("equal")
+        ax.ticklabel_format(useOffset=False, style="plain")
+        ax.tick_params(labelsize=7, labelrotation=30)
+
+        fig.suptitle(
+            f"Survey pair {pair}:  {row['start_date']} → {row['end_date']}  "
+            f"({row['n_m3c2_events']} M3C2 events)",
+            fontsize=13, fontweight="bold")
+        plt.tight_layout()
+
+        out = os.path.join(dem_dir,
+                           f"pair_{pair}_{row['start_date']}_to_{row['end_date']}.png")
+        plt.savefig(out, dpi=150, bbox_inches="tight",
+                    facecolor="white", edgecolor="none")
+        plt.close()
+        print(f"  Saved: {out}")
+
+    print(f"\nAll survey pair DEMs saved to: {dem_dir}")
+
+
+def make_figure(results_df):
+    """Summary comparison figure: bar chart + DoD map of largest pair + schematic."""
     os.makedirs(FIG_DIR, exist_ok=True)
 
     ok = results_df[results_df["status"] == "ok"].copy()
     if ok.empty:
-        print("No valid events to plot.")
+        print("No valid survey pairs to plot.")
         return
 
     fig = plt.figure(figsize=(14, 5))
-    gs = gridspec.GridSpec(1, 3, width_ratios=[1.0, 1.2, 0.8],
-                           wspace=0.35)
+    gs = gridspec.GridSpec(1, 3, width_ratios=[1.0, 1.2, 0.8], wspace=0.35)
 
     # ── Panel A: bar chart ─────────────────────────────────────────────────
     ax_bar = fig.add_subplot(gs[0])
     x_pos = np.arange(len(ok))
     w = 0.35
     ax_bar.bar(x_pos - w/2, ok["V_M3C2"], w, color="#2166ac", label="M3C2")
-    ax_bar.bar(x_pos + w/2, ok["V_DoD"],  w, color="#b2182b", label="DoD")
+    ax_bar.bar(x_pos + w/2, ok["V_DoD_ero"], w, color="#b2182b", label="DoD")
     ax_bar.set_xticks(x_pos)
-    ax_bar.set_xticklabels([f"E{int(e)}" for e in ok["event"]], fontsize=9)
-    ax_bar.set_ylabel("Volume (m³)")
-    ax_bar.set_xlabel("Event")
+    ax_bar.set_xticklabels([f"P{int(p)}" for p in ok["pair"]], fontsize=9)
+    ax_bar.set_ylabel("Erosion Volume (m\u00b3)")
+    ax_bar.set_xlabel("Survey Pair")
     ax_bar.legend(frameon=False)
     ax_bar.set_title("(a) Volume comparison", fontweight="bold", loc="left")
 
     # Annotate ratios
     for j, (_, r) in enumerate(ok.iterrows()):
-        ratio_str = f"{r['ratio']:.0f}×" if np.isfinite(r["ratio"]) else "∞"
-        y_top = max(r["V_M3C2"], r["V_DoD"])
+        ratio_str = f"{r['ratio']:.1f}\u00d7" if np.isfinite(r["ratio"]) else "\u221e"
+        y_top = max(r["V_M3C2"], r["V_DoD_ero"])
         ax_bar.text(j, y_top * 1.05, ratio_str, ha="center", va="bottom",
                     fontsize=8, color="#333")
 
-    y_ceil = max(ok["V_M3C2"].max(), ok["V_DoD"].max()) * 1.25
+    y_ceil = max(ok["V_M3C2"].max(), ok["V_DoD_ero"].max()) * 1.25
     ax_bar.set_ylim(0, y_ceil)
 
-    # ── Panel B: spatial map of largest event ──────────────────────────────
+    # ── Panel B: DoD map of largest survey pair ────────────────────────────
     ax_map = fig.add_subplot(gs[1])
     biggest = ok.iloc[0]
 
@@ -352,8 +438,8 @@ def make_figure(results_df):
         ax_map.set_xlabel("Easting (m)")
         ax_map.set_ylabel("Northing (m)")
         ax_map.set_title(
-            f"(b) DoD — Event E{int(biggest['event'])}:  "
-            f"{biggest['start_date']} → {biggest['end_date']}",
+            f"(b) DoD — P{int(biggest['pair'])}:  "
+            f"{biggest['start_date']} \u2192 {biggest['end_date']}",
             fontweight="bold", loc="left", fontsize=9)
         ax_map.set_aspect("equal")
         ax_map.ticklabel_format(useOffset=False, style="plain")
@@ -398,7 +484,7 @@ def make_figure(results_df):
                ha="center", fontsize=8, color="#b2182b", fontweight="bold")
 
     # Labels
-    ax_xs.text(4, 11.5, "Cliff top — no change\nvisible from above",
+    ax_xs.text(4, 11.5, "Cliff top \u2014 no change\nvisible from above",
                ha="center", fontsize=7, style="italic", color="#555")
     ax_xs.text(1.8, 6.5, "Face scar\n(M3C2 only)",
                ha="center", fontsize=7, fontweight="bold", color="#b2182b")
@@ -416,127 +502,12 @@ def make_figure(results_df):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  PER-EVENT DIAGNOSTIC FIGURES
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def make_event_figures(results_df):
-    """Save a 4-panel diagnostic figure for each event.
-
-    Panels: DEM before, DEM after, raw DoD (no threshold), thresholded DoD.
-    Red = negative (erosion), Blue = positive (deposition).
-    """
-
-    dem_dir = os.path.join(FIG_DIR, "dems")
-    os.makedirs(dem_dir, exist_ok=True)
-
-    ok = results_df[results_df["status"] == "ok"]
-    if ok.empty:
-        print("No valid events to plot.")
-        return
-
-    for _, row in ok.iterrows():
-        ev = int(row["event"])
-        dem1 = row["_dem1"]
-        dem2 = row["_dem2"]
-        dod = row["_dod"]
-        dod_raw = row["_dod_raw"]
-        x_edges = row["_x_edges"]
-        y_edges = row["_y_edges"]
-
-        fig, axes = plt.subplots(2, 2, figsize=(14, 12))
-
-        # -- shared elevation colour range for DEM panels --
-        z_lo = np.nanmin([np.nanmin(dem1), np.nanmin(dem2)])
-        z_hi = np.nanmax([np.nanmax(dem1), np.nanmax(dem2)])
-
-        # -- shared DoD colour range for both DoD panels --
-        raw_abs_max = max(abs(np.nanmin(dod_raw)), abs(np.nanmax(dod_raw)), 0.5)
-
-        # Panel 1: DEM before
-        ax = axes[0, 0]
-        im1 = ax.pcolormesh(x_edges, y_edges, dem1,
-                            cmap="terrain", vmin=z_lo, vmax=z_hi,
-                            shading="flat")
-        plt.colorbar(im1, ax=ax, shrink=0.7, label="Elevation (m)")
-        ax.set_title(f"(a) DEM before  ({row['start_date']})",
-                     fontweight="bold", fontsize=10)
-        ax.set_xlabel("Easting (m)")
-        ax.set_ylabel("Northing (m)")
-        ax.set_aspect("equal")
-        ax.ticklabel_format(useOffset=False, style="plain")
-        ax.tick_params(labelsize=7, labelrotation=30)
-
-        # Panel 2: DEM after
-        ax = axes[0, 1]
-        im2 = ax.pcolormesh(x_edges, y_edges, dem2,
-                            cmap="terrain", vmin=z_lo, vmax=z_hi,
-                            shading="flat")
-        plt.colorbar(im2, ax=ax, shrink=0.7, label="Elevation (m)")
-        ax.set_title(f"(b) DEM after  ({row['end_date']})",
-                     fontweight="bold", fontsize=10)
-        ax.set_xlabel("Easting (m)")
-        ax.set_ylabel("Northing (m)")
-        ax.set_aspect("equal")
-        ax.ticklabel_format(useOffset=False, style="plain")
-        ax.tick_params(labelsize=7, labelrotation=30)
-
-        # Panel 3: Raw DoD (NO LoD threshold)
-        ax = axes[1, 0]
-        im3 = ax.pcolormesh(x_edges, y_edges, dod_raw,
-                            cmap="RdBu", vmin=-raw_abs_max, vmax=raw_abs_max,
-                            shading="flat")
-        plt.colorbar(im3, ax=ax, shrink=0.7, label="DoD (m)")
-        raw_ero = dod_raw[dod_raw < 0]
-        raw_ero_vol = float(np.sum(np.abs(raw_ero))) * (row.get("_res", DEM_RES) ** 2) if len(raw_ero) > 0 else 0.0
-        ax.set_title(f"(c) Raw DoD (no threshold)  —  "
-                     f"ero cells: {len(raw_ero):,}",
-                     fontweight="bold", fontsize=9)
-        ax.set_xlabel("Easting (m)")
-        ax.set_ylabel("Northing (m)")
-        ax.set_aspect("equal")
-        ax.ticklabel_format(useOffset=False, style="plain")
-        ax.tick_params(labelsize=7, labelrotation=30)
-
-        # Panel 4: Thresholded DoD (LoD applied)
-        ax = axes[1, 1]
-        im4 = ax.pcolormesh(x_edges, y_edges, dod,
-                            cmap="RdBu", vmin=-raw_abs_max, vmax=raw_abs_max,
-                            shading="flat")
-        plt.colorbar(im4, ax=ax, shrink=0.7, label="DoD (m)")
-        ax.set_title(
-            f"(d) DoD (LoD={LOD_THRESHOLD}m)  —  "
-            f"V_DoD={row['V_DoD']:.1f} m³  vs  "
-            f"V_M3C2={row['V_M3C2']:.1f} m³  "
-            f"({row['ratio']:.0f}×)",
-            fontweight="bold", fontsize=9)
-        ax.set_xlabel("Easting (m)")
-        ax.set_ylabel("Northing (m)")
-        ax.set_aspect("equal")
-        ax.ticklabel_format(useOffset=False, style="plain")
-        ax.tick_params(labelsize=7, labelrotation=30)
-
-        fig.suptitle(
-            f"Event E{ev}:  {row['start_date']} → {row['end_date']}",
-            fontsize=13, fontweight="bold")
-        plt.tight_layout()
-
-        out = os.path.join(dem_dir,
-                           f"event_{ev}_{row['start_date']}_to_{row['end_date']}.png")
-        plt.savefig(out, dpi=150, bbox_inches="tight",
-                    facecolor="white", edgecolor="none")
-        plt.close()
-        print(f"  Saved: {out}")
-
-    print(f"\nAll event DEMs saved to: {dem_dir}")
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
 #  CLI
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Compare M3C2 vs DEM-of-Difference volumes.")
+        description="Compare M3C2 vs DEM-of-Difference volumes (full survey).")
     parser.add_argument("--n_events", type=int, default=5,
                         help="Number of top events to compare (default: 5)")
     parser.add_argument("--dem_res", type=float, default=DEM_RES,
@@ -553,9 +524,10 @@ def main():
 
     # Print summary table
     print(f"\n{'='*70}")
-    print("RESULTS")
+    print("RESULTS SUMMARY")
     print(f"{'='*70}")
-    cols = ["event", "start_date", "end_date", "V_M3C2", "V_DoD", "ratio"]
+    cols = ["pair", "start_date", "end_date", "V_M3C2", "V_DoD_ero",
+            "V_DoD_dep", "ratio", "n_m3c2_events"]
     print(results[cols].to_string(index=False, float_format="%.1f"))
     print()
 

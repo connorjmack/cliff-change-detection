@@ -514,12 +514,9 @@ def plot_geomorph_stats(df, out_dir, title_prefix, area_hm2=None, normalized=Tru
         print(f"    Regime 2 [{BREAKPOINT} - {v_max:.1f} m^3]:")
         print(f"      B2 = {B2:.3f}, alpha2 = {a2:.3f}, R^2 = {r2_2:.4f}, N = {n2}")
 
-        ax1.text(0.03, 0.03,
-                 f'$A_{{st}} \\times T = {norm_denom:.1f}$ hm$^2$ yr',
-                 transform=ax1.transAxes, ha='left', va='bottom',
-                 fontsize=13, color='#333333',
-                 bbox=dict(facecolor='white', edgecolor='#aaaaaa',
-                           boxstyle='round,pad=0.4', alpha=0.85))
+        # Add A_st x T as a text-only legend entry
+        ax1.plot([], [], ' ',
+                 label=f'$A_{{st}} \\times T = {norm_denom:.1f}$ hm$^2$ yr')
 
         ax1.set_xlabel(r'Erosion Volume $V$ (m$^3$)', fontweight='bold')
         ax1.set_ylabel(r'$F_{st}$ (hm$^{-2}$ yr$^{-1}$)', fontweight='bold')
