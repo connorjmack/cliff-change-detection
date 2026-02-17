@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-plot_geomorph_stats_v8.py
+geo_stats.py
 
 Generates a 2x2 Geomorphology Statistics Dashboard.
 
-Updates:
-  - Font sizes INCREASED for better visibility.
-  - Gini Coefficient label moved to bottom-left.
-  - Winter Season (Oct 1 - Mar 31) shading confirmed in Panel D.
-  - Prints Seasonal stats AND Descriptive Stats (Median/IQR) to terminal.
+Panel A now shows a spatiotemporally normalized cumulative magnitude-frequency
+curve following Janeras et al. (2023).  Raw cumulative exceedance counts N(>=V)
+are divided by the monitored cliff face area A_st (hm^2) and the observation
+period T (yr) to yield F_st (hm^-2 yr^-1), enabling direct comparison across
+sites and studies.  Per-location cliff face areas are pre-computed from the NPZ
+data cubes (0.25 m polygon width, median cliff base subtracted per polygon).
 
 Usage:
-    python3 plot_geomorph_stats_v8.py --location DelMar
-    python3 plot_geomorph_stats_v8.py --location all
+    python3 geo_stats.py --location DelMar
+    python3 geo_stats.py --location all
 """
 
 import os
@@ -31,6 +32,19 @@ RES_VAL = 0.25
 CELL_AREA = RES_VAL * RES_VAL
 FILE_TAG = '25cm'
 LOCATIONS_ALL = ['DelMar', 'Torrey', 'Solana', 'Encinitas', 'SanElijo']
+
+# Per-location cliff face areas (hm²) derived from NPZ data cubes.
+# Method: per-polygon cliff height = highest occupied 0.25-m bin minus median
+# lowest-data-bin (z0).  Area = sum(heights) * 0.25 m polygon width / 10,000.
+AREA_HM2 = {
+    'DelMar':    2.6636,  # z0=2.50 m, 9,124 polygons
+    'Solana':    3.3266,  # z0=3.25 m, 10,787 polygons
+    'Encinitas': 7.3155,  # z0=2.75 m, 22,225 polygons
+    'SanElijo':  2.3109,  # z0=2.25 m, 9,852 polygons
+    'Torrey':    3.4274,  # z0=2.50 m, 5,328 polygons
+    'Blacks':    7.4069,  # z0=3.25 m, 12,982 polygons
+}
+AREA_HM2['Regional'] = sum(AREA_HM2.values())  # combined regional area
 
 # --- VISUAL SETTINGS ---
 COLOR_MAIN   = '#08519c'    # Strong Blue (Winter)
@@ -64,7 +78,7 @@ def parse_dates(folder_name):
         return datetime.strptime(match.group(1), '%Y%m%d'), datetime.strptime(match.group(2), '%Y%m%d')
     return None, None
 
-def extract_detailed_events(cluster_path, grid_path, unc_path, res_val, date_mid):
+def extract_detailed_events(cluster_path, grid_path, unc_path, res_val, date_mid, date_start, date_end):
     try:
         df_c = pd.read_csv(cluster_path, index_col=0).fillna(0)
         df_g = pd.read_csv(grid_path, index_col=0).fillna(0)
@@ -122,13 +136,15 @@ def extract_detailed_events(cluster_path, grid_path, unc_path, res_val, date_mid
                 vol_unc = 0.0
 
             events.append({
-                'date': date_mid,
-                'volume': vol,
-                'vol_unc': vol_unc,
-                'elevation': z_centroid,
-                'width': width,
-                'height': height,
-                'month': date_mid.month
+                'date':       date_mid,
+                'date_start': date_start,
+                'date_end':   date_end,
+                'volume':     vol,
+                'vol_unc':    vol_unc,
+                'elevation':  z_centroid,
+                'width':      width,
+                'height':     height,
+                'month':      date_mid.month,
             })
         return events
     except Exception as e:
@@ -171,7 +187,8 @@ def collect_all_data(base_dir, locations):
             grid_file, clus_file, unc_file = resolve_interval_paths(folder, interval)
             
             if grid_file and clus_file:
-                events = extract_detailed_events(clus_file, grid_file, unc_file, RES_VAL, d1 + (d2 - d1)/2)
+                events = extract_detailed_events(clus_file, grid_file, unc_file, RES_VAL,
+                                                 d1 + (d2 - d1) / 2, d1, d2)
                 all_events.extend(events)
                 
     return pd.DataFrame(all_events)
@@ -189,45 +206,91 @@ def calculate_gini(array):
     return ((2 * index - n - 1) * array).sum() / (n * array.sum())
 
 def fit_power_law_fixed_cutoff(volumes, cutoff=0.25, n_bins=30):
-    """
-    Fits power law using a HARDCODED cutoff.
-    """
+    """Histogram-based power law fit (original method)."""
     if len(volumes) == 0: return None, None, None, None, 0
-    
-    # 1. Histogram for ALL data (Visualizing the full distribution)
     min_vol, max_vol = volumes.min(), volumes.max()
     bins = np.logspace(np.log10(min_vol), np.log10(max_vol), n_bins)
     hist, edges = np.histogram(volumes, bins=bins)
     centers = (edges[:-1] + edges[1:]) / 2
-
-    # 2. Filter for Fit (Using provided cutoff)
     valid_mask = (centers >= cutoff) & (hist > 0)
-    
     if np.sum(valid_mask) < 3:
         return centers, hist, None, None, 0.0
-        
     x_fit = centers[valid_mask]
     y_fit = hist[valid_mask]
-    
-    # 3. Fit
-    log_x = np.log10(x_fit)
-    log_y = np.log10(y_fit)
-    slope, intercept = np.polyfit(log_x, log_y, 1)
-    
+    slope, intercept = np.polyfit(np.log10(x_fit), np.log10(y_fit), 1)
     y_fitted = 10**intercept * x_fit**slope
-    beta = -slope
-    
-    return centers, hist, x_fit, y_fitted, beta
+    return centers, hist, x_fit, y_fitted, -slope
+
+
+def fit_power_law_cumulative(volumes, area_hm2, t_years, cutoff=0.25):
+    """
+    Computes cumulative exceedance frequency N(>=V), normalizes by A_st * T
+    to yield F_st (hm^-2 yr^-1), then fits a power law above cutoff.
+
+    Following Janeras et al. (2023):  F_st = alpha * V^(-B)
+
+    Parameters
+    ----------
+    volumes  : pd.Series or np.ndarray of event volumes (m^3)
+    area_hm2 : monitored cliff face area (hm^2)
+    t_years  : observation period (yr)
+    cutoff   : minimum volume for power law fit (m^3)
+
+    Returns
+    -------
+    vols_sorted : all volumes sorted descending
+    raw_n       : raw cumulative counts N(>=V)
+    fst         : normalized F_st = N(>=V) / (area_hm2 * t_years)
+    fit_v       : volumes used for fit (>= cutoff)
+    fit_fst     : fitted F_st values on fit_v
+    B           : scaling exponent (positive; slope = -B)
+    alpha       : activity rate (events hm^-2 yr^-1 with V >= 1 m^3)
+    """
+    if len(volumes) == 0:
+        return None, None, None, None, None, 0.0, 0.0
+
+    vols_sorted = np.sort(np.asarray(volumes))[::-1]
+    raw_n = np.arange(1, len(vols_sorted) + 1, dtype=float)
+    norm = area_hm2 * t_years
+    fst = raw_n / norm
+
+    mask = vols_sorted >= cutoff
+    if mask.sum() < 3:
+        return vols_sorted, raw_n, fst, None, None, 0.0, 0.0
+
+    fit_v   = vols_sorted[mask]
+    fit_fst = fst[mask]
+
+    slope, intercept = np.polyfit(np.log10(fit_v), np.log10(fit_fst), 1)
+    fitted_fst = 10**intercept * fit_v**slope
+    B     = -slope
+    alpha = 10**intercept
+
+    return vols_sorted, raw_n, fst, fit_v, fitted_fst, B, alpha
 
 # ==============================================================================
 # 3. PLOTTING
 # ==============================================================================
 
-def plot_geomorph_stats(df, out_dir, title_prefix):
+def plot_geomorph_stats(df, out_dir, title_prefix, area_hm2=None, normalized=True):
     if df.empty: return
 
     # Filter minimal noise
     df_clean = df[df['volume'] >= 0.005].copy()
+
+    # --- NORMALIZATION PARAMETERS ---
+    # Observation period from actual survey dates in the data
+    if 'date_start' in df_clean.columns and 'date_end' in df_clean.columns:
+        t_start = df_clean['date_start'].min()
+        t_end   = df_clean['date_end'].max()
+        t_years = (t_end - t_start).days / 365.25
+    else:
+        t_years = 8.71  # fallback if date columns not present
+
+    # Cliff face area: use passed value, look up by location, or sum all
+    if area_hm2 is None:
+        area_hm2 = AREA_HM2.get(title_prefix, AREA_HM2['Regional'])
+    norm_denom = area_hm2 * t_years
     
     # --- CALCULATE SEASONAL STATISTICS ---
     monthly_vol = df_clean.groupby('month')['volume'].sum()
@@ -276,7 +339,11 @@ def plot_geomorph_stats(df, out_dir, title_prefix):
     print("\n  Individual events typically had:")
     print(f"    - Volumes of {vol_med:.2f} m^3 (IQR: {vol_q1:.2f}-{vol_q3:.2f})")
     print(f"    - Occurred at elevations of {elev_med:.2f} m NAVD88 (IQR: {elev_q1:.2f}-{elev_q3:.2f})")
-    print(f"    - Spanned {span_med:.2f} m alongshore (Figure 7B)")
+    print(f"    - Spanned {span_med:.2f} m alongshore")
+    print(f"\n  Normalization (Janeras et al. 2023):")
+    print(f"    - Cliff face area A_st: {area_hm2:.4f} hm^2")
+    print(f"    - Observation period T: {t_years:.2f} yr")
+    print(f"    - Denominator A_st x T: {norm_denom:.2f} hm^2 yr")
     print("-" * 60)
     # ----------------------------------------------------
 
@@ -284,50 +351,82 @@ def plot_geomorph_stats(df, out_dir, title_prefix):
     fig = plt.figure(figsize=(24, 18)) # Slightly larger for big fonts
     gs = gridspec.GridSpec(2, 2, height_ratios=[1, 1], wspace=0.3, hspace=0.35)
     
-    # ==================== PANEL A: POWER LAW (Simplified) ====================
+    # ==================== PANEL A: MAGNITUDE-FREQUENCY ====================
     ax1 = fig.add_subplot(gs[0, 0])
-    
-    # HARDCODED CUTOFF
-    CUTOFF_VAL = 0.25
-    centers, hist, fit_x, fit_y, beta = fit_power_law_fixed_cutoff(df_clean['volume'], cutoff=CUTOFF_VAL)
-    
-    # 1. Plot Basic Hist Points (Gray Circles) - No Label
-    ax1.loglog(centers, hist, 'o', color='gray', alpha=0.4, markersize=10)
-    
-    # 2. Add Uncertainty Bands
-    bin_edges = np.logspace(np.log10(df_clean['volume'].min()), np.log10(df_clean['volume'].max()), 30)
-    indices = np.digitize(df_clean['volume'], bin_edges)
-    bin_uncs = []
-    for i in range(1, len(bin_edges)):
-        mask = indices == i
-        if np.any(mask):
-            mean_unc = df_clean.loc[mask, 'vol_unc'].mean()
-            bin_uncs.append(mean_unc)
-        else:
-            bin_uncs.append(0)
-    
-    valid_hist_mask = hist > 0
-    if len(bin_uncs) >= len(centers):
-        x_err = np.array(bin_uncs)[:len(centers)]
-        x_err = x_err[valid_hist_mask]
-        ax1.errorbar(centers[valid_hist_mask], hist[valid_hist_mask], 
-                     xerr=x_err, fmt='none', ecolor=COLOR_ACCENT, alpha=0.3, 
-                     capsize=3) # No label
 
-    # 3. Plot Fitted Tail
-    mask_tail = centers >= CUTOFF_VAL
-    ax1.loglog(centers[mask_tail], hist[mask_tail], 'o', color='black', markersize=10)
-    
-    if fit_x is not None:
-        ax1.loglog(fit_x, fit_y, '--', color=COLOR_ACCENT, linewidth=4, 
-                   label=f'$\\beta = {beta:.2f}$')
-        ax1.axvline(CUTOFF_VAL, color=COLOR_ACCENT, linestyle=':', alpha=0.6, linewidth=3, 
-                    label=f'Cutoff: {CUTOFF_VAL} $m^3$')
-    
-    ax1.set_xlabel(r'Erosion Object Volume ($m^3$)', fontweight='bold')
-    ax1.set_ylabel('Frequency', fontweight='bold')
-    ax1.set_title('A) Magnitude-Frequency', loc='left', fontweight='bold', pad=15)
-    ax1.legend(loc='lower left')
+    CUTOFF_VAL = 0.25  # m^3 — below M3C2 detection limit; excluded from fit
+
+    if normalized:
+        # --- Normalized cumulative exceedance (Janeras et al. 2023) ---
+        vols_sorted, raw_n, fst, fit_v, fit_fst, B, alpha = fit_power_law_cumulative(
+            df_clean['volume'], area_hm2, t_years, cutoff=CUTOFF_VAL
+        )
+
+        if vols_sorted is not None:
+            below = vols_sorted < CUTOFF_VAL
+            above = vols_sorted >= CUTOFF_VAL
+            ax1.loglog(vols_sorted[below], fst[below],
+                       'o', color='gray', alpha=0.35, markersize=7,
+                       label='Below cutoff')
+            ax1.loglog(vols_sorted[above], fst[above],
+                       'o', color='black', markersize=8,
+                       label=r'$V \geq V_c$')
+            if fit_v is not None:
+                ax1.loglog(fit_v, fit_fst, '--', color=COLOR_ACCENT, linewidth=3.5,
+                           label=f'$F_{{st}} = {alpha:.2f}\\,V^{{-{B:.2f}}}$')
+            ax1.axvline(CUTOFF_VAL, color=COLOR_ACCENT, linestyle=':', alpha=0.55,
+                        linewidth=2.5, label=f'$V_c = {CUTOFF_VAL}$ m$^3$')
+
+        ax1.text(0.97, 0.97,
+                 f'$A_{{st}} = {area_hm2:.2f}$ hm$^2$\n'
+                 f'$T = {t_years:.2f}$ yr\n'
+                 f'$A_{{st}} \\times T = {norm_denom:.1f}$ hm$^2$ yr',
+                 transform=ax1.transAxes, ha='right', va='top',
+                 fontsize=13, color='#333333',
+                 bbox=dict(facecolor='white', edgecolor='#aaaaaa',
+                           boxstyle='round,pad=0.4', alpha=0.85))
+
+        ax1.set_xlabel(r'Erosion Volume $V$ (m$^3$)', fontweight='bold')
+        ax1.set_ylabel(r'$F_{st}$ (hm$^{-2}$ yr$^{-1}$)', fontweight='bold')
+        ax1.set_title('A) Magnitude-Frequency (Normalized)', loc='left', fontweight='bold', pad=15)
+
+    else:
+        # --- Original histogram-based power law ---
+        centers, hist, fit_x, fit_y, beta = fit_power_law_fixed_cutoff(
+            df_clean['volume'], cutoff=CUTOFF_VAL
+        )
+
+        ax1.loglog(centers, hist, 'o', color='gray', alpha=0.4, markersize=10)
+
+        # Uncertainty error bars per bin
+        bin_edges = np.logspace(np.log10(df_clean['volume'].min()),
+                                np.log10(df_clean['volume'].max()), 30)
+        indices = np.digitize(df_clean['volume'], bin_edges)
+        bin_uncs = []
+        for i in range(1, len(bin_edges)):
+            mask = indices == i
+            bin_uncs.append(df_clean.loc[mask, 'vol_unc'].mean() if np.any(mask) else 0)
+
+        valid_hist_mask = hist > 0
+        if len(bin_uncs) >= len(centers):
+            x_err = np.array(bin_uncs)[:len(centers)][valid_hist_mask]
+            ax1.errorbar(centers[valid_hist_mask], hist[valid_hist_mask],
+                         xerr=x_err, fmt='none', ecolor=COLOR_ACCENT,
+                         alpha=0.3, capsize=3)
+
+        mask_tail = centers >= CUTOFF_VAL
+        ax1.loglog(centers[mask_tail], hist[mask_tail], 'o', color='black', markersize=10)
+        if fit_x is not None:
+            ax1.loglog(fit_x, fit_y, '--', color=COLOR_ACCENT, linewidth=4,
+                       label=f'$\\beta = {beta:.2f}$')
+            ax1.axvline(CUTOFF_VAL, color=COLOR_ACCENT, linestyle=':', alpha=0.6,
+                        linewidth=3, label=f'Cutoff: {CUTOFF_VAL} m$^3$')
+
+        ax1.set_xlabel(r'Erosion Object Volume (m$^3$)', fontweight='bold')
+        ax1.set_ylabel('Frequency', fontweight='bold')
+        ax1.set_title('A) Magnitude-Frequency', loc='left', fontweight='bold', pad=15)
+
+    ax1.legend(loc='lower left', fontsize=14)
     ax1.grid(True, which="both", ls=":", alpha=0.4)
     
     # ==================== PANEL B: MORPHOLOGY (Original Style) ====================
@@ -439,12 +538,16 @@ def plot_geomorph_stats(df, out_dir, title_prefix):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--location', type=str, default='all')
+    parser.add_argument('--raw', action='store_true',
+                        help='Use original histogram-based Panel A instead of '
+                             'the normalized cumulative frequency curve.')
     args = parser.parse_args()
-    
+
+    normalized = not args.raw
+
     base_dir = get_base_dir()
-    # Fixed Output Path
     out_dir = os.path.join(base_dir, "figures", "stats_dashboard")
-    
+
     if args.location.lower() == 'all':
         print("\n" + "="*60)
         print("GENERATING INDIVIDUAL LOCATION DASHBOARDS")
@@ -454,24 +557,24 @@ def main():
             df = collect_all_data(base_dir, [loc])
             if not df.empty:
                 print(f"Generating plot for {len(df)} events at {loc}...")
-                plot_geomorph_stats(df, out_dir, loc)
+                plot_geomorph_stats(df, out_dir, loc, normalized=normalized)
             else:
                 print(f"No valid event data found for {loc}.")
-        
+
         print("\n" + "="*60)
         print("GENERATING COMBINED REGIONAL DASHBOARD")
         print("="*60)
         df_all = collect_all_data(base_dir, LOCATIONS_ALL)
         if not df_all.empty:
             print(f"Generating combined plot for {len(df_all)} events across all locations...")
-            plot_geomorph_stats(df_all, out_dir, "Regional")
+            plot_geomorph_stats(df_all, out_dir, "Regional", normalized=normalized)
         else:
             print("No valid event data found for combined regional plot.")
     else:
         df = collect_all_data(base_dir, [args.location])
         if not df.empty:
             print(f"Generating plot for {len(df)} events...")
-            plot_geomorph_stats(df, out_dir, args.location)
+            plot_geomorph_stats(df, out_dir, args.location, normalized=normalized)
         else:
             print("No valid event data found.")
 
