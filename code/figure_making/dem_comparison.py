@@ -423,9 +423,9 @@ def make_multi_panel_figure(results_df):
     qc_csv = find_qc_csv()
     df_qc = pd.read_csv(qc_csv, parse_dates=["mid_date", "start_date", "end_date"])
     real = df_qc[df_qc["qc_flag"] == "real"].copy()
-    top5 = real.sort_values("volume", ascending=False).head(5).reset_index(drop=True)
+    top5 = real.sort_values("volume", ascending=False).head(3).reset_index(drop=True)
 
-    print(f"\nCreating multi-panel figure for top 5 real events ...")
+    print(f"\nCreating multi-panel figure for top 3 real events ...")
 
     # --- Load NPZ cube for M3C2 grid panels ---
     npz_path = os.path.join(REPO_ROOT, "results", "data_cubes",
@@ -448,7 +448,7 @@ def make_multi_panel_figure(results_df):
     ok = results_df[results_df["status"] == "ok"]
 
     # --- Create figure ---
-    fig, axes = plt.subplots(2, 5, figsize=(26, 9))
+    fig, axes = plt.subplots(2, 3, figsize=(16, 9))
 
     for col, (_, ev) in enumerate(top5.iterrows()):
         ax_top = axes[0, col]
@@ -517,7 +517,7 @@ def make_multi_panel_figure(results_df):
 
                 cb1 = plt.colorbar(im1, ax=ax_top, shrink=0.5, pad=0.02, aspect=12)
                 cb1.ax.tick_params(labelsize=5)
-                if col == 4:
+                if col == 2:
                     cb1.set_label("M3C2 (m)", fontsize=7)
             else:
                 ax_top.text(0.5, 0.5, "Outside grid", transform=ax_top.transAxes,
@@ -552,7 +552,7 @@ def make_multi_panel_figure(results_df):
                 ax_bot.tick_params(labelsize=4, labelrotation=30)
                 cb2 = plt.colorbar(im2, ax=ax_bot, shrink=0.5, pad=0.02, aspect=12)
                 cb2.ax.tick_params(labelsize=5)
-                if col == 4:
+                if col == 2:
                     cb2.set_label("Elev. loss (m)", fontsize=7)
             else:
                 ax_bot.text(0.5, 0.5, "No erosion\nin DoD", ha='center',
@@ -578,7 +578,7 @@ def make_multi_panel_figure(results_df):
              fontweight='bold', ha='left', va='center', rotation=90)
 
     fig.suptitle(
-        "M3C2 vs DEM-of-Difference \u2014 Top 5 Erosion Events (Del Mar)\n"
+        "M3C2 vs DEM-of-Difference \u2014 Top 3 Erosion Events (Del Mar)\n"
         "Red = erosion, Blue = deposition in both rows",
         fontsize=12, fontweight='bold')
     plt.tight_layout(rect=[0.03, 0, 1, 0.93])
