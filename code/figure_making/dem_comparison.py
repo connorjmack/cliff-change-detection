@@ -296,25 +296,25 @@ def run_comparison(n_events=5, dem_res=DEM_RES, lod=LOD_THRESHOLD):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def find_largest_dod_cluster(dod, dem_res, buffer_m=30.0):
-    """Find the largest cluster of significant DoD cells.
+    """Find the largest erosion cluster in the DoD.
 
-    Uses connected-component labeling on all cells where DoD != 0
-    (i.e. already LoD-thresholded). Returns the cluster with the
-    largest total absolute volume and its bounding box (in pixel coords).
+    Uses connected-component labeling on erosion cells (DoD < 0,
+    already LoD-thresholded). Returns the cluster with the largest
+    erosion volume and its bounding box (in pixel coords).
 
     Returns
     -------
     row_slice, col_slice : slices for the bounding box (with buffer)
-    cluster_vol : float, total |DoD| * cell_area for the cluster
-    n_labels : int, total number of clusters found
+    cluster_vol : float, erosion volume (positive) for the cluster
+    n_labels : int, total number of erosion clusters found
     """
-    significant = (dod != 0) & ~np.isnan(dod)
-    if not np.any(significant):
+    erosion = (dod < 0) & ~np.isnan(dod)
+    if not np.any(erosion):
         return None, None, 0.0, 0
 
-    labelled, n_labels = ndimage.label(significant)
+    labelled, n_labels = ndimage.label(erosion)
 
-    # Find cluster with largest absolute volume (vectorised)
+    # Find erosion cluster with largest volume (vectorised)
     cell_area = dem_res * dem_res
     labels_range = np.arange(1, n_labels + 1)
     cluster_vols = ndimage.sum(np.abs(dod), labelled, labels_range) * cell_area
@@ -379,12 +379,12 @@ def make_event_figures(results_df):
 
         ax.set_xlabel("Easting (m)", fontsize=11)
         ax.set_ylabel("Northing (m)", fontsize=11)
+        cluster_ratio = row['V_M3C2'] / cluster_vol if cluster_vol > 0 else np.inf
         ax.set_title(
-            f"Survey {row['start_date']} → {row['end_date']}  |  "
-            f"Largest DoD cluster: {cluster_vol:.1f} m³  |  "
-            f"Total DoD erosion: {row['V_DoD_ero']:.1f} m³  |  "
-            f"M3C2 erosion: {row['V_M3C2']:.1f} m³  "
-            f"({row['ratio']:.1f}×)",
+            f"Survey {row['start_date']} \u2192 {row['end_date']}  |  "
+            f"Largest DoD erosion cluster: {cluster_vol:.1f} m\u00b3  |  "
+            f"M3C2 erosion: {row['V_M3C2']:.1f} m\u00b3  |  "
+            f"Ratio: {cluster_ratio:.1f}\u00d7",
             fontweight="bold", fontsize=9)
         ax.set_aspect("equal")
         ax.ticklabel_format(useOffset=False, style="plain")
@@ -397,8 +397,9 @@ def make_event_figures(results_df):
         plt.savefig(out, dpi=150, bbox_inches="tight",
                     facecolor="white", edgecolor="none")
         plt.close()
-        print(f"  Saved: {out}  ({n_clusters} clusters found, "
-              f"largest = {cluster_vol:.1f} m³)")
+        print(f"  Saved: {out}  ({n_clusters} erosion clusters, "
+              f"largest = {cluster_vol:.1f} m\u00b3, "
+              f"ratio = {cluster_ratio:.1f}\u00d7)")
 
     print(f"\nAll zoomed DoD figures saved to: {dem_dir}")
 
