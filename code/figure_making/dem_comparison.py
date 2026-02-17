@@ -379,12 +379,14 @@ def make_event_figures(results_df):
 
         ax.set_xlabel("Easting (m)", fontsize=11)
         ax.set_ylabel("Northing (m)", fontsize=11)
-        cluster_ratio = row['V_M3C2'] / cluster_vol if cluster_vol > 0 else np.inf
+        survey_ratio = row['V_M3C2'] / row['V_DoD_ero'] if row['V_DoD_ero'] > 0 else np.inf
         ax.set_title(
-            f"Survey {row['start_date']} \u2192 {row['end_date']}  |  "
-            f"Largest DoD erosion cluster: {cluster_vol:.1f} m\u00b3  |  "
-            f"M3C2 erosion: {row['V_M3C2']:.1f} m\u00b3  |  "
-            f"Ratio: {cluster_ratio:.1f}\u00d7",
+            f"Survey {row['start_date']} \u2192 {row['end_date']}  "
+            f"(zoomed to largest erosion cluster)\n"
+            f"Survey totals:  DoD erosion = {row['V_DoD_ero']:.1f} m\u00b3  |  "
+            f"M3C2 erosion = {row['V_M3C2']:.1f} m\u00b3  "
+            f"({int(row['n_m3c2_events'])} events)  |  "
+            f"Ratio: {survey_ratio:.1f}\u00d7",
             fontweight="bold", fontsize=9)
         ax.set_aspect("equal")
         ax.ticklabel_format(useOffset=False, style="plain")
@@ -397,9 +399,10 @@ def make_event_figures(results_df):
         plt.savefig(out, dpi=150, bbox_inches="tight",
                     facecolor="white", edgecolor="none")
         plt.close()
-        print(f"  Saved: {out}  ({n_clusters} erosion clusters, "
-              f"largest = {cluster_vol:.1f} m\u00b3, "
-              f"ratio = {cluster_ratio:.1f}\u00d7)")
+        print(f"  Saved: {out}  "
+              f"(V_DoD={row['V_DoD_ero']:.1f} m\u00b3 vs "
+              f"V_M3C2={row['V_M3C2']:.1f} m\u00b3, "
+              f"ratio={survey_ratio:.1f}\u00d7)")
 
     print(f"\nAll zoomed DoD figures saved to: {dem_dir}")
 
