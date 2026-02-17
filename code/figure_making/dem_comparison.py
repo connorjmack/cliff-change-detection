@@ -581,7 +581,7 @@ def make_multi_panel_figure(results_df):
 
 
 def make_comparison_table(results_df):
-    """Create a small comparison table for the appendix (top 3 events)."""
+    """Create a publication-quality comparison table for the appendix (top 3 events)."""
     dem_dir = os.path.join(FIG_DIR, "dems")
     os.makedirs(dem_dir, exist_ok=True)
 
@@ -597,6 +597,8 @@ def make_comparison_table(results_df):
     for i, (_, ev) in enumerate(top3.iterrows()):
         d1 = ev["start_date"].strftime("%Y%m%d")
         d2 = ev["end_date"].strftime("%Y%m%d")
+        d1_fmt = ev["start_date"].strftime("%Y-%m-%d")
+        d2_fmt = ev["end_date"].strftime("%Y-%m-%d")
         v_m3c2 = ev["volume"]
 
         match = ok[(ok["start_date"] == d1) & (ok["end_date"] == d2)]
@@ -611,20 +613,25 @@ def make_comparison_table(results_df):
             diff_pct = np.nan
 
         rows.append([
-            f"Event {i+1}\n({d1} \u2192 {d2})",
+            str(i + 1),
+            f"{d1_fmt}  \u2192  {d2_fmt}",
             f"{v_m3c2:.1f}",
             f"{v_dod:.1f}" if np.isfinite(v_dod) else "\u2014",
             f"{diff_pct:+.1f}%" if np.isfinite(diff_pct) else "\u2014",
         ])
 
     col_labels = [
-        "Event ID",
+        "Event",
+        "Survey Dates",
         "2.75D Grid\nVolume (m\u00b3)",
         "2.5D DoD\nVolume (m\u00b3)",
-        "Difference (%)",
+        "Difference\n(%)",
     ]
 
-    fig, ax = plt.subplots(figsize=(8, 2.5))
+    n_cols = len(col_labels)
+    col_widths = [0.08, 0.36, 0.18, 0.18, 0.14]
+
+    fig, ax = plt.subplots(figsize=(10, 2.0))
     ax.axis("off")
 
     table = ax.table(
@@ -632,25 +639,36 @@ def make_comparison_table(results_df):
         colLabels=col_labels,
         loc="center",
         cellLoc="center",
+        colWidths=col_widths,
     )
     table.auto_set_font_size(False)
-    table.set_fontsize(11)
-    table.scale(1.0, 1.8)
+    table.set_fontsize(10)
+    table.scale(1.0, 2.0)
 
     # Style header row
-    for j in range(len(col_labels)):
+    for j in range(n_cols):
         cell = table[0, j]
         cell.set_facecolor("#4472C4")
-        cell.set_text_props(color="white", fontweight="bold")
+        cell.set_text_props(color="white", fontweight="bold", fontsize=10)
+        cell.set_edgecolor("white")
+        cell.set_linewidth(1.5)
 
-    # Alternating row shading
+    # Style data rows
     for i in range(len(rows)):
-        for j in range(len(col_labels)):
+        for j in range(n_cols):
             cell = table[i + 1, j]
-            cell.set_facecolor("#D9E2F3" if i % 2 == 0 else "white")
+            cell.set_facecolor("#D9E2F3" if i % 2 == 0 else "#F2F2F2")
+            cell.set_edgecolor("white")
+            cell.set_linewidth(1.5)
+            cell.set_text_props(fontsize=10)
+
+    # Remove outer box
+    for key, cell in table.get_celld().items():
+        cell.set_linewidth(0.8)
+        cell.set_edgecolor("#CCCCCC")
 
     out = os.path.join(dem_dir, "comparison_table.png")
-    plt.savefig(out, dpi=200, bbox_inches="tight",
+    plt.savefig(out, dpi=300, bbox_inches="tight",
                 facecolor="white", edgecolor="none")
     plt.close()
     print(f"  Saved: {out}")
