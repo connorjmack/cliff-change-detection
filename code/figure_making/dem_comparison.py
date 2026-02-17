@@ -370,10 +370,12 @@ def make_event_figures(results_df):
 
         fig, ax = plt.subplots(figsize=(10, 8))
 
+        dod_masked = np.ma.masked_invalid(dod_zoom)
         dod_abs_max = max(abs(np.nanmin(dod_zoom)), abs(np.nanmax(dod_zoom)), 0.5)
-        im = ax.pcolormesh(x_edges_zoom, y_edges_zoom, dod_zoom,
+        im = ax.pcolormesh(x_edges_zoom, y_edges_zoom, dod_masked,
                            cmap="RdBu", vmin=-dod_abs_max, vmax=dod_abs_max,
                            shading="flat")
+        ax.set_facecolor("white")
         cb = plt.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
         cb.set_label("DoD elevation change (m)", fontsize=11)
 
@@ -509,12 +511,6 @@ def make_multi_panel_figure(results_df):
 
                 ax_top.invert_xaxis()
 
-                # Crosshairs at event centroid
-                xc = np.argmin(np.abs(az - ev['alongshore_centroid_m']))
-                yc = np.argmin(np.abs(ez - ev['elevation']))
-                ax_top.axhline(yc, color='#666', ls='--', lw=0.6, alpha=0.4)
-                ax_top.axvline(xc, color='#666', ls='--', lw=0.6, alpha=0.4)
-
                 cb1 = plt.colorbar(im1, ax=ax_top, shrink=0.5, pad=0.02, aspect=12)
                 cb1.ax.tick_params(labelsize=5)
                 if col == 2:
@@ -546,8 +542,10 @@ def make_multi_panel_figure(results_df):
                 vabs = max(abs(np.nanmin(dz)), abs(np.nanmax(dz)), 0.5)
 
                 # Negate DoD so erosion is positive (red), matching M3C2 row
-                im2 = ax_bot.pcolormesh(xe, ye, -dz, cmap="RdBu_r",
+                dz_masked = np.ma.masked_invalid(-dz)
+                im2 = ax_bot.pcolormesh(xe, ye, dz_masked, cmap="RdBu_r",
                                          vmin=-vabs, vmax=vabs, shading="flat")
+                ax_bot.set_facecolor("white")
                 ax_bot.ticklabel_format(useOffset=False, style="plain")
                 ax_bot.tick_params(labelsize=4, labelrotation=30)
                 cb2 = plt.colorbar(im2, ax=ax_bot, shrink=0.5, pad=0.02, aspect=12)
@@ -639,9 +637,11 @@ def make_figure(results_df):
             y_edges_zoom = y_edges
 
         vmax = max(abs(np.nanmin(dod_zoom)), abs(np.nanmax(dod_zoom)), 0.5)
-        im = ax_map.pcolormesh(x_edges_zoom, y_edges_zoom, dod_zoom,
+        dod_masked = np.ma.masked_invalid(dod_zoom)
+        im = ax_map.pcolormesh(x_edges_zoom, y_edges_zoom, dod_masked,
                                cmap="RdBu", vmin=-vmax, vmax=vmax,
                                shading="flat")
+        ax_map.set_facecolor("white")
         cb = plt.colorbar(im, ax=ax_map, shrink=0.8, pad=0.02)
         cb.set_label("DoD elevation change (m)", fontsize=9)
 
