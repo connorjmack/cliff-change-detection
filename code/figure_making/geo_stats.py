@@ -268,6 +268,204 @@ def fit_power_law_cumulative(volumes, area_hm2, t_years, cutoff=1.0):
 
     return vols_sorted, raw_n, fst, fit_v, fitted_fst, B, alpha
 
+
+def _fit_log_range(vols_sorted, fst, v_lower, v_upper):
+    """Fit power law to F_st vs V in [v_lower, v_upper]. Returns B, alpha, R², n."""
+    mask = (vols_sorted >= v_lower) & (vols_sorted <= v_upper)
+    n = int(mask.sum())
+    if n < 3:
+        return np.nan, np.nan, np.nan, n
+    x = np.log10(vols_sorted[mask])
+    y = np.log10(fst[mask])
+    slope, intercept = np.polyfit(x, y, 1)
+    y_pred = slope * x + intercept
+    ss_res = np.sum((y - y_pred) ** 2)
+    ss_tot = np.sum((y - np.mean(y)) ** 2)
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+    return -slope, 10**intercept, r2, n
+
+
+def _find_stable_index(values, window=3, threshold=0.05):
+    """Return index of first stable plateau (rolling std of β < threshold)."""
+    arr = np.asarray(values, dtype=float)
+    # Try to find first window where std < threshold
+    for i in range(len(arr) - window + 1):
+        chunk = arr[i:i + window]
+        if np.all(~np.isnan(chunk)) and np.std(chunk) < threshold:
+            return i
+    # Fallback: index of minimum rolling std
+    best_i, best_std = 0, np.inf
+    for i in range(len(arr) - window + 1):
+        chunk = arr[i:i + window]
+        if np.all(~np.isnan(chunk)):
+            s = np.std(chunk)
+            if s < best_std:
+                best_std = s
+                best_i = i
+    return best_i
+
+
+def progressive_power_law_fit(volumes, area_hm2, t_years,
+                               n_lower=20, n_upper=20,
+                               stability_window=3, stability_threshold=0.05):
+    """
+    Progressive trimming approach for robust power law fitting on normalized CCDF.
+
+    Step 1 — Sweep lower cutoff upward; find where β stabilizes (true power law onset).
+    Step 2 — Fix lower cutoff, sweep upper cutoff downward; find stabilization.
+    Step 3 — Final fit on the identified range.
+
+    Parameters
+    ----------
+    volumes    : event volumes (m³)
+    area_hm2   : monitored cliff face area (hm²)
+    t_years    : observation period (yr)
+    n_lower    : number of lower-cutoff candidates to evaluate
+    n_upper    : number of upper-cutoff candidates to evaluate
+    stability_window    : consecutive fits that must agree for "stable"
+    stability_threshold : max std(β) within window to count as stable
+
+    Returns
+    -------
+    dict with fit results and diagnostic arrays, or None on failure.
+    """
+    if len(volumes) == 0:
+        return None
+
+    vols_sorted = np.sort(np.asarray(volumes))[::-1]
+    raw_n = np.arange(1, len(vols_sorted) + 1, dtype=float)
+    fst = raw_n / (area_hm2 * t_years)
+
+    v_min, v_max = vols_sorted[-1], vols_sorted[0]
+    log_min = np.log10(max(v_min, 0.1))
+    log_max = np.log10(v_max)
+
+    # --- Step 1: Progressive lower trim ---
+    log_upper_bound = log_min + 0.5 * (log_max - log_min)
+    lower_candidates = np.logspace(log_min, log_upper_bound, n_lower)
+
+    lower_betas, lower_r2s, lower_alphas, lower_ns = [], [], [], []
+    for lc in lower_candidates:
+        B, alpha, r2, n = _fit_log_range(vols_sorted, fst, lc, v_max)
+        lower_betas.append(B)
+        lower_r2s.append(r2)
+        lower_alphas.append(alpha)
+        lower_ns.append(n)
+
+    lower_betas = np.array(lower_betas)
+    lower_r2s = np.array(lower_r2s)
+
+    si_lower = _find_stable_index(lower_betas, stability_window, stability_threshold)
+    optimal_lower = lower_candidates[si_lower]
+
+    # --- Step 2: Progressive upper trim ---
+    log_lower_fixed = np.log10(optimal_lower)
+    log_lb = log_lower_fixed + 0.3 * (log_max - log_lower_fixed)
+    upper_candidates = np.logspace(log_max, log_lb, n_upper)  # decreasing
+
+    upper_betas, upper_r2s, upper_alphas, upper_ns = [], [], [], []
+    for uc in upper_candidates:
+        B, alpha, r2, n = _fit_log_range(vols_sorted, fst, optimal_lower, uc)
+        upper_betas.append(B)
+        upper_r2s.append(r2)
+        upper_alphas.append(alpha)
+        upper_ns.append(n)
+
+    upper_betas = np.array(upper_betas)
+    upper_r2s = np.array(upper_r2s)
+
+    si_upper = _find_stable_index(upper_betas, stability_window, stability_threshold)
+    optimal_upper = upper_candidates[si_upper]
+
+    # Sanity: ensure lower < upper
+    if optimal_lower >= optimal_upper:
+        optimal_lower = lower_candidates[0]
+        optimal_upper = v_max
+
+    # --- Step 3: Final fit ---
+    B, alpha, r2, n_fit = _fit_log_range(vols_sorted, fst, optimal_lower, optimal_upper)
+    if np.isnan(B):
+        return None
+
+    mask = (vols_sorted >= optimal_lower) & (vols_sorted <= optimal_upper)
+    fit_v = vols_sorted[mask]
+    fit_fst = alpha * fit_v**(-B)
+
+    return {
+        'vols_sorted': vols_sorted, 'raw_n': raw_n, 'fst': fst,
+        'fit_v': fit_v, 'fit_fst': fit_fst,
+        'B': B, 'alpha': alpha, 'r2': r2, 'n_fit': n_fit,
+        'lower_cutoff': optimal_lower, 'upper_cutoff': optimal_upper,
+        # Diagnostic arrays
+        'lower_candidates': lower_candidates,
+        'lower_betas': lower_betas, 'lower_r2s': lower_r2s,
+        'upper_candidates': upper_candidates,
+        'upper_betas': upper_betas, 'upper_r2s': upper_r2s,
+        'stable_lower_idx': si_lower, 'stable_upper_idx': si_upper,
+    }
+
+
+def plot_trim_diagnostics(result, out_dir, title_prefix):
+    """
+    2-panel diagnostic figure showing β stabilization during progressive trimming.
+    Left: β vs lower volume cutoff.  Right: β vs upper volume cutoff.
+    Cf. Figure 7 in Janeras et al. (2023).
+    """
+    fig, (ax_l, ax_r) = plt.subplots(1, 2, figsize=(16, 6))
+
+    # --- Left panel: lower trim ---
+    lc = result['lower_candidates']
+    lb = result['lower_betas']
+    lr = result['lower_r2s']
+
+    ax_l.plot(lc, lb, 'o-', color='black', markersize=6, linewidth=1.5, label=r'$\beta$')
+    ax_l.axvline(result['lower_cutoff'], color=COLOR_ACCENT, linestyle='--', linewidth=2,
+                 label=f"$V_{{lower}}$ = {result['lower_cutoff']:.1f} m$^3$")
+    ax_l.set_xscale('log')
+    ax_l.set_xlabel(r'Lower Volume Cutoff (m$^3$)', fontweight='bold')
+    ax_l.set_ylabel(r'$\beta$', fontweight='bold')
+    ax_l.legend(loc='upper left', fontsize=12)
+    ax_l.set_title('Step 1: Lower Cutoff Sweep', fontweight='bold')
+    ax_l.grid(True, ls=':', alpha=0.4)
+
+    ax_l2 = ax_l.twinx()
+    ax_l2.plot(lc, lr, 's-', color=COLOR_ACCENT, markersize=4, alpha=0.5, label='R$^2$')
+    ax_l2.set_ylabel('R$^2$', color=COLOR_ACCENT, fontweight='bold')
+    ax_l2.tick_params(axis='y', labelcolor=COLOR_ACCENT)
+    ax_l2.legend(loc='lower right', fontsize=12)
+
+    # --- Right panel: upper trim ---
+    uc = result['upper_candidates']
+    ub = result['upper_betas']
+    ur = result['upper_r2s']
+
+    ax_r.plot(uc, ub, 'o-', color='black', markersize=6, linewidth=1.5, label=r'$\beta$')
+    ax_r.axvline(result['upper_cutoff'], color=COLOR_ACCENT, linestyle='--', linewidth=2,
+                 label=f"$V_{{upper}}$ = {result['upper_cutoff']:.0f} m$^3$")
+    ax_r.set_xscale('log')
+    ax_r.set_xlabel(r'Upper Volume Cutoff (m$^3$)', fontweight='bold')
+    ax_r.set_ylabel(r'$\beta$', fontweight='bold')
+    ax_r.legend(loc='upper left', fontsize=12)
+    ax_r.set_title('Step 2: Upper Cutoff Sweep', fontweight='bold')
+    ax_r.grid(True, ls=':', alpha=0.4)
+
+    ax_r2 = ax_r.twinx()
+    ax_r2.plot(uc, ur, 's-', color=COLOR_ACCENT, markersize=4, alpha=0.5, label='R$^2$')
+    ax_r2.set_ylabel('R$^2$', color=COLOR_ACCENT, fontweight='bold')
+    ax_r2.tick_params(axis='y', labelcolor=COLOR_ACCENT)
+    ax_r2.legend(loc='lower right', fontsize=12)
+
+    fig.suptitle(f'{title_prefix} — Power Law Trim Diagnostics', fontsize=16, fontweight='bold')
+    fig.tight_layout()
+
+    os.makedirs(out_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    save_path = os.path.join(out_dir, f"{title_prefix}_Trim_Diagnostics_{timestamp}.png")
+    fig.savefig(save_path, dpi=200, bbox_inches='tight', facecolor='white')
+    print(f"[Diagnostics] Saved to: {save_path}")
+    plt.close(fig)
+
+
 # ==============================================================================
 # 3. PLOTTING
 # ==============================================================================
@@ -354,29 +552,59 @@ def plot_geomorph_stats(df, out_dir, title_prefix, area_hm2=None, normalized=Tru
     # ==================== PANEL A: MAGNITUDE-FREQUENCY ====================
     ax1 = fig.add_subplot(gs[0, 0])
 
-    CUTOFF_VAL = 1.0  # m^3 — rollover volume; fit only the tail above this
-
     if normalized:
-        # --- Normalized cumulative exceedance (Janeras et al. 2023) ---
-        vols_sorted, raw_n, fst, fit_v, fit_fst, B, alpha = \
-            fit_power_law_cumulative(
-                df_clean['volume'], area_hm2, t_years, cutoff=CUTOFF_VAL
-            )
+        # --- Progressive trimming power law fit (Janeras et al. 2023) ---
+        result = progressive_power_law_fit(df_clean['volume'], area_hm2, t_years)
 
-        if vols_sorted is not None:
-            below = vols_sorted < CUTOFF_VAL
-            above = vols_sorted >= CUTOFF_VAL
-            ax1.loglog(vols_sorted[below], fst[below],
-                       'o', color='gray', alpha=0.35, markersize=7,
-                       label='Below cutoff')
-            ax1.loglog(vols_sorted[above], fst[above],
+        if result is not None:
+            vs  = result['vols_sorted']
+            fst = result['fst']
+            lc  = result['lower_cutoff']
+            uc  = result['upper_cutoff']
+
+            # Three zones: below lower cutoff, fit range, above upper cutoff
+            below    = vs < lc
+            in_range = (vs >= lc) & (vs <= uc)
+            above    = vs > uc
+
+            outside_labeled = False
+            if np.any(below):
+                ax1.loglog(vs[below], fst[below],
+                           'o', color='gray', alpha=0.35, markersize=7,
+                           label='Outside fit range')
+                outside_labeled = True
+            if np.any(above):
+                ax1.loglog(vs[above], fst[above],
+                           'o', color='gray', alpha=0.35, markersize=7,
+                           label=None if outside_labeled else 'Outside fit range')
+
+            ax1.loglog(vs[in_range], fst[in_range],
                        'o', color='black', markersize=8,
-                       label=r'$V \geq V_c$')
-            if fit_v is not None:
-                ax1.loglog(fit_v, fit_fst, '--', color=COLOR_ACCENT, linewidth=3.5,
-                           label=f'$F_{{st}} = {alpha:.2f}\\,V^{{-{B:.2f}}}$')
-            ax1.axvline(CUTOFF_VAL, color=COLOR_ACCENT, linestyle=':', alpha=0.55,
-                        linewidth=2.5, label=f'$V_c = {CUTOFF_VAL:.0f}$ m$^3$')
+                       label=f'Fit range ({lc:.1f}' + r'$-$' + f'{uc:.0f} m' + r'$^3$' + ')')
+
+            if result['fit_v'] is not None and len(result['fit_v']) > 0:
+                ax1.loglog(result['fit_v'], result['fit_fst'], '--',
+                           color=COLOR_ACCENT, linewidth=3.5,
+                           label=(f'$F_{{st}} = {result["alpha"]:.2f}'
+                                  f'\\,V^{{-{result["B"]:.2f}}}$'
+                                  f'  (R$^2$={result["r2"]:.3f})'))
+
+            ax1.axvline(lc, color=COLOR_ACCENT, linestyle=':', alpha=0.55,
+                        linewidth=2.5, label=f'$V_{{lower}} = {lc:.1f}$ m$^3$')
+            ax1.axvline(uc, color=COLOR_ACCENT, linestyle=':', alpha=0.55,
+                        linewidth=2.5, label=f'$V_{{upper}} = {uc:.0f}$ m$^3$')
+
+            # Terminal report
+            print(f"\n  Progressive Trimming Power Law Fit:")
+            print(f"    - Lower cutoff: {lc:.2f} m^3")
+            print(f"    - Upper cutoff: {uc:.1f} m^3")
+            print(f"    - B (CCDF exponent): {result['B']:.3f}")
+            print(f"    - alpha (activity rate): {result['alpha']:.3f}")
+            print(f"    - R^2: {result['r2']:.4f}")
+            print(f"    - N events in fit: {result['n_fit']}")
+
+            # Save diagnostic figure alongside the main dashboard
+            plot_trim_diagnostics(result, out_dir, title_prefix)
 
         ax1.text(0.97, 0.97,
                  f'$A_{{st}} = {area_hm2:.2f}$ hm$^2$\n'
