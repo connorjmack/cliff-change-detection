@@ -442,7 +442,7 @@ def make_figure(results_df):
     y_ceil = max(ok["V_M3C2"].max(), ok["V_DoD_ero"].max()) * 1.25
     ax_bar.set_ylim(0, y_ceil)
 
-    # ── Panel B: DoD map of largest survey pair ────────────────────────────
+    # ── Panel B: Zoomed DoD map of largest survey pair ──────────────────────
     ax_map = fig.add_subplot(gs[1])
     biggest = ok.iloc[0]
 
@@ -450,9 +450,21 @@ def make_figure(results_df):
     if dod is not None and not np.all(np.isnan(dod)):
         x_edges = biggest["_x_edges"]
         y_edges = biggest["_y_edges"]
+        dem_res = x_edges[1] - x_edges[0]
 
-        vmax = max(abs(np.nanmin(dod)), abs(np.nanmax(dod)), 0.5)
-        im = ax_map.pcolormesh(x_edges, y_edges, dod,
+        # Zoom to largest erosion cluster
+        r_slice, c_slice, _, _ = find_largest_dod_cluster(dod, dem_res)
+        if r_slice is not None:
+            dod_zoom = dod[r_slice, c_slice]
+            x_edges_zoom = x_edges[c_slice.start:c_slice.stop + 1]
+            y_edges_zoom = y_edges[r_slice.start:r_slice.stop + 1]
+        else:
+            dod_zoom = dod
+            x_edges_zoom = x_edges
+            y_edges_zoom = y_edges
+
+        vmax = max(abs(np.nanmin(dod_zoom)), abs(np.nanmax(dod_zoom)), 0.5)
+        im = ax_map.pcolormesh(x_edges_zoom, y_edges_zoom, dod_zoom,
                                cmap="RdBu", vmin=-vmax, vmax=vmax,
                                shading="flat")
         cb = plt.colorbar(im, ax=ax_map, shrink=0.8, pad=0.02)
