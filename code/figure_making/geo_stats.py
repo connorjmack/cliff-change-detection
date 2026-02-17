@@ -473,70 +473,50 @@ def plot_geomorph_stats(df, out_dir, title_prefix, area_hm2=None, normalized=Tru
 
     if normalized:
         # --- Dual-regime power law fit (Janeras et al. 2023) ---
-        result = dual_regime_power_law_fit(df_clean['volume'], area_hm2, t_years)
+        LOWER_BOUND = 0.25   # m³ — minimum detection volume
+        BREAKPOINT  = 2.0    # m³ — regime boundary
 
-        if result is not None:
-            vs  = result['vols_sorted']
-            fst = result['fst']
-            lb  = result['lower_bound']
-            bp  = result['breakpoint']
-            uc  = result['upper_cutoff']
+        vols_sorted = np.sort(np.asarray(df_clean['volume']))[::-1]
+        raw_n = np.arange(1, len(vols_sorted) + 1, dtype=float)
+        fst = raw_n / norm_denom
+        v_max = vols_sorted[0]
 
-            # Four zones: below lower bound, regime 1, regime 2, above upper
-            zone_below = vs < lb
-            zone_r1    = (vs >= lb) & (vs <= bp)
-            zone_r2    = (vs > bp) & (vs <= uc)
-            zone_above = vs > uc
+        B1, a1, r2_1, n1 = _fit_log_range(vols_sorted, fst, LOWER_BOUND, BREAKPOINT)
+        B2, a2, r2_2, n2 = _fit_log_range(vols_sorted, fst, BREAKPOINT, v_max)
 
-            if np.any(zone_below):
-                ax1.loglog(vs[zone_below], fst[zone_below],
-                           'o', color='gray', alpha=0.30, markersize=6)
-            if np.any(zone_above):
-                ax1.loglog(vs[zone_above], fst[zone_above],
-                           'o', color='gray', alpha=0.30, markersize=6)
+        # Plot all data as black dots
+        ax1.loglog(vols_sorted, fst, 'o', color='black', markersize=7, alpha=0.6)
 
-            ax1.loglog(vs[zone_r1], fst[zone_r1],
-                       'o', color='black', markersize=7, alpha=0.6,
-                       label='Regime 1 data')
-            ax1.loglog(vs[zone_r2], fst[zone_r2],
-                       'o', color='black', markersize=8,
-                       label='Regime 2 data')
+        # Regime 1 fit line
+        mask1 = (vols_sorted >= LOWER_BOUND) & (vols_sorted <= BREAKPOINT)
+        if not np.isnan(B1) and mask1.sum() > 0:
+            fit_v1 = vols_sorted[mask1]
+            ax1.loglog(fit_v1, a1 * fit_v1 ** (-B1), '--',
+                       color=COLOR_MAIN, linewidth=3.5,
+                       label=r'R1: $\beta_1$' + f' = {B1:.2f}')
 
-            # Regime 1 fit line
-            if len(result['fit_v1']) > 0:
-                ax1.loglog(result['fit_v1'], result['fit_fst1'], '--',
-                           color=COLOR_MAIN, linewidth=3.5,
-                           label=(r'R1: $\beta_1$' + f' = {result["B1"]:.2f}'
-                                  f'  (R$^2$={result["r2_1"]:.3f})'))
+        # Regime 2 fit line
+        mask2 = vols_sorted >= BREAKPOINT
+        if not np.isnan(B2) and mask2.sum() > 0:
+            fit_v2 = vols_sorted[mask2]
+            ax1.loglog(fit_v2, a2 * fit_v2 ** (-B2), '--',
+                       color=COLOR_ACCENT, linewidth=3.5,
+                       label=r'R2: $\beta_2$' + f' = {B2:.2f}')
 
-            # Regime 2 fit line
-            if len(result['fit_v2']) > 0:
-                ax1.loglog(result['fit_v2'], result['fit_fst2'], '--',
-                           color=COLOR_ACCENT, linewidth=3.5,
-                           label=(r'R2: $\beta_2$' + f' = {result["B2"]:.2f}'
-                                  f'  (R$^2$={result["r2_2"]:.3f})'))
+        # Breakpoint line
+        ax1.axvline(BREAKPOINT, color='black', linestyle=':', alpha=0.6,
+                    linewidth=2.5)
 
-            # Breakpoint and upper cutoff lines
-            ax1.axvline(bp, color='black', linestyle=':', alpha=0.6,
-                        linewidth=2.5, label=f'Breakpoint = {bp:.1f} m$^3$')
-            ax1.axvline(uc, color=COLOR_ACCENT, linestyle=':', alpha=0.45,
-                        linewidth=2, label=f'Upper cutoff = {uc:.0f} m$^3$')
+        # Terminal report
+        print(f"\n  Dual-Regime Power Law Fit:")
+        print(f"    Regime 1 [{LOWER_BOUND} - {BREAKPOINT} m^3]:")
+        print(f"      B1 = {B1:.3f}, alpha1 = {a1:.3f}, R^2 = {r2_1:.4f}, N = {n1}")
+        print(f"    Regime 2 [{BREAKPOINT} - {v_max:.1f} m^3]:")
+        print(f"      B2 = {B2:.3f}, alpha2 = {a2:.3f}, R^2 = {r2_2:.4f}, N = {n2}")
 
-            # Terminal report
-            print(f"\n  Dual-Regime Power Law Fit:")
-            print(f"    Regime 1 [{lb:.2f} - {bp:.1f} m^3]:")
-            print(f"      B1 = {result['B1']:.3f}, alpha1 = {result['alpha1']:.3f}, "
-                  f"R^2 = {result['r2_1']:.4f}, N = {result['n1']}")
-            print(f"    Regime 2 [{bp:.1f} - {uc:.0f} m^3]:")
-            print(f"      B2 = {result['B2']:.3f}, alpha2 = {result['alpha2']:.3f}, "
-                  f"R^2 = {result['r2_2']:.4f}, N = {result['n2']}")
-            print(f"    Combined weighted R^2 = {result['combined_r2']:.4f}")
-
-        ax1.text(0.97, 0.97,
-                 f'$A_{{st}} = {area_hm2:.2f}$ hm$^2$\n'
-                 f'$T = {t_years:.2f}$ yr\n'
+        ax1.text(0.03, 0.03,
                  f'$A_{{st}} \\times T = {norm_denom:.1f}$ hm$^2$ yr',
-                 transform=ax1.transAxes, ha='right', va='top',
+                 transform=ax1.transAxes, ha='left', va='bottom',
                  fontsize=13, color='#333333',
                  bbox=dict(facecolor='white', edgecolor='#aaaaaa',
                            boxstyle='round,pad=0.4', alpha=0.85))
