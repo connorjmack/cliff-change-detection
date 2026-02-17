@@ -407,6 +407,188 @@ def make_event_figures(results_df):
     print(f"\nAll zoomed DoD figures saved to: {dem_dir}")
 
 
+def make_multi_panel_figure(results_df):
+    """Create 2×5 panel figure: M3C2 grid (top) vs DoD (bottom) for top 5 events.
+
+    Top row shows cliff-face M3C2 grid zoomed to each event footprint.
+    Bottom row shows top-down DoD zoomed to the largest erosion cluster.
+    Both rows use the same color convention: red = erosion, blue = deposition.
+
+    Outputs to figures/appendix/dems/multi-panel.png
+    """
+    dem_dir = os.path.join(FIG_DIR, "dems")
+    os.makedirs(dem_dir, exist_ok=True)
+
+    # --- Load QC CSV for individual event details ---
+    qc_csv = find_qc_csv()
+    df_qc = pd.read_csv(qc_csv, parse_dates=["mid_date", "start_date", "end_date"])
+    real = df_qc[df_qc["qc_flag"] == "real"].copy()
+    top5 = real.sort_values("volume", ascending=False).head(5).reset_index(drop=True)
+
+    print(f"\nCreating multi-panel figure for top 5 real events ...")
+
+    # --- Load NPZ cube for M3C2 grid panels ---
+    npz_path = os.path.join(REPO_ROOT, "results", "data_cubes",
+                             f"{LOCATION}_cube.npz")
+    if not os.path.exists(npz_path):
+        print(f"  NPZ cube not found: {npz_path}")
+        return
+
+    cube = np.load(npz_path, allow_pickle=True)
+    along_m  = cube['alongshore_m']
+    elev_m   = cube['elevation_m']
+    ero_3d   = cube.get('erosion')       # (n_along, n_elev, n_time)
+    dep_3d   = cube.get('deposition')
+    dstrings = [str(s) for s in cube['date_strings']]
+
+    # Sort alongshore for cliff-facing display
+    asort   = np.argsort(along_m)
+    along_s = along_m[asort]
+
+    ok = results_df[results_df["status"] == "ok"]
+
+    # --- Create figure ---
+    fig, axes = plt.subplots(2, 5, figsize=(26, 9))
+
+    for col, (_, ev) in enumerate(top5.iterrows()):
+        ax_top = axes[0, col]
+        ax_bot = axes[1, col]
+
+        d1 = ev["start_date"].strftime("%Y%m%d")
+        d2 = ev["end_date"].strftime("%Y%m%d")
+        dfolder = f"{d1}_to_{d2}"
+
+        # ── Top row: M3C2 cliff-facing grid ─────────────────────────
+        tidx = next((i for i, ds in enumerate(dstrings) if ds == dfolder), None)
+
+        if tidx is not None and ero_3d is not None:
+            # Extract and sort 2D slice
+            ero2d = ero_3d[:, :, tidx][asort, :]
+            combined = np.nan_to_num(ero2d, nan=0.0)
+            if dep_3d is not None:
+                dep2d = dep_3d[:, :, tidx][asort, :]
+                dc = np.nan_to_num(dep2d, nan=0.0)
+                dep_mask = (dc > 0) & (combined < 0.01)
+                combined[dep_mask] = -dc[dep_mask]
+
+            # Zoom to event footprint
+            xpad, ypb, ypt = 10, 8, 3
+            xlo = ev['alongshore_start_m'] - xpad
+            xhi = ev['alongshore_end_m'] + xpad
+            ylo = max(0, ev['elevation'] - ev['height'] / 2 - ypb)
+            yhi = ev['elevation'] + ev['height'] / 2 + ypt
+
+            xm = (along_s >= xlo) & (along_s <= xhi)
+            ym = (elev_m >= ylo) & (elev_m <= yhi)
+
+            if np.any(xm) and np.any(ym):
+                xi = np.where(xm)[0]
+                yi = np.where(ym)[0]
+                mz = combined[xi[0]:xi[-1]+1, yi[0]:yi[-1]+1].T  # (elev, along)
+                az = along_s[xi[0]:xi[-1]+1]
+                ez = elev_m[yi[0]:yi[-1]+1]
+
+                nz = mz[mz != 0]
+                vm = max(np.percentile(np.abs(nz), 85), 0.1) if nz.size else 2.5
+
+                im1 = ax_top.imshow(mz, origin='lower', aspect='auto',
+                                     interpolation='nearest', cmap='RdBu_r',
+                                     vmin=-vm, vmax=vm)
+
+                # Tick labels
+                nt = min(4, len(az))
+                if len(az) > 1:
+                    ti = np.linspace(0, len(az)-1, nt, dtype=int)
+                    ax_top.set_xticks(ti)
+                    ax_top.set_xticklabels([f'{az[j]:.0f}' for j in ti], fontsize=5)
+                nt = min(4, len(ez))
+                if len(ez) > 1:
+                    ti = np.linspace(0, len(ez)-1, nt, dtype=int)
+                    ax_top.set_yticks(ti)
+                    ax_top.set_yticklabels([f'{ez[j]:.1f}' for j in ti], fontsize=5)
+
+                ax_top.invert_xaxis()
+
+                # Crosshairs at event centroid
+                xc = np.argmin(np.abs(az - ev['alongshore_centroid_m']))
+                yc = np.argmin(np.abs(ez - ev['elevation']))
+                ax_top.axhline(yc, color='#666', ls='--', lw=0.6, alpha=0.4)
+                ax_top.axvline(xc, color='#666', ls='--', lw=0.6, alpha=0.4)
+
+                cb1 = plt.colorbar(im1, ax=ax_top, shrink=0.5, pad=0.02, aspect=12)
+                cb1.ax.tick_params(labelsize=5)
+                if col == 4:
+                    cb1.set_label("M3C2 (m)", fontsize=7)
+            else:
+                ax_top.text(0.5, 0.5, "Outside grid", transform=ax_top.transAxes,
+                            ha='center', va='center', fontsize=7)
+        else:
+            ax_top.text(0.5, 0.5, "No cube data", transform=ax_top.transAxes,
+                        ha='center', va='center', fontsize=7)
+
+        ax_top.set_title(f"{d1} \u2192 {d2}\nV = {ev['volume']:.1f} m\u00b3",
+                          fontsize=7, fontweight='bold')
+
+        # ── Bottom row: DoD (top-down) ──────────────────────────────
+        match = ok[(ok["start_date"] == d1) & (ok["end_date"] == d2)]
+        if not match.empty:
+            r = match.iloc[0]
+            dod    = r["_dod"]
+            xedges = r["_x_edges"]
+            yedges = r["_y_edges"]
+            dres   = xedges[1] - xedges[0]
+
+            rs, cs, cvol, _ = find_largest_dod_cluster(dod, dres)
+            if rs is not None:
+                dz = dod[rs, cs]
+                xe = xedges[cs.start:cs.stop + 1]
+                ye = yedges[rs.start:rs.stop + 1]
+                vabs = max(abs(np.nanmin(dz)), abs(np.nanmax(dz)), 0.5)
+
+                # Negate DoD so erosion is positive (red), matching M3C2 row
+                im2 = ax_bot.pcolormesh(xe, ye, -dz, cmap="RdBu_r",
+                                         vmin=-vabs, vmax=vabs, shading="flat")
+                ax_bot.ticklabel_format(useOffset=False, style="plain")
+                ax_bot.tick_params(labelsize=4, labelrotation=30)
+                cb2 = plt.colorbar(im2, ax=ax_bot, shrink=0.5, pad=0.02, aspect=12)
+                cb2.ax.tick_params(labelsize=5)
+                if col == 4:
+                    cb2.set_label("Elev. loss (m)", fontsize=7)
+            else:
+                ax_bot.text(0.5, 0.5, "No erosion\nin DoD", ha='center',
+                            va='center', transform=ax_bot.transAxes, fontsize=7)
+
+            ratio = r['V_M3C2'] / r['V_DoD_ero'] if r['V_DoD_ero'] > 0 else np.inf
+            ax_bot.set_title(
+                f"DoD ero = {r['V_DoD_ero']:.0f} m\u00b3 | ratio = {ratio:.1f}\u00d7",
+                fontsize=6, fontweight='bold')
+        else:
+            ax_bot.text(0.5, 0.5, "No DoD data", ha='center',
+                        va='center', transform=ax_bot.transAxes, fontsize=7)
+            ax_bot.set_title(f"DoD: no data", fontsize=6)
+
+    # Axis labels on leftmost panels
+    axes[0, 0].set_ylabel("Elevation (m)", fontsize=8, fontweight='bold')
+    axes[1, 0].set_ylabel("Northing (m)", fontsize=8, fontweight='bold')
+
+    # Row labels on the left margin
+    fig.text(0.008, 0.72, "M3C2 Grid\n(cliff-face)", fontsize=10,
+             fontweight='bold', ha='left', va='center', rotation=90)
+    fig.text(0.008, 0.28, "DoD\n(top-down)", fontsize=10,
+             fontweight='bold', ha='left', va='center', rotation=90)
+
+    fig.suptitle(
+        "M3C2 vs DEM-of-Difference \u2014 Top 5 Erosion Events (Del Mar)\n"
+        "Red = erosion, Blue = deposition in both rows",
+        fontsize=12, fontweight='bold')
+    plt.tight_layout(rect=[0.03, 0, 1, 0.93])
+
+    out = os.path.join(dem_dir, "multi-panel.png")
+    plt.savefig(out, dpi=200, bbox_inches="tight", facecolor="white", edgecolor="none")
+    plt.close()
+    print(f"  Saved: {out}")
+
+
 def make_figure(results_df):
     """Summary comparison figure: bar chart + DoD map of largest pair + schematic."""
     os.makedirs(FIG_DIR, exist_ok=True)
@@ -568,6 +750,7 @@ def main():
 
     if not args.no_figure:
         make_event_figures(results)
+        make_multi_panel_figure(results)
         make_figure(results)
 
 
