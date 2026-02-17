@@ -222,7 +222,60 @@ def fit_power_law_fixed_cutoff(volumes, cutoff=0.25, n_bins=30):
     return centers, hist, x_fit, y_fitted, -slope
 
 
-def fit_power_law_cumulative(volumes, area_hm2, t_years, cutoff=0.25):
+def find_rollover_point(vols_sorted, fst, min_tail_points=10):
+    """
+    Detect the rollover volume V_c as the point of maximum curvature
+    in the log-log cumulative frequency plot.
+
+    The rollover separates the detection-limited regime (small events
+    undersampled) from the power-law tail.  We find it by computing
+    the curvature kappa = |y''| / (1 + y'^2)^(3/2) on a smoothed
+    log-log curve and returning the volume at maximum kappa.
+
+    Parameters
+    ----------
+    vols_sorted : array, sorted descending (largest first)
+    fst         : array, corresponding normalized cumulative frequencies
+    min_tail_points : int, minimum points that must remain in the tail
+
+    Returns
+    -------
+    v_rollover : float, the detected rollover volume (m^3)
+    """
+    n = len(vols_sorted)
+    if n < 20:
+        return vols_sorted[n // 2]
+
+    # Work in ascending volume order for intuitive left-to-right
+    log_v = np.log10(vols_sorted[::-1])
+    log_f = np.log10(fst[::-1])
+
+    # Smooth with a moving-average kernel to suppress noise
+    win = min(max(n // 20, 7), 101)
+    if win % 2 == 0:
+        win += 1
+    kernel = np.ones(win) / win
+    log_f_smooth = np.convolve(log_f, kernel, mode='same')
+
+    # First and second derivatives in log-log space
+    dy = np.gradient(log_f_smooth, log_v)
+    d2y = np.gradient(dy, log_v)
+
+    # Curvature (accounts for slope, more robust than raw d2y)
+    kappa = np.abs(d2y) / (1.0 + dy**2)**1.5
+
+    # Search region: exclude noisy edges and keep enough tail points
+    margin = win
+    upper_bound = max(n - margin - min_tail_points, margin + 3)
+    search = kappa[margin:upper_bound]
+    if len(search) < 3:
+        return vols_sorted[n // 2]
+
+    idx = margin + np.argmax(search)
+    return 10**log_v[idx]
+
+
+def fit_power_law_cumulative(volumes, area_hm2, t_years, cutoff='auto'):
     """
     Computes cumulative exceedance frequency N(>=V), normalizes by A_st * T
     to yield F_st (hm^-2 yr^-1), then fits a power law above cutoff.
@@ -234,7 +287,8 @@ def fit_power_law_cumulative(volumes, area_hm2, t_years, cutoff=0.25):
     volumes  : pd.Series or np.ndarray of event volumes (m^3)
     area_hm2 : monitored cliff face area (hm^2)
     t_years  : observation period (yr)
-    cutoff   : minimum volume for power law fit (m^3)
+    cutoff   : minimum volume for power law fit (m^3), or 'auto' to
+               detect the rollover point via maximum curvature
 
     Returns
     -------
@@ -245,18 +299,24 @@ def fit_power_law_cumulative(volumes, area_hm2, t_years, cutoff=0.25):
     fit_fst     : fitted F_st values on fit_v
     B           : scaling exponent (positive; slope = -B)
     alpha       : activity rate (events hm^-2 yr^-1 with V >= 1 m^3)
+    cutoff_used : actual cutoff volume used (useful when cutoff='auto')
     """
     if len(volumes) == 0:
-        return None, None, None, None, None, 0.0, 0.0
+        return None, None, None, None, None, 0.0, 0.0, 0.0
 
     vols_sorted = np.sort(np.asarray(volumes))[::-1]
     raw_n = np.arange(1, len(vols_sorted) + 1, dtype=float)
     norm = area_hm2 * t_years
     fst = raw_n / norm
 
+    # Auto-detect rollover if requested
+    if cutoff == 'auto':
+        cutoff = find_rollover_point(vols_sorted, fst)
+        print(f"    Auto-detected rollover V_c = {cutoff:.3f} m^3")
+
     mask = vols_sorted >= cutoff
     if mask.sum() < 3:
-        return vols_sorted, raw_n, fst, None, None, 0.0, 0.0
+        return vols_sorted, raw_n, fst, None, None, 0.0, 0.0, cutoff
 
     fit_v   = vols_sorted[mask]
     fit_fst = fst[mask]
@@ -266,7 +326,7 @@ def fit_power_law_cumulative(volumes, area_hm2, t_years, cutoff=0.25):
     B     = -slope
     alpha = 10**intercept
 
-    return vols_sorted, raw_n, fst, fit_v, fitted_fst, B, alpha
+    return vols_sorted, raw_n, fst, fit_v, fitted_fst, B, alpha, cutoff
 
 # ==============================================================================
 # 3. PLOTTING
@@ -354,13 +414,13 @@ def plot_geomorph_stats(df, out_dir, title_prefix, area_hm2=None, normalized=Tru
     # ==================== PANEL A: MAGNITUDE-FREQUENCY ====================
     ax1 = fig.add_subplot(gs[0, 0])
 
-    CUTOFF_VAL = 0.25  # m^3 — below M3C2 detection limit; excluded from fit
-
     if normalized:
         # --- Normalized cumulative exceedance (Janeras et al. 2023) ---
-        vols_sorted, raw_n, fst, fit_v, fit_fst, B, alpha = fit_power_law_cumulative(
-            df_clean['volume'], area_hm2, t_years, cutoff=CUTOFF_VAL
-        )
+        # cutoff='auto' detects the rollover inflection point
+        vols_sorted, raw_n, fst, fit_v, fit_fst, B, alpha, CUTOFF_VAL = \
+            fit_power_law_cumulative(
+                df_clean['volume'], area_hm2, t_years, cutoff='auto'
+            )
 
         if vols_sorted is not None:
             below = vols_sorted < CUTOFF_VAL
@@ -375,7 +435,7 @@ def plot_geomorph_stats(df, out_dir, title_prefix, area_hm2=None, normalized=Tru
                 ax1.loglog(fit_v, fit_fst, '--', color=COLOR_ACCENT, linewidth=3.5,
                            label=f'$F_{{st}} = {alpha:.2f}\\,V^{{-{B:.2f}}}$')
             ax1.axvline(CUTOFF_VAL, color=COLOR_ACCENT, linestyle=':', alpha=0.55,
-                        linewidth=2.5, label=f'$V_c = {CUTOFF_VAL}$ m$^3$')
+                        linewidth=2.5, label=f'$V_c = {CUTOFF_VAL:.2f}$ m$^3$')
 
         ax1.text(0.97, 0.97,
                  f'$A_{{st}} = {area_hm2:.2f}$ hm$^2$\n'
@@ -392,6 +452,7 @@ def plot_geomorph_stats(df, out_dir, title_prefix, area_hm2=None, normalized=Tru
 
     else:
         # --- Original histogram-based power law ---
+        CUTOFF_VAL = 0.25  # fixed cutoff for non-normalized mode
         centers, hist, fit_x, fit_y, beta = fit_power_law_fixed_cutoff(
             df_clean['volume'], cutoff=CUTOFF_VAL
         )
