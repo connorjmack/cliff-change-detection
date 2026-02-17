@@ -484,8 +484,10 @@ def plot_geomorph_stats(df, out_dir, title_prefix, area_hm2=None, normalized=Tru
         B1, a1, r2_1, n1 = _fit_log_range(vols_sorted, fst, LOWER_BOUND, BREAKPOINT)
         B2, a2, r2_2, n2 = _fit_log_range(vols_sorted, fst, BREAKPOINT, v_max)
 
-        # Plot all data as black dots
-        ax1.loglog(vols_sorted, fst, 'o', color='black', markersize=7, alpha=0.6)
+        # Plot data >= lower bound only
+        plot_mask = vols_sorted >= LOWER_BOUND
+        ax1.loglog(vols_sorted[plot_mask], fst[plot_mask],
+                   'o', color='gray', markersize=5, alpha=0.4)
 
         # Regime 1 fit line
         mask1 = (vols_sorted >= LOWER_BOUND) & (vols_sorted <= BREAKPOINT)
