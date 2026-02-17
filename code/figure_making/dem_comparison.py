@@ -580,6 +580,82 @@ def make_multi_panel_figure(results_df):
     print(f"  Saved: {out}")
 
 
+def make_comparison_table(results_df):
+    """Create a small comparison table for the appendix (top 3 events)."""
+    dem_dir = os.path.join(FIG_DIR, "dems")
+    os.makedirs(dem_dir, exist_ok=True)
+
+    # Load QC CSV for individual event details
+    qc_csv = find_qc_csv()
+    df_qc = pd.read_csv(qc_csv, parse_dates=["mid_date", "start_date", "end_date"])
+    real = df_qc[df_qc["qc_flag"] == "real"].copy()
+    top3 = real.sort_values("volume", ascending=False).head(3).reset_index(drop=True)
+
+    ok = results_df[results_df["status"] == "ok"]
+
+    rows = []
+    for i, (_, ev) in enumerate(top3.iterrows()):
+        d1 = ev["start_date"].strftime("%Y%m%d")
+        d2 = ev["end_date"].strftime("%Y%m%d")
+        v_m3c2 = ev["volume"]
+
+        match = ok[(ok["start_date"] == d1) & (ok["end_date"] == d2)]
+        if not match.empty:
+            v_dod = match.iloc[0]["V_DoD_ero"]
+        else:
+            v_dod = np.nan
+
+        if v_dod > 0:
+            diff_pct = (v_m3c2 - v_dod) / v_dod * 100
+        else:
+            diff_pct = np.nan
+
+        rows.append([
+            f"Event {i+1}\n({d1} \u2192 {d2})",
+            f"{v_m3c2:.1f}",
+            f"{v_dod:.1f}" if np.isfinite(v_dod) else "\u2014",
+            f"{diff_pct:+.1f}%" if np.isfinite(diff_pct) else "\u2014",
+        ])
+
+    col_labels = [
+        "Event ID",
+        "2.75D Grid\nVolume (m\u00b3)",
+        "2.5D DoD\nVolume (m\u00b3)",
+        "Difference (%)",
+    ]
+
+    fig, ax = plt.subplots(figsize=(8, 2.5))
+    ax.axis("off")
+
+    table = ax.table(
+        cellText=rows,
+        colLabels=col_labels,
+        loc="center",
+        cellLoc="center",
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(11)
+    table.scale(1.0, 1.8)
+
+    # Style header row
+    for j in range(len(col_labels)):
+        cell = table[0, j]
+        cell.set_facecolor("#4472C4")
+        cell.set_text_props(color="white", fontweight="bold")
+
+    # Alternating row shading
+    for i in range(len(rows)):
+        for j in range(len(col_labels)):
+            cell = table[i + 1, j]
+            cell.set_facecolor("#D9E2F3" if i % 2 == 0 else "white")
+
+    out = os.path.join(dem_dir, "comparison_table.png")
+    plt.savefig(out, dpi=200, bbox_inches="tight",
+                facecolor="white", edgecolor="none")
+    plt.close()
+    print(f"  Saved: {out}")
+
+
 def make_figure(results_df):
     """Summary comparison figure: bar chart + DoD map of largest pair + schematic."""
     os.makedirs(FIG_DIR, exist_ok=True)
@@ -744,6 +820,7 @@ def main():
     if not args.no_figure:
         make_event_figures(results)
         make_multi_panel_figure(results)
+        make_comparison_table(results)
         make_figure(results)
 
 
