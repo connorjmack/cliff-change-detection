@@ -27,6 +27,7 @@ import pandas as pd
 import laspy
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+from scipy import ndimage
 
 # ── paths ──────────────────────────────────────────────────────────────────────
 SYSTEM = platform.system()
@@ -294,10 +295,50 @@ def run_comparison(n_events=5, dem_res=DEM_RES, lod=LOD_THRESHOLD):
 #  FIGURES
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def make_event_figures(results_df):
-    """Save a 3-panel diagnostic figure for each survey pair.
+def find_largest_dod_cluster(dod, dem_res, buffer_m=30.0):
+    """Find the largest cluster of significant DoD cells.
 
-    Panels: DEM before, DEM after, thresholded DoD.
+    Uses connected-component labeling on all cells where DoD != 0
+    (i.e. already LoD-thresholded). Returns the cluster with the
+    largest total absolute volume and its bounding box (in pixel coords).
+
+    Returns
+    -------
+    row_slice, col_slice : slices for the bounding box (with buffer)
+    cluster_vol : float, total |DoD| * cell_area for the cluster
+    n_labels : int, total number of clusters found
+    """
+    significant = (dod != 0) & ~np.isnan(dod)
+    if not np.any(significant):
+        return None, None, 0.0, 0
+
+    labelled, n_labels = ndimage.label(significant)
+
+    # Find cluster with largest absolute volume (vectorised)
+    cell_area = dem_res * dem_res
+    labels_range = np.arange(1, n_labels + 1)
+    cluster_vols = ndimage.sum(np.abs(dod), labelled, labels_range) * cell_area
+    best_idx = np.argmax(cluster_vols)
+    best_label = labels_range[best_idx]
+    best_vol = float(cluster_vols[best_idx])
+
+    # Bounding box of the best cluster
+    rows, cols = np.where(labelled == best_label)
+    buf_px = int(np.ceil(buffer_m / dem_res))
+    ny, nx = dod.shape
+    r_lo = max(0, rows.min() - buf_px)
+    r_hi = min(ny, rows.max() + buf_px + 1)
+    c_lo = max(0, cols.min() - buf_px)
+    c_hi = min(nx, cols.max() + buf_px + 1)
+
+    return slice(r_lo, r_hi), slice(c_lo, c_hi), best_vol, n_labels
+
+
+def make_event_figures(results_df):
+    """Save a zoomed DoD figure for each survey pair.
+
+    Finds the largest cluster of significant change in the DoD and
+    zooms to that area with a buffer.
     """
     dem_dir = os.path.join(FIG_DIR, "dems")
     os.makedirs(dem_dir, exist_ok=True)
@@ -309,69 +350,46 @@ def make_event_figures(results_df):
 
     for _, row in ok.iterrows():
         pair = int(row["pair"])
-        dem1 = row["_dem1"]
-        dem2 = row["_dem2"]
         dod = row["_dod"]
         x_edges = row["_x_edges"]
         y_edges = row["_y_edges"]
+        dem_res = x_edges[1] - x_edges[0]
 
-        fig, axes = plt.subplots(1, 3, figsize=(20, 8))
+        # Find largest cluster
+        r_slice, c_slice, cluster_vol, n_clusters = find_largest_dod_cluster(
+            dod, dem_res)
 
-        # Shared elevation colour range
-        z_lo = np.nanmin([np.nanmin(dem1), np.nanmin(dem2)])
-        z_hi = np.nanmax([np.nanmax(dem1), np.nanmax(dem2)])
+        if r_slice is None:
+            print(f"  Pair {pair}: no significant DoD cells, skipping figure")
+            continue
 
-        # Panel 1: DEM before
-        ax = axes[0]
-        im1 = ax.pcolormesh(x_edges, y_edges, dem1,
-                            cmap="terrain", vmin=z_lo, vmax=z_hi,
-                            shading="flat")
-        plt.colorbar(im1, ax=ax, shrink=0.7, label="Elevation (m)")
-        ax.set_title(f"(a) DEM before  ({row['start_date']})",
-                     fontweight="bold", fontsize=10)
-        ax.set_xlabel("Easting (m)")
-        ax.set_ylabel("Northing (m)")
-        ax.set_aspect("equal")
-        ax.ticklabel_format(useOffset=False, style="plain")
-        ax.tick_params(labelsize=7, labelrotation=30)
+        # Zoom to cluster region
+        dod_zoom = dod[r_slice, c_slice]
+        x_edges_zoom = x_edges[c_slice.start:c_slice.stop + 1]
+        y_edges_zoom = y_edges[r_slice.start:r_slice.stop + 1]
 
-        # Panel 2: DEM after
-        ax = axes[1]
-        im2 = ax.pcolormesh(x_edges, y_edges, dem2,
-                            cmap="terrain", vmin=z_lo, vmax=z_hi,
-                            shading="flat")
-        plt.colorbar(im2, ax=ax, shrink=0.7, label="Elevation (m)")
-        ax.set_title(f"(b) DEM after  ({row['end_date']})",
-                     fontweight="bold", fontsize=10)
-        ax.set_xlabel("Easting (m)")
-        ax.set_ylabel("Northing (m)")
-        ax.set_aspect("equal")
-        ax.ticklabel_format(useOffset=False, style="plain")
-        ax.tick_params(labelsize=7, labelrotation=30)
+        fig, ax = plt.subplots(figsize=(10, 8))
 
-        # Panel 3: Thresholded DoD
-        ax = axes[2]
-        dod_abs_max = max(abs(np.nanmin(dod)), abs(np.nanmax(dod)), 0.5)
-        im3 = ax.pcolormesh(x_edges, y_edges, dod,
-                            cmap="RdBu", vmin=-dod_abs_max, vmax=dod_abs_max,
-                            shading="flat")
-        plt.colorbar(im3, ax=ax, shrink=0.7, label="DoD (m)")
+        dod_abs_max = max(abs(np.nanmin(dod_zoom)), abs(np.nanmax(dod_zoom)), 0.5)
+        im = ax.pcolormesh(x_edges_zoom, y_edges_zoom, dod_zoom,
+                           cmap="RdBu", vmin=-dod_abs_max, vmax=dod_abs_max,
+                           shading="flat")
+        cb = plt.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
+        cb.set_label("DoD elevation change (m)", fontsize=11)
+
+        ax.set_xlabel("Easting (m)", fontsize=11)
+        ax.set_ylabel("Northing (m)", fontsize=11)
         ax.set_title(
-            f"(c) DoD (LoD={LOD_THRESHOLD}m)  —  "
-            f"V_DoD={row['V_DoD_ero']:.1f} m³  vs  "
-            f"V_M3C2={row['V_M3C2']:.1f} m³  "
+            f"Survey {row['start_date']} → {row['end_date']}  |  "
+            f"Largest DoD cluster: {cluster_vol:.1f} m³  |  "
+            f"Total DoD erosion: {row['V_DoD_ero']:.1f} m³  |  "
+            f"M3C2 erosion: {row['V_M3C2']:.1f} m³  "
             f"({row['ratio']:.1f}×)",
             fontweight="bold", fontsize=9)
-        ax.set_xlabel("Easting (m)")
-        ax.set_ylabel("Northing (m)")
         ax.set_aspect("equal")
         ax.ticklabel_format(useOffset=False, style="plain")
-        ax.tick_params(labelsize=7, labelrotation=30)
+        ax.tick_params(labelsize=8, labelrotation=30)
 
-        fig.suptitle(
-            f"Survey pair {pair}:  {row['start_date']} → {row['end_date']}  "
-            f"({row['n_m3c2_events']} M3C2 events)",
-            fontsize=13, fontweight="bold")
         plt.tight_layout()
 
         out = os.path.join(dem_dir,
@@ -379,9 +397,10 @@ def make_event_figures(results_df):
         plt.savefig(out, dpi=150, bbox_inches="tight",
                     facecolor="white", edgecolor="none")
         plt.close()
-        print(f"  Saved: {out}")
+        print(f"  Saved: {out}  ({n_clusters} clusters found, "
+              f"largest = {cluster_vol:.1f} m³)")
 
-    print(f"\nAll survey pair DEMs saved to: {dem_dir}")
+    print(f"\nAll zoomed DoD figures saved to: {dem_dir}")
 
 
 def make_figure(results_df):
