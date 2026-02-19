@@ -10,8 +10,10 @@ are invisible to nadir DEMs.
 Strategy:
   1. Filter QC'd real erosion events to those above a volume threshold.
   2. Compute DoD erosion volume for each unique date pair.
-  3. Rank by ratio (V_M3C2 / V_DoD) — highest ratio = biggest DEM blind spot.
-  4. Generate figures for the top-N date pairs by ratio.
+  3. Discard pairs where DoD >= M3C2 (only keep ratio > 1).
+  4. Rank remaining pairs by ratio (V_M3C2 / V_DoD) — highest = biggest
+     DEM blind spot.
+  5. Generate figures for the top-N date pairs by ratio.
 
 Usage:
     python3 dem_comparison_ratio.py
@@ -306,8 +308,19 @@ def run_comparison(min_volume=MIN_VOLUME, n_top=10, dem_res=DEM_RES,
 
     all_results = pd.DataFrame(results)
 
-    # --- Rank by ratio (descending) ---
+    # --- Keep only pairs where M3C2 > DoD, then rank by ratio ---
     ok = all_results[all_results["status"] == "ok"].copy()
+    ok = ok[ok["ratio"] > 1.0]
+
+    n_discarded = (all_results["status"] == "ok").sum() - len(ok)
+    if n_discarded > 0:
+        print(f"Discarded {n_discarded} pair(s) where DoD >= M3C2 "
+              f"(ratio <= 1.0)")
+
+    if ok.empty:
+        print("No date pairs where M3C2 volume exceeds DoD volume.")
+        return all_results, pd.DataFrame()
+
     # Sort: inf first (DoD found nothing), then by descending ratio
     ok["_sort_key"] = ok["ratio"].replace(np.inf, 1e12)
     ok = ok.sort_values("_sort_key", ascending=False).drop(columns="_sort_key")
@@ -319,7 +332,8 @@ def run_comparison(min_volume=MIN_VOLUME, n_top=10, dem_res=DEM_RES,
     top = ok.head(n_top).copy()
 
     print(f"\n{'='*70}")
-    print(f"RATIO-RANKED RESULTS (top {n_top} of {len(ok)} valid pairs)")
+    print(f"RATIO-RANKED RESULTS — M3C2 > DoD only "
+          f"(top {min(n_top, len(ok))} of {len(ok)} qualifying pairs)")
     print(f"{'='*70}")
     display_cols = ["rank", "start_date", "end_date", "V_M3C2",
                     "V_DoD_ero", "ratio", "n_m3c2_events"]
