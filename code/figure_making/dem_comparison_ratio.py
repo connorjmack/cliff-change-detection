@@ -967,7 +967,6 @@ def main():
     if not args.no_figure:
         ok = results[results["status"] == "ok"]
         if not ok.empty:
-            make_event_figures(results)
             make_multi_panel_figures(results,
                                     cols_per_page=args.cols_per_page)
             make_comparison_table(results)
