@@ -10,10 +10,8 @@ are invisible to nadir DEMs.
 Strategy:
   1. Filter QC'd real erosion events to those above a volume threshold.
   2. Compute DoD erosion volume for each unique date pair.
-  3. Discard pairs where DoD >= M3C2 (only keep ratio > 1).
-  4. Rank remaining pairs by ratio (V_M3C2 / V_DoD) — highest = biggest
-     DEM blind spot.
-  5. Generate figures for the top-N date pairs by ratio.
+  3. Rank by M3C2 volume (largest first).
+  4. Generate multi-panel figures (M3C2 grid vs DoD) for the top-N pairs.
 
 Usage:
     python3 dem_comparison_ratio.py                          # top 15, 5 pages of 3
@@ -177,14 +175,13 @@ def run_comparison(min_volume=MIN_VOLUME, n_top=10, dem_res=DEM_RES,
     """Run DEM-vs-M3C2 comparison for all events above a volume threshold.
 
     Processes every unique date pair that contains at least one real event
-    with volume >= min_volume. After computing DoD for all pairs, ranks
-    by ratio (V_M3C2_total / V_DoD_erosion) descending and returns the
-    top n_top results.
+    with volume >= min_volume. Ranks results by M3C2 volume (largest first)
+    and returns the top n_top results.
 
     Returns
     -------
     all_results : DataFrame with every processed date pair
-    top_results : DataFrame with the top n_top pairs by ratio
+    top_results : DataFrame with the top n_top pairs by volume
     """
     qc_csv = find_qc_csv()
     print(f"Using QC file: {os.path.basename(qc_csv)}")
@@ -309,32 +306,22 @@ def run_comparison(min_volume=MIN_VOLUME, n_top=10, dem_res=DEM_RES,
 
     all_results = pd.DataFrame(results)
 
-    # --- Keep only pairs where M3C2 > DoD, then rank by ratio ---
+    # --- Rank by M3C2 volume (largest first) ---
     ok = all_results[all_results["status"] == "ok"].copy()
-    ok = ok[ok["ratio"] > 1.0]
-
-    n_discarded = (all_results["status"] == "ok").sum() - len(ok)
-    if n_discarded > 0:
-        print(f"Discarded {n_discarded} pair(s) where DoD >= M3C2 "
-              f"(ratio <= 1.0)")
 
     if ok.empty:
-        print("No date pairs where M3C2 volume exceeds DoD volume.")
+        print("No valid date pairs.")
         return all_results, pd.DataFrame()
 
-    # Sort: inf first (DoD found nothing), then by descending ratio
-    ok["_sort_key"] = ok["ratio"].replace(np.inf, 1e12)
-    ok = ok.sort_values("_sort_key", ascending=False).drop(columns="_sort_key")
-
-    # Assign rank
+    ok = ok.sort_values("V_M3C2", ascending=False)
     ok = ok.reset_index(drop=True)
     ok["rank"] = range(1, len(ok) + 1)
 
     top = ok.head(n_top).copy()
 
     print(f"\n{'='*70}")
-    print(f"RATIO-RANKED RESULTS — M3C2 > DoD only "
-          f"(top {min(n_top, len(ok))} of {len(ok)} qualifying pairs)")
+    print(f"TOP {min(n_top, len(ok))} EVENTS BY M3C2 VOLUME "
+          f"(of {len(ok)} valid pairs)")
     print(f"{'='*70}")
     display_cols = ["rank", "start_date", "end_date", "V_M3C2",
                     "V_DoD_ero", "ratio", "n_m3c2_events"]
