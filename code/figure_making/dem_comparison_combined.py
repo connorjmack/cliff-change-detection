@@ -90,7 +90,7 @@ def make_combined_figure(results_df, n_scatter=50, event_ranks=(1, 15)):
     # ---- Figure layout ----
     fig = plt.figure(figsize=(18, 8))
     gs = gridspec.GridSpec(2, 3, width_ratios=[1.3, 1, 1],
-                           wspace=0.35, hspace=0.45)
+                           wspace=0.2, hspace=0.25)
 
     # ==================================================================
     #  LEFT: Scatter plot
@@ -225,7 +225,7 @@ def make_combined_figure(results_df, n_scatter=50, event_ranks=(1, 15)):
                 cb1 = plt.colorbar(im1, ax=ax_top, shrink=0.7,
                                    pad=0.02, aspect=15)
                 cb1.ax.tick_params(labelsize=6)
-                cb1.set_label("M3C2 (m)", fontsize=8)
+                cb1.set_label("M3C2 Distance (m)", fontsize=8)
             else:
                 ax_top.text(0.5, 0.5, "Outside grid",
                             transform=ax_top.transAxes,
@@ -238,8 +238,7 @@ def make_combined_figure(results_df, n_scatter=50, event_ranks=(1, 15)):
         ratio_str = (f"{row['ratio']:.1f}"
                      if np.isfinite(row["ratio"]) else "inf")
         ax_top.set_title(
-            f"#{rank}: {d1} -> {d2}\n"
-            f"M3C2: {row['V_M3C2']:.1f} m\u00b3  |  "
+            f"#{rank}: Volume: {row['V_M3C2']:.1f} m\u00b3  |  "
             f"Ratio: {ratio_str}\u00d7",
             fontsize=9, fontweight='bold')
 
@@ -251,6 +250,7 @@ def make_combined_figure(results_df, n_scatter=50, event_ranks=(1, 15)):
         if dod_zoom is not None:
             vabs = max(abs(np.nanmin(dod_zoom)),
                        abs(np.nanmax(dod_zoom)), 0.5)
+            vabs = min(vabs, 4.0)
 
             # Negate so erosion is positive (red), matching M3C2 row
             dz_masked = np.ma.masked_invalid(-dod_zoom)
@@ -271,12 +271,12 @@ def make_combined_figure(results_df, n_scatter=50, event_ranks=(1, 15)):
                         fontsize=9)
 
         ax_bot.set_title(
-            f"DoD (largest cluster): {row['V_DoD']:.1f} m\u00b3",
+            f"#{rank}: Volume: {row['V_DoD']:.1f} m\u00b3",
             fontsize=9, fontweight='bold')
 
     # Row labels on the leftmost event panels
     if ax_m3c2_left is not None:
-        ax_m3c2_left.set_ylabel("M3C2 Grid\n(cliff-facing)",
+        ax_m3c2_left.set_ylabel("2.75D Grid\n(cliff-facing)",
                                 fontsize=10, fontweight='bold')
     if ax_dod_left is not None:
         ax_dod_left.set_ylabel("DoD\n(top-down)",
