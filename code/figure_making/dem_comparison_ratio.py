@@ -820,6 +820,117 @@ def make_summary_figure(results_df):
     plt.close()
 
 
+def make_scatter_figure(results_df):
+    """Scatter plot of M3C2 vs DoD volume, one point per date pair.
+
+    Keeps only the largest M3C2 event per date pair to avoid duplicate
+    DoD values. Points are coloured by elevation centroid and sized by
+    M3C2 event volume. A 1:1 reference line shows where the two methods
+    agree.
+    """
+    import matplotlib.colors as mcolors
+
+    dem_dir = os.path.join(FIG_DIR, "dems_ratio")
+    os.makedirs(dem_dir, exist_ok=True)
+
+    ok = results_df[results_df["status"] == "ok"].copy()
+    if ok.empty:
+        print("No valid events for scatter figure.")
+        return
+
+    # Keep only the largest M3C2 event per date pair
+    ok["pair_key"] = ok["start_date"] + "_" + ok["end_date"]
+    deduped = (ok.sort_values("V_M3C2", ascending=False)
+               .drop_duplicates(subset="pair_key", keep="first")
+               .copy())
+
+    # Drop any with zero or NaN DoD
+    deduped = deduped[deduped["V_DoD"].notna() & (deduped["V_DoD"] > 0)]
+
+    if deduped.empty:
+        print("No valid pairs for scatter figure after deduplication.")
+        return
+
+    print(f"\nScatter plot: {len(deduped)} unique date pairs "
+          f"(from {len(ok)} events)")
+
+    v_m3c2 = deduped["V_M3C2"].values
+    v_dod = deduped["V_DoD"].values
+    elev = deduped["elevation"].values
+
+    # Circle sizes scaled by M3C2 volume
+    size_min, size_max = 30, 400
+    vol_min, vol_max = v_m3c2.min(), v_m3c2.max()
+    if vol_max > vol_min:
+        sizes = size_min + (v_m3c2 - vol_min) / (vol_max - vol_min) * (size_max - size_min)
+    else:
+        sizes = np.full_like(v_m3c2, (size_min + size_max) / 2)
+
+    # --- Figure ---
+    fig, ax = plt.subplots(figsize=(8, 7))
+
+    # 1:1 reference line
+    axis_max = max(v_m3c2.max(), v_dod.max()) * 1.15
+    ax.plot([0, axis_max], [0, axis_max], '--', color='#888',
+            linewidth=1.2, zorder=1, label='1:1 line')
+
+    # Scatter
+    sc = ax.scatter(v_m3c2, v_dod, c=elev, s=sizes,
+                    cmap='plasma', edgecolors='#333', linewidths=0.4,
+                    alpha=0.85, zorder=3)
+
+    # Colorbar for elevation
+    cb = plt.colorbar(sc, ax=ax, shrink=0.75, pad=0.02)
+    cb.set_label("Event Elevation Centroid (m)", fontsize=11)
+
+    # Size legend (3 representative volumes)
+    vol_ticks = np.array([50, 200, 500])
+    vol_ticks = vol_ticks[vol_ticks <= vol_max * 1.1]
+    if len(vol_ticks) == 0:
+        vol_ticks = np.array([vol_min, vol_max])
+    for vt in vol_ticks:
+        if vol_max > vol_min:
+            sz = size_min + (vt - vol_min) / (vol_max - vol_min) * (size_max - size_min)
+        else:
+            sz = (size_min + size_max) / 2
+        ax.scatter([], [], s=sz, c='#ccc', edgecolors='#333',
+                   linewidths=0.4, label=f'{int(vt)} m\u00b3')
+
+    # Region labels
+    ax.text(axis_max * 0.95, axis_max * 0.35,
+            "M3C2 > DoD",
+            fontsize=10, color='#555', ha='right', style='italic')
+    ax.text(axis_max * 0.35, axis_max * 0.95,
+            "DoD > M3C2",
+            fontsize=10, color='#555', ha='left', style='italic')
+
+    ax.set_xlabel("2.75D Grid Volume, M3C2 (m\u00b3)", fontsize=12)
+    ax.set_ylabel("DoD Volume (m\u00b3)", fontsize=12)
+    ax.set_title(
+        f"M3C2 vs DoD Erosion Volume \u2014 Del Mar\n"
+        f"(largest event per date pair, n = {len(deduped)}, "
+        f"circle size = M3C2 volume)",
+        fontsize=11, fontweight='bold')
+
+    ax.set_xlim(0, axis_max)
+    ax.set_ylim(0, axis_max)
+    ax.set_aspect('equal')
+    ax.legend(loc='upper left', frameon=True, framealpha=0.9,
+              fontsize=9, title='Volume', title_fontsize=9)
+
+    plt.tight_layout()
+
+    out_png = os.path.join(dem_dir, "scatter_m3c2_vs_dod.png")
+    out_pdf = os.path.join(dem_dir, "scatter_m3c2_vs_dod.pdf")
+    plt.savefig(out_png, dpi=200, bbox_inches="tight",
+                facecolor="white", edgecolor="none")
+    plt.savefig(out_pdf, bbox_inches="tight",
+                facecolor="white", edgecolor="none")
+    plt.close()
+    print(f"  Saved: {out_png}")
+    print(f"  Saved: {out_pdf}")
+
+
 # ==========================================================================
 #  CLI
 # ==========================================================================
@@ -861,6 +972,7 @@ def main():
                                     cols_per_page=args.cols_per_page)
             make_comparison_table(results)
             make_summary_figure(results)
+            make_scatter_figure(results)
 
 
 if __name__ == "__main__":
