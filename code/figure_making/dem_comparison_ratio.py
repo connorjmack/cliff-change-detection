@@ -16,8 +16,9 @@ Strategy:
   5. Generate figures for the top-N date pairs by ratio.
 
 Usage:
-    python3 dem_comparison_ratio.py
-    python3 dem_comparison_ratio.py --min_volume 100 --n_top 5
+    python3 dem_comparison_ratio.py                          # top 15, 5 pages of 3
+    python3 dem_comparison_ratio.py --min_volume 100 --n_top 10
+    python3 dem_comparison_ratio.py --cols_per_page 5        # wider pages
     python3 dem_comparison_ratio.py --no_figure
 """
 
@@ -411,18 +412,17 @@ def make_event_figures(top_df):
     print(f"\nAll zoomed DoD figures saved to: {dem_dir}")
 
 
-def make_multi_panel_figure(top_df, n_panels=3):
-    """Create 2xN panel figure: M3C2 grid (top) vs DoD (bottom).
+def make_multi_panel_figures(top_df, cols_per_page=3):
+    """Create 2xN panel figures: M3C2 grid (top) vs DoD (bottom).
 
-    Uses the top N date pairs ranked by ratio. Top row shows cliff-face
-    M3C2 grid zoomed to the largest event footprint. Bottom row shows
-    top-down DoD zoomed to the largest erosion cluster.
+    Chunks all rows in top_df into pages of `cols_per_page` columns each.
+    E.g. 15 events with cols_per_page=3 produces 5 separate figures.
     """
     dem_dir = os.path.join(FIG_DIR, "dems_ratio")
     os.makedirs(dem_dir, exist_ok=True)
 
-    n_panels = min(n_panels, len(top_df))
-    if n_panels == 0:
+    n_total = len(top_df)
+    if n_total == 0:
         print("No valid pairs for multi-panel figure.")
         return
 
@@ -449,156 +449,172 @@ def make_multi_panel_figure(top_df, n_panels=3):
     asort = np.argsort(along_m)
     along_s = along_m[asort]
 
-    print(f"\nCreating multi-panel figure for top {n_panels} "
-          f"ratio-ranked pairs ...")
+    # --- Chunk into pages ---
+    n_pages = int(np.ceil(n_total / cols_per_page))
+    print(f"\nCreating {n_pages} multi-panel figure(s) "
+          f"({cols_per_page} columns each, {n_total} total pairs) ...")
 
-    fig, axes = plt.subplots(2, n_panels, figsize=(6 * n_panels, 9))
-    if n_panels == 1:
-        axes = axes.reshape(2, 1)
+    rows_list = list(top_df.iterrows())
 
-    panels = top_df.head(n_panels)
+    for page in range(n_pages):
+        start = page * cols_per_page
+        end = min(start + cols_per_page, n_total)
+        page_rows = rows_list[start:end]
+        n_cols = len(page_rows)
 
-    for col, (_, row) in enumerate(panels.iterrows()):
-        ax_top = axes[0, col]
-        ax_bot = axes[1, col]
+        fig, axes = plt.subplots(2, n_cols, figsize=(6 * n_cols, 9))
+        if n_cols == 1:
+            axes = axes.reshape(2, 1)
 
-        d1 = row["start_date"]
-        d2 = row["end_date"]
-        dfolder = f"{d1}_to_{d2}"
+        for col, (_, row) in enumerate(page_rows):
+            ax_top = axes[0, col]
+            ax_bot = axes[1, col]
 
-        # Find the largest real event for this date pair (for footprint)
-        d1_dt = pd.Timestamp(d1)
-        d2_dt = pd.Timestamp(d2)
-        pair_events = real[
-            (real["start_date"] == d1_dt) & (real["end_date"] == d2_dt)
-        ].sort_values("volume", ascending=False)
+            d1 = row["start_date"]
+            d2 = row["end_date"]
+            dfolder = f"{d1}_to_{d2}"
+            rank = int(row["rank"])
 
-        # -- Top row: M3C2 cliff-facing grid --
-        tidx = next((i for i, ds in enumerate(dstrings)
-                     if ds == dfolder), None)
+            # Find the largest real event for this date pair (for footprint)
+            d1_dt = pd.Timestamp(d1)
+            d2_dt = pd.Timestamp(d2)
+            pair_events = real[
+                (real["start_date"] == d1_dt) & (real["end_date"] == d2_dt)
+            ].sort_values("volume", ascending=False)
 
-        if tidx is not None and ero_3d is not None and not pair_events.empty:
-            ev = pair_events.iloc[0]
+            # -- Top row: M3C2 cliff-facing grid --
+            tidx = next((i for i, ds in enumerate(dstrings)
+                         if ds == dfolder), None)
 
-            ero2d = ero_3d[:, :, tidx][asort, :]
-            combined = np.nan_to_num(ero2d, nan=0.0)
-            if dep_3d is not None:
-                dep2d = dep_3d[:, :, tidx][asort, :]
-                dc = np.nan_to_num(dep2d, nan=0.0)
-                dep_mask = (dc > 0) & (combined < 0.01)
-                combined[dep_mask] = -dc[dep_mask]
+            if (tidx is not None and ero_3d is not None
+                    and not pair_events.empty):
+                ev = pair_events.iloc[0]
 
-            # Zoom to event footprint
-            xpad, ypb, ypt = 10, 8, 3
-            xlo = ev['alongshore_start_m'] - xpad
-            xhi = ev['alongshore_end_m'] + xpad
-            ylo = max(0, ev['elevation'] - ev['height'] / 2 - ypb)
-            yhi = ev['elevation'] + ev['height'] / 2 + ypt
+                ero2d = ero_3d[:, :, tidx][asort, :]
+                combined = np.nan_to_num(ero2d, nan=0.0)
+                if dep_3d is not None:
+                    dep2d = dep_3d[:, :, tidx][asort, :]
+                    dc = np.nan_to_num(dep2d, nan=0.0)
+                    dep_mask = (dc > 0) & (combined < 0.01)
+                    combined[dep_mask] = -dc[dep_mask]
 
-            xm = (along_s >= xlo) & (along_s <= xhi)
-            ym = (elev_m >= ylo) & (elev_m <= yhi)
+                # Zoom to event footprint
+                xpad, ypb, ypt = 10, 8, 3
+                xlo = ev['alongshore_start_m'] - xpad
+                xhi = ev['alongshore_end_m'] + xpad
+                ylo = max(0, ev['elevation'] - ev['height'] / 2 - ypb)
+                yhi = ev['elevation'] + ev['height'] / 2 + ypt
 
-            if np.any(xm) and np.any(ym):
-                xi = np.where(xm)[0]
-                yi = np.where(ym)[0]
-                mz = combined[xi[0]:xi[-1]+1, yi[0]:yi[-1]+1].T
-                az = along_s[xi[0]:xi[-1]+1]
-                ez = elev_m[yi[0]:yi[-1]+1]
+                xm = (along_s >= xlo) & (along_s <= xhi)
+                ym = (elev_m >= ylo) & (elev_m <= yhi)
 
-                nz = mz[mz != 0]
-                vm = (max(np.percentile(np.abs(nz), 85), 0.1)
-                      if nz.size else 2.5)
+                if np.any(xm) and np.any(ym):
+                    xi = np.where(xm)[0]
+                    yi = np.where(ym)[0]
+                    mz = combined[xi[0]:xi[-1]+1, yi[0]:yi[-1]+1].T
+                    az = along_s[xi[0]:xi[-1]+1]
+                    ez = elev_m[yi[0]:yi[-1]+1]
 
-                im1 = ax_top.imshow(mz, origin='lower', aspect='auto',
-                                    interpolation='nearest', cmap='RdBu_r',
-                                    vmin=-vm, vmax=vm)
+                    nz = mz[mz != 0]
+                    vm = (max(np.percentile(np.abs(nz), 85), 0.1)
+                          if nz.size else 2.5)
 
-                nt = min(4, len(az))
-                if len(az) > 1:
-                    ti = np.linspace(0, len(az)-1, nt, dtype=int)
-                    ax_top.set_xticks(ti)
-                    ax_top.set_xticklabels(
-                        [f'{az[j]:.0f}' for j in ti], fontsize=5)
-                nt = min(4, len(ez))
-                if len(ez) > 1:
-                    ti = np.linspace(0, len(ez)-1, nt, dtype=int)
-                    ax_top.set_yticks(ti)
-                    ax_top.set_yticklabels(
-                        [f'{ez[j]:.1f}' for j in ti], fontsize=5)
+                    im1 = ax_top.imshow(mz, origin='lower', aspect='auto',
+                                        interpolation='nearest',
+                                        cmap='RdBu_r',
+                                        vmin=-vm, vmax=vm)
 
-                ax_top.invert_xaxis()
+                    nt = min(4, len(az))
+                    if len(az) > 1:
+                        ti = np.linspace(0, len(az)-1, nt, dtype=int)
+                        ax_top.set_xticks(ti)
+                        ax_top.set_xticklabels(
+                            [f'{az[j]:.0f}' for j in ti], fontsize=5)
+                    nt = min(4, len(ez))
+                    if len(ez) > 1:
+                        ti = np.linspace(0, len(ez)-1, nt, dtype=int)
+                        ax_top.set_yticks(ti)
+                        ax_top.set_yticklabels(
+                            [f'{ez[j]:.1f}' for j in ti], fontsize=5)
 
-                cb1 = plt.colorbar(im1, ax=ax_top, shrink=0.5,
-                                   pad=0.02, aspect=12)
-                cb1.ax.tick_params(labelsize=5)
-                if col == n_panels - 1:
-                    cb1.set_label("M3C2 (m)", fontsize=7)
+                    ax_top.invert_xaxis()
+
+                    cb1 = plt.colorbar(im1, ax=ax_top, shrink=0.5,
+                                       pad=0.02, aspect=12)
+                    cb1.ax.tick_params(labelsize=5)
+                    if col == n_cols - 1:
+                        cb1.set_label("M3C2 (m)", fontsize=7)
+                else:
+                    ax_top.text(0.5, 0.5, "Outside grid",
+                                transform=ax_top.transAxes,
+                                ha='center', va='center', fontsize=7)
             else:
-                ax_top.text(0.5, 0.5, "Outside grid",
+                ax_top.text(0.5, 0.5, "No cube data",
                             transform=ax_top.transAxes,
                             ha='center', va='center', fontsize=7)
-        else:
-            ax_top.text(0.5, 0.5, "No cube data",
-                        transform=ax_top.transAxes,
-                        ha='center', va='center', fontsize=7)
 
-        ratio_str = (f"{row['ratio']:.1f}" if np.isfinite(row["ratio"])
-                     else "inf")
-        ax_top.set_title(
-            f"{d1} -> {d2}\n"
-            f"M3C2: {row['V_M3C2']:.1f} m\u00b3  |  "
-            f"Ratio: {ratio_str}\u00d7",
-            fontsize=9, fontweight='bold')
+            ratio_str = (f"{row['ratio']:.1f}"
+                         if np.isfinite(row["ratio"]) else "inf")
+            ax_top.set_title(
+                f"#{rank}: {d1} -> {d2}\n"
+                f"M3C2: {row['V_M3C2']:.1f} m\u00b3  |  "
+                f"Ratio: {ratio_str}\u00d7",
+                fontsize=9, fontweight='bold')
 
-        # -- Bottom row: DoD (top-down) --
-        dod = row["_dod"]
-        xedges = row["_x_edges"]
-        yedges = row["_y_edges"]
-        dres = xedges[1] - xedges[0]
+            # -- Bottom row: DoD (top-down) --
+            dod = row["_dod"]
+            xedges = row["_x_edges"]
+            yedges = row["_y_edges"]
+            dres = xedges[1] - xedges[0]
 
-        rs, cs, cvol, _ = find_largest_dod_cluster(dod, dres)
-        if rs is not None:
-            dz = dod[rs, cs]
-            xe = xedges[cs.start:cs.stop + 1]
-            ye = yedges[rs.start:rs.stop + 1]
-            vabs = max(abs(np.nanmin(dz)), abs(np.nanmax(dz)), 0.5)
+            rs, cs, cvol, _ = find_largest_dod_cluster(dod, dres)
+            if rs is not None:
+                dz = dod[rs, cs]
+                xe = xedges[cs.start:cs.stop + 1]
+                ye = yedges[rs.start:rs.stop + 1]
+                vabs = max(abs(np.nanmin(dz)), abs(np.nanmax(dz)), 0.5)
 
-            dz_masked = np.ma.masked_invalid(-dz)
-            im2 = ax_bot.pcolormesh(xe, ye, dz_masked, cmap="RdBu_r",
-                                    vmin=-vabs, vmax=vabs, shading="flat")
-            ax_bot.set_facecolor("white")
-            ax_bot.ticklabel_format(useOffset=False, style="plain")
-            ax_bot.tick_params(labelsize=4, labelrotation=30)
-            cb2 = plt.colorbar(im2, ax=ax_bot, shrink=0.5,
-                               pad=0.02, aspect=12)
-            cb2.ax.tick_params(labelsize=5)
-            if col == n_panels - 1:
-                cb2.set_label("Elev. loss (m)", fontsize=7)
-        else:
-            ax_bot.text(0.5, 0.5, "No erosion\nin DoD", ha='center',
-                        va='center', transform=ax_bot.transAxes, fontsize=7)
+                dz_masked = np.ma.masked_invalid(-dz)
+                im2 = ax_bot.pcolormesh(xe, ye, dz_masked, cmap="RdBu_r",
+                                        vmin=-vabs, vmax=vabs,
+                                        shading="flat")
+                ax_bot.set_facecolor("white")
+                ax_bot.ticklabel_format(useOffset=False, style="plain")
+                ax_bot.tick_params(labelsize=4, labelrotation=30)
+                cb2 = plt.colorbar(im2, ax=ax_bot, shrink=0.5,
+                                   pad=0.02, aspect=12)
+                cb2.ax.tick_params(labelsize=5)
+                if col == n_cols - 1:
+                    cb2.set_label("Elev. loss (m)", fontsize=7)
+            else:
+                ax_bot.text(0.5, 0.5, "No erosion\nin DoD", ha='center',
+                            va='center', transform=ax_bot.transAxes,
+                            fontsize=7)
 
-        ax_bot.set_title(
-            f"DoD: {row['V_DoD_ero']:.1f} m\u00b3",
-            fontsize=9, fontweight='bold')
+            ax_bot.set_title(
+                f"DoD: {row['V_DoD_ero']:.1f} m\u00b3",
+                fontsize=9, fontweight='bold')
 
-    axes[0, 0].set_ylabel("M3C2 Grid\n(cliff-facing)", fontsize=10,
-                          fontweight='bold')
-    axes[1, 0].set_ylabel("DoD\n(top-down)", fontsize=10,
-                          fontweight='bold')
+        axes[0, 0].set_ylabel("M3C2 Grid\n(cliff-facing)", fontsize=10,
+                              fontweight='bold')
+        axes[1, 0].set_ylabel("DoD\n(top-down)", fontsize=10,
+                              fontweight='bold')
 
-    fig.suptitle(
-        f"Largest M3C2/DoD Discrepancies — Top {n_panels} Date Pairs "
-        f"(Del Mar)\n"
-        "Red = erosion, Blue = deposition in both rows",
-        fontsize=12, fontweight='bold')
-    plt.tight_layout(rect=[0, 0, 1, 0.93])
+        rank_lo = int(top_df.iloc[start]["rank"])
+        rank_hi = int(top_df.iloc[end - 1]["rank"])
+        fig.suptitle(
+            f"Largest M3C2/DoD Discrepancies — Ranks #{rank_lo}-{rank_hi} "
+            f"(Del Mar)\n"
+            "Red = erosion, Blue = deposition in both rows",
+            fontsize=12, fontweight='bold')
+        plt.tight_layout(rect=[0, 0, 1, 0.93])
 
-    out = os.path.join(dem_dir, "multi_panel_ratio.png")
-    plt.savefig(out, dpi=200, bbox_inches="tight",
-                facecolor="white", edgecolor="none")
-    plt.close()
-    print(f"  Saved: {out}")
+        out = os.path.join(dem_dir,
+                           f"multi_panel_ratio_{page+1}.png")
+        plt.savefig(out, dpi=200, bbox_inches="tight",
+                    facecolor="white", edgecolor="none")
+        plt.close()
+        print(f"  Saved: {out}  (ranks #{rank_lo}-{rank_hi})")
 
 
 def make_comparison_table(top_df):
@@ -821,11 +837,11 @@ def main():
     parser.add_argument("--min_volume", type=float, default=MIN_VOLUME,
                         help=f"Min M3C2 event volume in m3 (default: "
                              f"{MIN_VOLUME})")
-    parser.add_argument("--n_top", type=int, default=10,
+    parser.add_argument("--n_top", type=int, default=15,
                         help="Number of top-ratio pairs to output "
-                             "(default: 10)")
-    parser.add_argument("--n_panels", type=int, default=3,
-                        help="Number of columns in multi-panel figure "
+                             "(default: 15)")
+    parser.add_argument("--cols_per_page", type=int, default=3,
+                        help="Columns per multi-panel figure page "
                              "(default: 3)")
     parser.add_argument("--dem_res", type=float, default=DEM_RES,
                         help=f"DEM cell size in metres (default: {DEM_RES})")
@@ -845,7 +861,7 @@ def main():
 
     if not args.no_figure:
         make_event_figures(top_results)
-        make_multi_panel_figure(top_results, n_panels=args.n_panels)
+        make_multi_panel_figures(top_results, cols_per_page=args.cols_per_page)
         make_comparison_table(top_results)
         make_summary_figure(top_results)
 
