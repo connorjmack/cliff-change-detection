@@ -2,25 +2,20 @@
 """
 dem_comparison_ratio.py
 
-Per-event comparison of M3C2 cliff-facing volumes versus spatially-matched
-DEM-of-Difference (DoD) volumes.
+Per-event comparison of M3C2 cliff-facing volumes versus DEM-of-Difference
+(DoD) volumes.
 
 For each of the top-N events (ranked by M3C2 volume):
-  1. Uses the polygon shapefile to convert the event's alongshore extent
-     into a UTM bounding box.
-  2. Computes a top-down DoD from the noveg point clouds (cached per date pair).
-  3. Clips the DoD to the event's UTM footprint.
-  4. Compares the spatially-matched DoD erosion volume to the M3C2 event volume.
-
-This replaces the earlier whole-scene DoD approach, which inflated DoD volumes
-by including erosion from the entire study area rather than just the event
-footprint.
+  1. Computes a top-down DoD from the noveg point clouds (cached per date pair).
+  2. Finds the largest erosion cluster in the DoD via connected-component
+     labeling and zooms to its bounding box.
+  3. Computes DoD erosion volume within that bounding box only.
+  4. Compares to the M3C2 event volume.
 
 Usage:
     python3 dem_comparison_ratio.py                          # top 15, 5 pages of 3
     python3 dem_comparison_ratio.py --min_volume 100 --n_top 10
     python3 dem_comparison_ratio.py --cols_per_page 5        # wider pages
-    python3 dem_comparison_ratio.py --buffer 30              # larger footprint buffer
     python3 dem_comparison_ratio.py --no_figure
 """
 
@@ -31,9 +26,9 @@ import argparse
 import numpy as np
 import pandas as pd
 import laspy
-import geopandas as gpd
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+from scipy import ndimage
 
 # -- paths -----------------------------------------------------------------
 SYSTEM = platform.system()
@@ -55,8 +50,6 @@ FIG_DIR = os.path.join(REPO_ROOT, "figures", "appendix")
 DEM_RES = 0.25          # m - top-down DEM cell size
 LOD_THRESHOLD = 0.25    # m - Level of Detection for DoD
 MIN_VOLUME = 50.0       # m3 - minimum M3C2 event volume to consider
-POLY_RES = "25cm"       # polygon shapefile resolution
-FOOTPRINT_BUFFER = 20.0  # m - buffer around event footprint for DoD clipping
 
 
 # ==========================================================================
@@ -123,128 +116,41 @@ def compute_dod(dem_before, dem_after, lod):
     return dod
 
 
-# ==========================================================================
-#  POLYGON UTM MAPPING
-# ==========================================================================
+def find_largest_dod_cluster(dod, dem_res, buffer_m=10.0):
+    """Find the largest erosion cluster in the DoD.
 
-def load_polygon_mapping():
-    """Load the polygon shapefile and build alongshore-to-UTM mapping.
-
-    The polygon shapefile defines cross-shore strips along the cliff face.
-    Each polygon's centroid gives a (easting, northing) position, and the
-    alongshore coordinate is (northing - min_northing), matching the logic
-    in make_event_lists.py.
+    Uses connected-component labeling on erosion cells (DoD < 0,
+    already LoD-thresholded). Returns the cluster with the largest
+    erosion volume and its bounding box (in pixel coords).
 
     Returns
     -------
-    dict with keys:
-        sorted_along : 1D array of alongshore positions (m)
-        sorted_easting : 1D array of easting values at each position
-        sorted_northing : 1D array of northing values at each position
+    row_slice, col_slice : slices for the bounding box (with buffer)
+    cluster_vol : float, erosion volume (positive) for the cluster
+    n_labels : int, total number of erosion clusters found
     """
-    base_util = os.path.join(BASE, 'utilities')
-    sf_root = os.path.join(base_util, 'shape_files')
+    erosion = (dod < 0) & ~np.isnan(dod)
+    if not np.any(erosion):
+        return None, None, 0.0, 0
 
-    candidates = [
-        d for d in os.listdir(sf_root)
-        if d.lower().startswith(LOCATION.lower())
-        and 'polygon' in d.lower()
-        and f'at{POLY_RES}'.lower() in d.lower()
-        and os.path.isdir(os.path.join(sf_root, d))
-    ]
-    if not candidates:
-        raise FileNotFoundError(
-            f"No polygon shapefile found for {LOCATION} at {POLY_RES} "
-            f"in {sf_root}")
+    labelled, n_labels = ndimage.label(erosion)
 
-    fld = candidates[0]
-    shp_path = os.path.join(sf_root, fld, fld + '.shp')
-    print(f"  Shapefile: {shp_path}")
+    cell_area = dem_res * dem_res
+    labels_range = np.arange(1, n_labels + 1)
+    cluster_vols = ndimage.sum(np.abs(dod), labelled, labels_range) * cell_area
+    best_idx = np.argmax(cluster_vols)
+    best_label = labels_range[best_idx]
+    best_vol = float(cluster_vols[best_idx])
 
-    gdf = gpd.read_file(shp_path)
-    centroids = gdf.geometry.centroid
+    rows, cols = np.where(labelled == best_label)
+    buf_px = int(np.ceil(buffer_m / dem_res))
+    ny, nx = dod.shape
+    r_lo = max(0, rows.min() - buf_px)
+    r_hi = min(ny, rows.max() + buf_px + 1)
+    c_lo = max(0, cols.min() - buf_px)
+    c_hi = min(nx, cols.max() + buf_px + 1)
 
-    eastings = np.array([c.x for c in centroids])
-    northings = np.array([c.y for c in centroids])
-
-    # Alongshore = northing - min_northing (same as make_event_lists.py)
-    min_y = northings.min()
-    alongshore = northings - min_y
-
-    order = np.argsort(alongshore)
-
-    return {
-        'sorted_along': alongshore[order],
-        'sorted_easting': eastings[order],
-        'sorted_northing': northings[order],
-    }
-
-
-def get_event_utm_bbox(event, poly_map, buffer_m=FOOTPRINT_BUFFER):
-    """Get UTM bounding box for an event from its alongshore extent.
-
-    Finds polygon centroids within the event's alongshore range,
-    then returns their easting/northing extent plus a buffer.
-
-    Returns
-    -------
-    dict with x_min, x_max, y_min, y_max in UTM metres, or None.
-    """
-    along_start = event['alongshore_start_m']
-    along_end = event['alongshore_end_m']
-
-    sa = poly_map['sorted_along']
-    se = poly_map['sorted_easting']
-    sn = poly_map['sorted_northing']
-
-    mask = (sa >= along_start - buffer_m) & (sa <= along_end + buffer_m)
-
-    if not np.any(mask):
-        return None
-
-    return {
-        'x_min': float(se[mask].min() - buffer_m),
-        'x_max': float(se[mask].max() + buffer_m),
-        'y_min': float(sn[mask].min() - buffer_m),
-        'y_max': float(sn[mask].max() + buffer_m),
-    }
-
-
-def clip_dod_to_bbox(dod, x_edges, y_edges, bbox, cell_area):
-    """Clip DoD to a UTM bounding box and compute erosion volume.
-
-    Returns
-    -------
-    v_ero : float, erosion volume (m3) within the bounding box
-    clip_info : dict with 'dod', 'x_edges', 'y_edges' for figures, or None
-    """
-    x_centers = (x_edges[:-1] + x_edges[1:]) / 2
-    y_centers = (y_edges[:-1] + y_edges[1:]) / 2
-
-    col_mask = (x_centers >= bbox['x_min']) & (x_centers <= bbox['x_max'])
-    row_mask = (y_centers >= bbox['y_min']) & (y_centers <= bbox['y_max'])
-
-    if not np.any(col_mask) or not np.any(row_mask):
-        return 0.0, None
-
-    ci = np.where(col_mask)[0]
-    ri = np.where(row_mask)[0]
-
-    dod_clip = dod[ri[0]:ri[-1] + 1, ci[0]:ci[-1] + 1]
-
-    ero_cells = dod_clip < 0
-    if np.any(ero_cells):
-        v_ero = float(np.nansum(np.abs(dod_clip[ero_cells])) * cell_area)
-    else:
-        v_ero = 0.0
-
-    clip_info = {
-        'dod': dod_clip,
-        'x_edges': x_edges[ci[0]:ci[-1] + 2],
-        'y_edges': y_edges[ri[0]:ri[-1] + 2],
-    }
-
-    return v_ero, clip_info
+    return slice(r_lo, r_hi), slice(c_lo, c_hi), best_vol, n_labels
 
 
 # ==========================================================================
@@ -252,18 +158,18 @@ def clip_dod_to_bbox(dod, x_edges, y_edges, bbox, cell_area):
 # ==========================================================================
 
 def run_comparison(min_volume=MIN_VOLUME, n_top=15, dem_res=DEM_RES,
-                   lod=LOD_THRESHOLD, buffer_m=FOOTPRINT_BUFFER):
-    """Run per-event DEM-vs-M3C2 comparison with spatially-matched DoD.
+                   lod=LOD_THRESHOLD):
+    """Run per-event DEM-vs-M3C2 comparison.
 
     For each of the top-N events (by M3C2 volume):
-      1. Maps event footprint to UTM using the polygon shapefile.
-      2. Computes DoD from noveg LAS files (cached per date pair).
-      3. Clips DoD to the event's UTM footprint.
-      4. Reports spatially-matched DoD erosion vs M3C2 volume.
+      1. Computes DoD from noveg LAS files (cached per date pair).
+      2. Finds the largest erosion cluster via connected-component labeling.
+      3. Computes DoD erosion volume within that cluster's bounding box.
+      4. Reports bounding-box DoD volume vs M3C2 volume.
 
     Returns
     -------
-    DataFrame with one row per event (includes private _dod_clip columns
+    DataFrame with one row per event (includes private _dod_* columns
     for figure generation).
     """
     qc_csv = find_qc_csv()
@@ -283,19 +189,14 @@ def run_comparison(min_volume=MIN_VOLUME, n_top=15, dem_res=DEM_RES,
     print(f"Real events >= {min_volume} m\u00b3: {n_eligible}")
     print(f"Processing top {len(big)} events")
 
-    # Load polygon shapefile for UTM mapping
-    print("\nLoading polygon shapefile for UTM mapping ...")
-    poly_map = load_polygon_mapping()
-    print(f"  {len(poly_map['sorted_along'])} polygon centroids loaded")
-
     print(f"\n{'='*70}")
     print(f"Per-Event DEM-of-Difference vs M3C2 \u2014 Del Mar")
-    print(f"DEM res: {dem_res} m  |  LoD: {lod} m  |  "
-          f"Footprint buffer: {buffer_m} m")
+    print(f"DEM res: {dem_res} m  |  LoD: {lod} m")
     print(f"{'='*70}\n")
 
     cell_area = dem_res * dem_res
-    dod_cache = {}  # (d1, d2) -> (dod, x_edges, y_edges)
+    # Cache per date pair: (dod, x_edges, y_edges, r_slice, c_slice, bbox_vol)
+    dod_cache = {}
 
     results = []
     for i, (_, ev) in enumerate(big.iterrows()):
@@ -310,35 +211,13 @@ def run_comparison(min_volume=MIN_VOLUME, n_top=15, dem_res=DEM_RES,
               f"{ev['alongshore_end_m']:.0f} m  "
               f"(width: {ev['width']:.0f} m)")
 
-        # --- Event UTM bounding box ---
-        bbox = get_event_utm_bbox(ev, poly_map, buffer_m=buffer_m)
-        if bbox is None:
-            print(f"  !! No polygons in alongshore range, skipping")
-            results.append({
-                "rank": rank,
-                "start_date": d1_str, "end_date": d2_str,
-                "V_M3C2": ev["volume"], "V_DoD": np.nan,
-                "ratio": np.nan, "status": "no_polygons",
-                "alongshore_start_m": ev["alongshore_start_m"],
-                "alongshore_end_m": ev["alongshore_end_m"],
-                "elevation": ev["elevation"],
-                "height": ev["height"],
-                "width": ev["width"],
-            })
-            continue
-
-        bbox_w = bbox['x_max'] - bbox['x_min']
-        bbox_h = bbox['y_max'] - bbox['y_min']
-        print(f"  UTM bbox: E[{bbox['x_min']:.0f}, {bbox['x_max']:.0f}] "
-              f"N[{bbox['y_min']:.0f}, {bbox['y_max']:.0f}]  "
-              f"({bbox_w:.0f} x {bbox_h:.0f} m)")
-
-        # --- Compute / cache DoD for this date pair ---
+        # --- Compute / cache DoD + cluster for this date pair ---
         if pair_key not in dod_cache:
             f1 = find_noveg_file(d1_str)
             f2 = find_noveg_file(d2_str)
             if f1 is None or f2 is None:
                 print(f"  !! Missing noveg file(s): d1={f1}, d2={f2}")
+                dod_cache[pair_key] = None
                 results.append({
                     "rank": rank,
                     "start_date": d1_str, "end_date": d2_str,
@@ -384,21 +263,67 @@ def run_comparison(min_volume=MIN_VOLUME, n_top=15, dem_res=DEM_RES,
             dod = compute_dod(dem1, dem2, lod)
             del dem1, dem2
 
-            dod_cache[pair_key] = (dod, x_edges, y_edges)
-            print(f"  DoD computed and cached")
+            # Find largest erosion cluster and its bounding box
+            r_slice, c_slice, cluster_vol, n_clusters = \
+                find_largest_dod_cluster(dod, dem_res)
+
+            if r_slice is not None:
+                dod_zoom = dod[r_slice, c_slice]
+                x_edges_zoom = x_edges[c_slice.start:c_slice.stop + 1]
+                y_edges_zoom = y_edges[r_slice.start:r_slice.stop + 1]
+
+                # Volume = all erosion within the bounding box
+                ero_mask = dod_zoom < 0
+                bbox_vol = float(np.nansum(np.abs(dod_zoom[ero_mask]))
+                                 * cell_area) if np.any(ero_mask) else 0.0
+
+                print(f"  Largest DoD cluster: {cluster_vol:.1f} m\u00b3 "
+                      f"(of {n_clusters} clusters)")
+                print(f"  Bounding box erosion: {bbox_vol:.1f} m\u00b3")
+
+                dod_cache[pair_key] = {
+                    'dod_zoom': dod_zoom,
+                    'x_edges': x_edges_zoom,
+                    'y_edges': y_edges_zoom,
+                    'bbox_vol': bbox_vol,
+                    'cluster_vol': cluster_vol,
+                    'n_clusters': n_clusters,
+                }
+            else:
+                print(f"  No erosion clusters found in DoD")
+                dod_cache[pair_key] = {
+                    'dod_zoom': None,
+                    'x_edges': None,
+                    'y_edges': None,
+                    'bbox_vol': 0.0,
+                    'cluster_vol': 0.0,
+                    'n_clusters': 0,
+                }
+        elif dod_cache[pair_key] is None:
+            # Previously failed (missing file)
+            results.append({
+                "rank": rank,
+                "start_date": d1_str, "end_date": d2_str,
+                "V_M3C2": ev["volume"], "V_DoD": np.nan,
+                "ratio": np.nan, "status": "missing_file",
+                "alongshore_start_m": ev["alongshore_start_m"],
+                "alongshore_end_m": ev["alongshore_end_m"],
+                "elevation": ev["elevation"],
+                "height": ev["height"],
+                "width": ev["width"],
+            })
+            continue
         else:
             print(f"  Using cached DoD for {d1_str} -> {d2_str}")
 
-        # --- Clip DoD to event footprint ---
-        dod, x_edges, y_edges = dod_cache[pair_key]
-        v_dod, clip_info = clip_dod_to_bbox(
-            dod, x_edges, y_edges, bbox, cell_area)
-
+        # --- Use the cluster bounding box volume ---
+        cached = dod_cache[pair_key]
+        v_dod = cached['bbox_vol']
         ratio = ev["volume"] / v_dod if v_dod > 0 else np.inf
 
-        print(f"  V_DoD (footprint) = {v_dod:.1f} m\u00b3")
-        print(f"  V_M3C2            = {ev['volume']:.1f} m\u00b3")
-        print(f"  Ratio (M3C2/DoD)  = {ratio:.1f}x")
+        print(f"  V_DoD (bbox)  = {v_dod:.1f} m\u00b3")
+        print(f"  V_M3C2        = {ev['volume']:.1f} m\u00b3")
+        print(f"  Ratio (M3C2/DoD) = {ratio:.1f}x")
         print()
 
         results.append({
@@ -413,9 +338,9 @@ def run_comparison(min_volume=MIN_VOLUME, n_top=15, dem_res=DEM_RES,
             "elevation": ev["elevation"],
             "height": ev["height"],
             "width": ev["width"],
-            "_dod_clip": clip_info["dod"] if clip_info else None,
-            "_x_edges": clip_info["x_edges"] if clip_info else None,
-            "_y_edges": clip_info["y_edges"] if clip_info else None,
+            "_dod_zoom": cached['dod_zoom'],
+            "_x_edges": cached['x_edges'],
+            "_y_edges": cached['y_edges'],
         })
 
     all_results = pd.DataFrame(results)
@@ -442,7 +367,7 @@ def run_comparison(min_volume=MIN_VOLUME, n_top=15, dem_res=DEM_RES,
 # ==========================================================================
 
 def make_event_figures(results_df):
-    """Save a zoomed DoD figure for each event, clipped to its footprint."""
+    """Save a zoomed DoD figure for each event."""
     dem_dir = os.path.join(FIG_DIR, "dems_ratio")
     os.makedirs(dem_dir, exist_ok=True)
 
@@ -450,19 +375,19 @@ def make_event_figures(results_df):
 
     for _, row in ok.iterrows():
         rank = int(row["rank"])
-        dod_clip = row["_dod_clip"]
+        dod_zoom = row["_dod_zoom"]
         x_edges = row["_x_edges"]
         y_edges = row["_y_edges"]
 
-        if dod_clip is None:
-            print(f"  Rank {rank}: no clipped DoD, skipping figure")
+        if dod_zoom is None:
+            print(f"  Rank {rank}: no DoD erosion, skipping figure")
             continue
 
         fig, ax = plt.subplots(figsize=(10, 8))
 
-        dod_masked = np.ma.masked_invalid(dod_clip)
-        dod_abs_max = max(abs(np.nanmin(dod_clip)),
-                         abs(np.nanmax(dod_clip)), 0.5)
+        dod_masked = np.ma.masked_invalid(dod_zoom)
+        dod_abs_max = max(abs(np.nanmin(dod_zoom)),
+                         abs(np.nanmax(dod_zoom)), 0.5)
         im = ax.pcolormesh(x_edges, y_edges, dod_masked,
                            cmap="RdBu", vmin=-dod_abs_max, vmax=dod_abs_max,
                            shading="flat")
@@ -476,7 +401,7 @@ def make_event_figures(results_df):
                      else "inf")
         ax.set_title(
             f"Rank #{rank}: {row['start_date']} -> {row['end_date']}  "
-            f"(DoD clipped to event footprint)\n"
+            f"(zoomed to largest erosion cluster)\n"
             f"DoD erosion = {row['V_DoD']:.1f} m\u00b3  |  "
             f"M3C2 erosion = {row['V_M3C2']:.1f} m\u00b3  |  "
             f"Ratio: {ratio_str}\u00d7",
@@ -502,7 +427,7 @@ def make_multi_panel_figures(results_df, cols_per_page=3):
     """Create 2xN panel figures: M3C2 grid (top) vs DoD (bottom) per event.
 
     Top row: M3C2 cliff-facing grid zoomed to the event footprint.
-    Bottom row: DoD (top-down) clipped to the same event footprint.
+    Bottom row: DoD (top-down) zoomed to the largest erosion cluster.
 
     Chunks events into pages of `cols_per_page` columns each.
     """
@@ -634,17 +559,17 @@ def make_multi_panel_figures(results_df, cols_per_page=3):
                 f"Ratio: {ratio_str}\u00d7",
                 fontsize=9, fontweight='bold')
 
-            # -- Bottom row: DoD clipped to event footprint --
-            dod_clip = row["_dod_clip"]
+            # -- Bottom row: DoD zoomed to largest cluster --
+            dod_zoom = row["_dod_zoom"]
             xedges = row["_x_edges"]
             yedges = row["_y_edges"]
 
-            if dod_clip is not None:
-                vabs = max(abs(np.nanmin(dod_clip)),
-                           abs(np.nanmax(dod_clip)), 0.5)
+            if dod_zoom is not None:
+                vabs = max(abs(np.nanmin(dod_zoom)),
+                           abs(np.nanmax(dod_zoom)), 0.5)
 
                 # Negate so erosion is positive (red), matching M3C2 row
-                dz_masked = np.ma.masked_invalid(-dod_clip)
+                dz_masked = np.ma.masked_invalid(-dod_zoom)
                 im2 = ax_bot.pcolormesh(xedges, yedges, dz_masked,
                                         cmap="RdBu_r",
                                         vmin=-vabs, vmax=vabs,
@@ -658,12 +583,12 @@ def make_multi_panel_figures(results_df, cols_per_page=3):
                 if col == n_cols - 1:
                     cb2.set_label("Elev. loss (m)", fontsize=7)
             else:
-                ax_bot.text(0.5, 0.5, "No DoD data", ha='center',
+                ax_bot.text(0.5, 0.5, "No erosion\nin DoD", ha='center',
                             va='center', transform=ax_bot.transAxes,
                             fontsize=7)
 
             ax_bot.set_title(
-                f"DoD (footprint): {row['V_DoD']:.1f} m\u00b3",
+                f"DoD (largest cluster): {row['V_DoD']:.1f} m\u00b3",
                 fontsize=9, fontweight='bold')
 
         axes[0, 0].set_ylabel("M3C2 Grid\n(cliff-facing)", fontsize=10,
@@ -677,7 +602,7 @@ def make_multi_panel_figures(results_df, cols_per_page=3):
             f"Per-Event M3C2 vs DoD \u2014 Ranks #{rank_lo}-{rank_hi} "
             f"(Del Mar)\n"
             "Red = erosion, Blue = deposition  |  "
-            "DoD clipped to event footprint",
+            "DoD zoomed to largest erosion cluster",
             fontsize=12, fontweight='bold')
         plt.tight_layout(rect=[0, 0, 1, 0.93])
 
@@ -792,7 +717,7 @@ def make_summary_figure(results_df):
     ax_bar.bar(x_pos - w/2, ok["V_M3C2"].values, w,
                color="#2166ac", label="M3C2 Grid")
     ax_bar.bar(x_pos + w/2, ok["V_DoD"].values, w,
-               color="#b2182b", label="DoD (footprint)")
+               color="#b2182b", label="DoD (cluster)")
     ax_bar.set_xticks(x_pos)
     ax_bar.set_xticklabels(
         [f"#{int(r)}" for r in ok["rank"]], fontsize=8)
@@ -813,17 +738,17 @@ def make_summary_figure(results_df):
                  ok["V_DoD"].max()) * 1.25
     ax_bar.set_ylim(0, y_ceil)
 
-    # -- Panel B: DoD map of #1 event (clipped to footprint) --
+    # -- Panel B: DoD map of #1 event --
     ax_map = fig.add_subplot(gs[1])
     best = ok.iloc[0]
 
-    dod_clip = best["_dod_clip"]
-    if dod_clip is not None and not np.all(np.isnan(dod_clip)):
+    dod_zoom = best["_dod_zoom"]
+    if dod_zoom is not None and not np.all(np.isnan(dod_zoom)):
         x_edges = best["_x_edges"]
         y_edges = best["_y_edges"]
 
-        vmax = max(abs(np.nanmin(dod_clip)), abs(np.nanmax(dod_clip)), 0.5)
-        dod_masked = np.ma.masked_invalid(dod_clip)
+        vmax = max(abs(np.nanmin(dod_zoom)), abs(np.nanmax(dod_zoom)), 0.5)
+        dod_masked = np.ma.masked_invalid(dod_zoom)
         im = ax_map.pcolormesh(x_edges, y_edges, dod_masked,
                                cmap="RdBu", vmin=-vmax, vmax=vmax,
                                shading="flat")
@@ -901,7 +826,8 @@ def make_summary_figure(results_df):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Per-event M3C2 vs spatially-matched DoD comparison.")
+        description="Per-event M3C2 vs DoD comparison "
+                    "(DoD volume from largest erosion cluster).")
     parser.add_argument("--min_volume", type=float, default=MIN_VOLUME,
                         help=f"Min M3C2 event volume in m3 (default: "
                              f"{MIN_VOLUME})")
@@ -916,9 +842,6 @@ def main():
     parser.add_argument("--lod", type=float, default=LOD_THRESHOLD,
                         help=f"LoD threshold in metres (default: "
                              f"{LOD_THRESHOLD})")
-    parser.add_argument("--buffer", type=float, default=FOOTPRINT_BUFFER,
-                        help=f"Buffer around event footprint in metres "
-                             f"(default: {FOOTPRINT_BUFFER})")
     parser.add_argument("--no_figure", action="store_true",
                         help="Skip figure generation, print table only")
     args = parser.parse_args()
@@ -928,7 +851,6 @@ def main():
         n_top=args.n_top,
         dem_res=args.dem_res,
         lod=args.lod,
-        buffer_m=args.buffer,
     )
 
     if not args.no_figure:
