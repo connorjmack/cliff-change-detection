@@ -896,27 +896,24 @@ def make_scatter_figure(results_df):
         ax.scatter([], [], s=sz, c='#ccc', edgecolors='#333',
                    linewidths=0.4, label=f'{int(vt)} m\u00b3')
 
-    # Region labels
-    ax.text(axis_max * 0.95, axis_max * 0.35,
-            "M3C2 > DoD",
-            fontsize=10, color='#555', ha='right', style='italic')
-    ax.text(axis_max * 0.35, axis_max * 0.95,
-            "DoD > M3C2",
-            fontsize=10, color='#555', ha='left', style='italic')
+    # Region labels (close to 1:1 line)
+    ax.text(axis_max * 0.75, axis_max * 0.55,
+            "2.75D Grid > DoD",
+            fontsize=10, color='#555', ha='center', style='italic',
+            rotation=45, rotation_mode='anchor')
+    ax.text(axis_max * 0.55, axis_max * 0.75,
+            "DoD > 2.75D Grid",
+            fontsize=10, color='#555', ha='center', style='italic',
+            rotation=45, rotation_mode='anchor')
 
     ax.set_xlabel("2.75D Grid Volume, M3C2 (m\u00b3)", fontsize=12)
     ax.set_ylabel("DoD Volume (m\u00b3)", fontsize=12)
-    ax.set_title(
-        f"M3C2 vs DoD Erosion Volume \u2014 Del Mar\n"
-        f"(largest event per date pair, n = {len(deduped)}, "
-        f"circle size = M3C2 volume)",
-        fontsize=11, fontweight='bold')
 
     ax.set_xlim(0, axis_max)
     ax.set_ylim(0, axis_max)
     ax.set_aspect('equal')
     ax.legend(loc='upper left', frameon=True, framealpha=0.9,
-              fontsize=9, title='Volume', title_fontsize=9)
+              fontsize=9)
 
     plt.tight_layout()
 
