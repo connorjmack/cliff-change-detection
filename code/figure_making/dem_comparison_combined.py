@@ -238,7 +238,7 @@ def make_combined_figure(results_df, n_scatter=50, event_ranks=(1, 15)):
         ratio_str = (f"{row['ratio']:.1f}"
                      if np.isfinite(row["ratio"]) else "inf")
         ax_top.set_title(
-            f"#{rank}: Volume: {row['V_M3C2']:.1f} m\u00b3  |  "
+            f"Volume: {row['V_M3C2']:.1f} m\u00b3  |  "
             f"Ratio: {ratio_str}\u00d7",
             fontsize=9, fontweight='bold')
 
@@ -271,7 +271,7 @@ def make_combined_figure(results_df, n_scatter=50, event_ranks=(1, 15)):
                         fontsize=9)
 
         ax_bot.set_title(
-            f"#{rank}: Volume: {row['V_DoD']:.1f} m\u00b3",
+            f"Volume: {row['V_DoD']:.1f} m\u00b3",
             fontsize=9, fontweight='bold')
 
     # Row labels on the leftmost event panels
