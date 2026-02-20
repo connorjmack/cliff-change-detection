@@ -212,20 +212,22 @@ def make_combined_figure(results_df, n_scatter=50, event_ranks=(1, 15)):
                     ti = np.linspace(0, len(az)-1, nt, dtype=int)
                     ax_top.set_xticks(ti)
                     ax_top.set_xticklabels(
-                        [f'{az[j]:.0f}' for j in ti], fontsize=7)
+                        [f'{az[j]:.0f}' for j in ti], fontsize=9)
                 nt = min(4, len(ez))
                 if len(ez) > 1:
                     ti = np.linspace(0, len(ez)-1, nt, dtype=int)
                     ax_top.set_yticks(ti)
                     ax_top.set_yticklabels(
-                        [f'{ez[j]:.1f}' for j in ti], fontsize=7)
+                        [f'{ez[j]:.1f}' for j in ti], fontsize=9)
 
                 ax_top.invert_xaxis()
+                ax_top.set_xlabel("Alongshore Location (m)", fontsize=10)
+                ax_top.set_ylabel("Elevation (m)", fontsize=10)
 
                 cb1 = plt.colorbar(im1, ax=ax_top, shrink=0.7,
                                    pad=0.02, aspect=15)
-                cb1.ax.tick_params(labelsize=6)
-                cb1.set_label("M3C2 Distance (m)", fontsize=8)
+                cb1.ax.tick_params(labelsize=8)
+                cb1.set_label("M3C2 Distance (m)", fontsize=10)
             else:
                 ax_top.text(0.5, 0.5, "Outside grid",
                             transform=ax_top.transAxes,
@@ -240,7 +242,7 @@ def make_combined_figure(results_df, n_scatter=50, event_ranks=(1, 15)):
         ax_top.set_title(
             f"Volume: {row['V_M3C2']:.1f} m\u00b3  |  "
             f"Ratio: {ratio_str}\u00d7",
-            fontsize=9, fontweight='bold')
+            fontsize=11, fontweight='bold')
 
         # -- Bottom: DoD zoomed to largest cluster --
         dod_zoom = row["_dod_zoom"]
@@ -260,11 +262,13 @@ def make_combined_figure(results_df, n_scatter=50, event_ranks=(1, 15)):
                                     shading="flat")
             ax_bot.set_facecolor("white")
             ax_bot.ticklabel_format(useOffset=False, style="plain")
-            ax_bot.tick_params(labelsize=6, labelrotation=30)
+            ax_bot.tick_params(labelsize=8, labelrotation=30)
+            ax_bot.set_xlabel("UTM Easting (m)", fontsize=10)
+            ax_bot.set_ylabel("UTM Northing (m)", fontsize=10)
             cb2 = plt.colorbar(im2, ax=ax_bot, shrink=0.7,
                                pad=0.02, aspect=15)
-            cb2.ax.tick_params(labelsize=6)
-            cb2.set_label("Elev. change (m)", fontsize=8)
+            cb2.ax.tick_params(labelsize=8)
+            cb2.set_label("Elev. change (m)", fontsize=10)
         else:
             ax_bot.text(0.5, 0.5, "No erosion\nin DoD", ha='center',
                         va='center', transform=ax_bot.transAxes,
@@ -272,15 +276,15 @@ def make_combined_figure(results_df, n_scatter=50, event_ranks=(1, 15)):
 
         ax_bot.set_title(
             f"Volume: {row['V_DoD']:.1f} m\u00b3",
-            fontsize=9, fontweight='bold')
+            fontsize=11, fontweight='bold')
 
     # Row labels on the leftmost event panels
     if ax_m3c2_left is not None:
         ax_m3c2_left.set_ylabel("2.75D Grid\n(cliff-facing)",
-                                fontsize=10, fontweight='bold')
+                                fontsize=12, fontweight='bold')
     if ax_dod_left is not None:
         ax_dod_left.set_ylabel("DoD\n(top-down)",
-                               fontsize=10, fontweight='bold')
+                               fontsize=12, fontweight='bold')
 
     plt.tight_layout()
 
