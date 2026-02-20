@@ -20,7 +20,8 @@
       "Bash(git log:*)",
       "Bash(find:*)",
       "Bash(done)",
-      "Bash(pip install:*)"
+      "Bash(pip install:*)",
+      "Bash(git -C /Users/cjmack/Documents/GitHub/cliff-change-detection log --oneline -15)"
     ]
   }
 }
