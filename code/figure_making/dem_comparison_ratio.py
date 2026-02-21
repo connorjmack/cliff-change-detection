@@ -188,6 +188,75 @@ def find_largest_dod_cluster(dod, dem_res, buffer_m=10.0):
     return slice(r_lo, r_hi), slice(c_lo, c_hi), best_vol, n_labels
 
 
+def rotate_dod_to_cliff(dod_zoom, dem_res):
+    """Rotate a DoD patch so the cliff face runs horizontally.
+
+    Determines the cliff orientation via PCA on cells with significant
+    change, then rotates the grid to align the cliff with the x-axis.
+    Volume is NOT recomputed — call this after volume calculation.
+
+    Parameters
+    ----------
+    dod_zoom : 2-D ndarray with NaN for no-data.
+    dem_res  : float, cell size in metres.
+
+    Returns
+    -------
+    rotated  : 2-D ndarray (NaN-trimmed).
+    x_edges  : 1-D ndarray, relative x cell edges (metres).
+    y_edges  : 1-D ndarray, relative y cell edges (metres).
+    angle    : float, rotation applied (degrees).
+    """
+    significant = (dod_zoom != 0) & ~np.isnan(dod_zoom)
+
+    if significant.sum() < 10:
+        ny, nx = dod_zoom.shape
+        return (dod_zoom,
+                np.arange(nx + 1) * dem_res,
+                np.arange(ny + 1) * dem_res,
+                0.0)
+
+    rows, cols = np.where(significant)
+    coords = np.column_stack([cols.astype(float), rows.astype(float)])
+    coords -= coords.mean(axis=0)
+    cov = np.cov(coords.T)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+
+    # Principal axis (largest eigenvalue) = along-cliff direction
+    principal = eigvecs[:, np.argmax(eigvals)]
+    angle = np.degrees(np.arctan2(principal[1], principal[0]))
+
+    # Rotate grid so principal axis is horizontal
+    rot = -angle
+
+    # Fill NaN with 0 for rotation; rotate a validity mask in parallel
+    filled = np.where(np.isnan(dod_zoom), 0.0, dod_zoom)
+    valid_mask = (~np.isnan(dod_zoom)).astype(float)
+
+    rotated_filled = ndimage.rotate(filled, rot, reshape=True,
+                                    order=1, cval=0.0)
+    rotated_valid = ndimage.rotate(valid_mask, rot, reshape=True,
+                                   order=1, cval=0.0)
+
+    # Re-mask: cells with <50% valid contribution become NaN
+    rotated = np.where(rotated_valid > 0.5, rotated_filled, np.nan)
+
+    # Trim all-NaN border rows/columns
+    finite = np.isfinite(rotated)
+    if finite.any():
+        rr = np.any(finite, axis=1)
+        cc = np.any(finite, axis=0)
+        r0, r1 = np.where(rr)[0][[0, -1]]
+        c0, c1 = np.where(cc)[0][[0, -1]]
+        rotated = rotated[r0:r1 + 1, c0:c1 + 1]
+
+    ny_r, nx_r = rotated.shape
+    x_edges = np.arange(nx_r + 1) * dem_res
+    y_edges = np.arange(ny_r + 1) * dem_res
+
+    return rotated, x_edges, y_edges, rot
+
+
 # ==========================================================================
 #  MAIN COMPARISON
 # ==========================================================================
@@ -312,14 +381,19 @@ def run_comparison(min_volume=MIN_VOLUME, n_top=15, dem_res=DEM_RES,
                 x_edges_zoom = x_edges[c_slice.start:c_slice.stop + 1]
                 y_edges_zoom = y_edges[r_slice.start:r_slice.stop + 1]
 
-                # Volume = all erosion within the bounding box
+                # Volume = all erosion within the bounding box (before rotation)
                 ero_mask = dod_zoom < 0
                 bbox_vol = float(np.nansum(np.abs(dod_zoom[ero_mask]))
                                  * cell_area) if np.any(ero_mask) else 0.0
 
+                # Rotate so cliff face is horizontal for visualization
+                dod_zoom, x_edges_zoom, y_edges_zoom, rot_angle = \
+                    rotate_dod_to_cliff(dod_zoom, dem_res)
+
                 print(f"  Largest DoD cluster: {cluster_vol:.1f} m\u00b3 "
                       f"(of {n_clusters} clusters)")
                 print(f"  Bounding box erosion: {bbox_vol:.1f} m\u00b3")
+                print(f"  Rotated DoD by {rot_angle:.1f}\u00b0 to align cliff")
 
                 dod_cache[pair_key] = {
                     'dod_zoom': dod_zoom,
@@ -435,8 +509,8 @@ def make_event_figures(results_df):
         cb = plt.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
         cb.set_label("DoD elevation change (m)", fontsize=11)
 
-        ax.set_xlabel("Easting (m)", fontsize=11)
-        ax.set_ylabel("Northing (m)", fontsize=11)
+        ax.set_xlabel("Alongshore (m)", fontsize=11)
+        ax.set_ylabel("Cross-shore (m)", fontsize=11)
         ratio_str = (f"{row['ratio']:.1f}" if np.isfinite(row["ratio"])
                      else "inf")
         ax.set_title(
@@ -447,8 +521,7 @@ def make_event_figures(results_df):
             f"Ratio: {ratio_str}\u00d7",
             fontweight="bold", fontsize=9)
         ax.set_aspect("equal")
-        ax.ticklabel_format(useOffset=False, style="plain")
-        ax.tick_params(labelsize=8, labelrotation=30)
+        ax.tick_params(labelsize=8)
 
         plt.tight_layout()
 
@@ -615,8 +688,9 @@ def make_multi_panel_figures(results_df, cols_per_page=3):
                                         vmin=-vabs, vmax=vabs,
                                         shading="flat")
                 ax_bot.set_facecolor("white")
-                ax_bot.ticklabel_format(useOffset=False, style="plain")
-                ax_bot.tick_params(labelsize=4, labelrotation=30)
+                ax_bot.tick_params(labelsize=5)
+                ax_bot.set_xlabel("Alongshore (m)", fontsize=6)
+                ax_bot.set_ylabel("Cross-shore (m)", fontsize=6)
                 cb2 = plt.colorbar(im2, ax=ax_bot, shrink=0.5,
                                    pad=0.02, aspect=12)
                 cb2.ax.tick_params(labelsize=5)
@@ -796,8 +870,8 @@ def make_summary_figure(results_df):
         cb = plt.colorbar(im, ax=ax_map, shrink=0.8, pad=0.02)
         cb.set_label("DoD elevation change (m)", fontsize=9)
 
-        ax_map.set_xlabel("Easting (m)")
-        ax_map.set_ylabel("Northing (m)")
+        ax_map.set_xlabel("Alongshore (m)")
+        ax_map.set_ylabel("Cross-shore (m)")
         ratio_str = (f"{best['ratio']:.1f}"
                      if np.isfinite(best["ratio"]) else "inf")
         ax_map.set_title(
@@ -808,8 +882,7 @@ def make_summary_figure(results_df):
             f"({ratio_str}\u00d7)",
             fontweight="bold", loc="left", fontsize=8)
         ax_map.set_aspect("equal")
-        ax_map.ticklabel_format(useOffset=False, style="plain")
-        ax_map.tick_params(labelsize=7, labelrotation=30)
+        ax_map.tick_params(labelsize=7)
 
     # -- Panel C: schematic cross-section --
     ax_xs = fig.add_subplot(gs[2])

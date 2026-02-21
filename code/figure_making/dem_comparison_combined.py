@@ -261,10 +261,9 @@ def make_combined_figure(results_df, n_scatter=50, event_ranks=(1, 15)):
                                     vmin=-vabs, vmax=vabs,
                                     shading="flat")
             ax_bot.set_facecolor("white")
-            ax_bot.ticklabel_format(useOffset=False, style="plain")
-            ax_bot.tick_params(labelsize=8, labelrotation=30)
-            ax_bot.set_xlabel("UTM Easting (m)", fontsize=10)
-            ax_bot.set_ylabel("UTM Northing (m)", fontsize=10)
+            ax_bot.tick_params(labelsize=8)
+            ax_bot.set_xlabel("Alongshore (m)", fontsize=10)
+            ax_bot.set_ylabel("Cross-shore (m)", fontsize=10)
             cb2 = plt.colorbar(im2, ax=ax_bot, shrink=0.7,
                                pad=0.02, aspect=15)
             cb2.ax.tick_params(labelsize=8)
