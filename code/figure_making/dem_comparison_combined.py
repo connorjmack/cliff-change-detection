@@ -113,7 +113,7 @@ def make_combined_figure(results_df, n_scatter=50, event_ranks=(1, 15)):
 
     # Size legend (representative volumes)
     vol_ticks = np.array([50, 200, 500])
-    vol_ticks = vol_ticks[vol_ticks <= vol_max * 1.1]
+    vol_ticks = vol_ticks[(vol_ticks >= vol_min) & (vol_ticks <= vol_max * 1.1)]
     if len(vol_ticks) == 0:
         vol_ticks = np.array([int(vol_min), int(vol_max)])
     for vt in vol_ticks:

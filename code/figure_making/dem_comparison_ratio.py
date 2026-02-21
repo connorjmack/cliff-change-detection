@@ -1014,7 +1014,7 @@ def make_scatter_figure(results_df):
 
     # Size legend (3 representative volumes)
     vol_ticks = np.array([50, 200, 500])
-    vol_ticks = vol_ticks[vol_ticks <= vol_max * 1.1]
+    vol_ticks = vol_ticks[(vol_ticks >= vol_min) & (vol_ticks <= vol_max * 1.1)]
     if len(vol_ticks) == 0:
         vol_ticks = np.array([vol_min, vol_max])
     for vt in vol_ticks:
