@@ -487,7 +487,7 @@ def plot_geomorph_stats(df, out_dir, title_prefix, area_hm2=None, normalized=Tru
         if rollover_mask.sum() > 0:
             ax1.loglog(vols_sorted[rollover_mask], fst[rollover_mask],
                        'o', color='gray', markersize=5, alpha=0.4,
-                       label='Rollover')
+                       label='_nolegend_')
 
         # Plot power law points (>= cutoff)
         pl_mask = vols_sorted >= CUTOFF
@@ -500,7 +500,7 @@ def plot_geomorph_stats(df, out_dir, title_prefix, area_hm2=None, normalized=Tru
             fit_v = vols_sorted[pl_mask]
             ax1.loglog(fit_v, alpha * fit_v ** (-B), '--',
                        color=COLOR_ACCENT, linewidth=3.5,
-                       label=r'$\beta$' + f' = {B:.2f} (R² = {r2:.2f})')
+                       label=r'$\beta$' + f' = {B:.2f}')
 
         # Cutoff line
         ax1.axvline(CUTOFF, color='black', linestyle=':', alpha=0.6,
@@ -517,7 +517,7 @@ def plot_geomorph_stats(df, out_dir, title_prefix, area_hm2=None, normalized=Tru
 
         ax1.set_xlabel(r'Erosion Volume $V$ (m$^3$)', fontweight='bold')
         ax1.set_ylabel(r'$F_{st}$ (hm$^{-2}$ yr$^{-1}$)', fontweight='bold')
-        ax1.set_title('A) Magnitude-Frequency (Normalized)', loc='left', fontweight='bold', pad=15)
+        ax1.set_title('A) Magnitude-Frequency', loc='left', fontweight='bold', pad=15)
 
     else:
         # --- Original histogram-based power law ---
