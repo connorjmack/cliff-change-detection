@@ -513,7 +513,7 @@ def plot_geomorph_stats(df, out_dir, title_prefix, area_hm2=None, normalized=Tru
 
         # Add A_st x T as a text-only legend entry
         ax1.plot([], [], ' ',
-                 label=f'$SA \\times T = {norm_denom:.1f}$ hm$^2$ yr')
+                 label=f'Source Area $ \\times $ Time = {norm_denom:.1f} hm$^2$ yr')
 
         ax1.set_xlabel(r'Erosion Volume $V$ (m$^3$)', fontweight='bold')
         ax1.set_ylabel(r'$F_{st}$ (hm$^{-2}$ yr$^{-1}$)', fontweight='bold')
