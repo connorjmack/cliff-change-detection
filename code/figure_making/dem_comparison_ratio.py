@@ -102,11 +102,19 @@ def rasterise_to_common_grid(x, y, z, x_min, y_min, dem_res, nx, ny):
     return dem.reshape(ny, nx)
 
 
-def fill_dem_nans(dem):
-    """Fill NaN gaps in a DEM using linear interpolation.
+def fill_dem_nans(dem, max_radius=5):
+    """Fill small NaN gaps in a DEM using linear interpolation.
 
-    Uses scipy.interpolate.griddata (linear) to interpolate over interior
-    holes.  Cells outside the convex hull of valid data remain NaN.
+    Only fills NaN cells that are within *max_radius* pixels of valid data
+    (i.e. small occlusion holes).  Large empty regions (ocean, beach, scan
+    gaps) are left as NaN so they don't introduce spurious DoD changes.
+
+    Parameters
+    ----------
+    dem        : 2-D ndarray with NaN for no-data.
+    max_radius : int, maximum distance (in cells) from valid data for a
+                 NaN cell to be eligible for filling.  Default 5 (~1.25 m
+                 at 0.25 m resolution).
 
     Returns
     -------
@@ -120,17 +128,25 @@ def fill_dem_nans(dem):
     if n_valid == 0 or n_valid == ny * nx:
         return dem.copy(), 0
 
+    # Identify NaN cells close to valid data via binary dilation
+    struct = ndimage.generate_binary_structure(2, 1)
+    dilated = ndimage.binary_dilation(valid, structure=struct,
+                                      iterations=max_radius)
+    fill_mask = np.isnan(dem) & dilated
+
+    n_to_fill = int(fill_mask.sum())
+    if n_to_fill == 0:
+        return dem.copy(), 0
+
     gy, gx = np.mgrid[0:ny, 0:nx]
     points = np.column_stack((gy[valid], gx[valid]))
     values = dem[valid]
 
-    nan_mask = np.isnan(dem)
-    interp_pts = np.column_stack((gy[nan_mask], gx[nan_mask]))
-
+    interp_pts = np.column_stack((gy[fill_mask], gx[fill_mask]))
     filled_vals = griddata(points, values, interp_pts, method='linear')
 
     filled = dem.copy()
-    filled[nan_mask] = filled_vals
+    filled[fill_mask] = filled_vals
     n_filled = int(np.isfinite(filled_vals).sum())
 
     return filled, n_filled
