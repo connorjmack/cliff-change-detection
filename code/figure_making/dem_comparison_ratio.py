@@ -223,7 +223,15 @@ def rotate_dod_to_cliff(dod_zoom, dem_res):
     y_edges  : 1-D ndarray, relative y cell edges (metres).
     angle    : float, rotation applied (degrees).
     """
-    significant = (dod_zoom != 0) & ~np.isnan(dod_zoom)
+    # Use erosion cells only — they trace the cliff face more reliably
+    # than the full erosion+deposition footprint.
+    erosion = (dod_zoom < 0) & ~np.isnan(dod_zoom)
+    if erosion.sum() >= 10:
+        significant = erosion
+        weights = np.abs(dod_zoom[significant])
+    else:
+        significant = (dod_zoom != 0) & ~np.isnan(dod_zoom)
+        weights = None
 
     if significant.sum() < 10:
         ny, nx = dod_zoom.shape
@@ -234,8 +242,16 @@ def rotate_dod_to_cliff(dod_zoom, dem_res):
 
     rows, cols = np.where(significant)
     coords = np.column_stack([cols.astype(float), rows.astype(float)])
-    coords -= coords.mean(axis=0)
-    cov = np.cov(coords.T)
+
+    # Magnitude-weighted PCA so the strongest erosion cells dominate
+    if weights is not None:
+        mean = np.average(coords, axis=0, weights=weights)
+        coords -= mean
+        cov = np.cov(coords.T, aweights=weights)
+    else:
+        coords -= coords.mean(axis=0)
+        cov = np.cov(coords.T)
+
     eigvals, eigvecs = np.linalg.eigh(cov)
 
     # Principal axis (largest eigenvalue) = along-cliff direction
@@ -402,14 +418,32 @@ def run_comparison(min_volume=MIN_VOLUME, n_top=15, dem_res=DEM_RES,
                 bbox_vol = float(np.nansum(np.abs(dod_zoom[ero_mask]))
                                  * cell_area) if np.any(ero_mask) else 0.0
 
-                # Rotate so cliff face is horizontal for visualization
-                dod_zoom, x_edges_zoom, y_edges_zoom, rot_angle = \
-                    rotate_dod_to_cliff(dod_zoom, dem_res)
+                # Rotate ~40° so cliff face runs horizontally
+                CLIFF_ROTATION = 40.0
+                filled = np.where(np.isnan(dod_zoom), 0.0, dod_zoom)
+                valid_mask = (~np.isnan(dod_zoom)).astype(float)
+                rot_filled = ndimage.rotate(filled, CLIFF_ROTATION,
+                                            reshape=True, order=1, cval=0.0)
+                rot_valid = ndimage.rotate(valid_mask, CLIFF_ROTATION,
+                                           reshape=True, order=1, cval=0.0)
+                dod_zoom = np.where(rot_valid > 0.5, rot_filled, np.nan)
+
+                # Trim all-NaN borders
+                finite = np.isfinite(dod_zoom)
+                if finite.any():
+                    rr = np.any(finite, axis=1)
+                    cc = np.any(finite, axis=0)
+                    r0, r1 = np.where(rr)[0][[0, -1]]
+                    c0, c1 = np.where(cc)[0][[0, -1]]
+                    dod_zoom = dod_zoom[r0:r1+1, c0:c1+1]
+
+                ny_z, nx_z = dod_zoom.shape
+                x_edges_zoom = np.arange(nx_z + 1) * dem_res
+                y_edges_zoom = np.arange(ny_z + 1) * dem_res
 
                 print(f"  Largest DoD cluster: {cluster_vol:.1f} m\u00b3 "
                       f"(of {n_clusters} clusters)")
                 print(f"  Bounding box erosion: {bbox_vol:.1f} m\u00b3")
-                print(f"  Rotated DoD by {rot_angle:.1f}\u00b0 to align cliff")
 
                 dod_cache[pair_key] = {
                     'dod_zoom': dod_zoom,
