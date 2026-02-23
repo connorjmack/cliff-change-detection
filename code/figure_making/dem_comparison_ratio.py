@@ -419,7 +419,7 @@ def run_comparison(min_volume=MIN_VOLUME, n_top=15, dem_res=DEM_RES,
                                  * cell_area) if np.any(ero_mask) else 0.0
 
                 # Rotate ~40° so cliff face runs horizontally
-                CLIFF_ROTATION = 20.0
+                CLIFF_ROTATION = -30.0
                 filled = np.where(np.isnan(dod_zoom), 0.0, dod_zoom)
                 valid_mask = (~np.isnan(dod_zoom)).astype(float)
                 rot_filled = ndimage.rotate(filled, CLIFF_ROTATION,
