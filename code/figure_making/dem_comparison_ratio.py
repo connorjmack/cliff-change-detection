@@ -418,9 +418,10 @@ def run_comparison(min_volume=MIN_VOLUME, n_top=15, dem_res=DEM_RES,
                 bbox_vol = float(np.nansum(np.abs(dod_zoom[ero_mask]))
                                  * cell_area) if np.any(ero_mask) else 0.0
 
-                # Compute rotation from full DoD footprint via PCA
-                _valid = ~np.isnan(dod)
-                _rows, _cols = np.where(_valid)
+                # Compute rotation via PCA on significant-change cells
+                # (these trace the cliff face, giving a clean coastline axis)
+                _sig = (dod != 0) & ~np.isnan(dod)
+                _rows, _cols = np.where(_sig)
                 if len(_rows) > 10:
                     _cov = np.cov(_cols - _cols.mean(), _rows - _rows.mean())
                     _, _evecs = np.linalg.eigh(_cov)
