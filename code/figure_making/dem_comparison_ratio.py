@@ -414,8 +414,8 @@ def run_comparison(min_volume=MIN_VOLUME, n_top=15, dem_res=DEM_RES,
                                  * cell_area) if np.any(ero_mask) else 0.0
 
                 # Expand crop for display so the rotated rectangle edge
-                # falls well outside the area of interest (50 m extra)
-                rot_buf_px = int(np.ceil(50.0 / dem_res))
+                # falls outside the area of interest
+                rot_buf_px = int(np.ceil(20.0 / dem_res))
                 ny_full, nx_full = dod.shape
                 r_lo_w = max(0, r_slice.start - rot_buf_px)
                 r_hi_w = min(ny_full, r_slice.stop + rot_buf_px)
