@@ -408,16 +408,19 @@ def run_comparison(min_volume=MIN_VOLUME, n_top=15, dem_res=DEM_RES,
                 x_edges_zoom = x_edges[c_slice.start:c_slice.stop + 1]
                 y_edges_zoom = y_edges[r_slice.start:r_slice.stop + 1]
 
-                # Volume = all erosion within the bounding box (before rotation)
+                # Volume = all erosion within the bounding box (before fill/rotation)
                 ero_mask = dod_zoom < 0
                 bbox_vol = float(np.nansum(np.abs(dod_zoom[ero_mask]))
                                  * cell_area) if np.any(ero_mask) else 0.0
 
+                # Fill small holes for display only (volumes already computed)
+                dod_display, _ = fill_dem_nans(dod_zoom, max_radius=3)
+
                 # Del Mar coastline runs ~340° bearing (NNW-SSE),
                 # which is ~70° from horizontal in the DEM array.
                 CLIFF_ROTATION = -70.0
-                filled = np.where(np.isnan(dod_zoom), 0.0, dod_zoom)
-                valid_mask = (~np.isnan(dod_zoom)).astype(float)
+                filled = np.where(np.isnan(dod_display), 0.0, dod_display)
+                valid_mask = (~np.isnan(dod_display)).astype(float)
                 rot_filled = ndimage.rotate(filled, CLIFF_ROTATION,
                                             reshape=True, order=1, cval=0.0)
                 rot_valid = ndimage.rotate(valid_mask, CLIFF_ROTATION,
