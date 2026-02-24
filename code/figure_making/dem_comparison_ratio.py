@@ -29,6 +29,7 @@ import laspy
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from scipy import ndimage
+from scipy.interpolate import griddata
 
 # -- paths -----------------------------------------------------------------
 SYSTEM = platform.system()
@@ -101,6 +102,56 @@ def rasterise_to_common_grid(x, y, z, x_min, y_min, dem_res, nx, ny):
     return dem.reshape(ny, nx)
 
 
+def fill_dem_nans(dem, max_radius=5):
+    """Fill small NaN gaps in a DEM using linear interpolation.
+
+    Only fills NaN cells that are within *max_radius* pixels of valid data
+    (i.e. small occlusion holes).  Large empty regions (ocean, beach, scan
+    gaps) are left as NaN so they don't introduce spurious DoD changes.
+
+    Parameters
+    ----------
+    dem        : 2-D ndarray with NaN for no-data.
+    max_radius : int, maximum distance (in cells) from valid data for a
+                 NaN cell to be eligible for filling.  Default 5 (~1.25 m
+                 at 0.25 m resolution).
+
+    Returns
+    -------
+    filled : 2-D ndarray, same shape as *dem*.
+    n_filled : int, number of NaN cells that were filled.
+    """
+    ny, nx = dem.shape
+    valid = ~np.isnan(dem)
+    n_valid = int(valid.sum())
+
+    if n_valid == 0 or n_valid == ny * nx:
+        return dem.copy(), 0
+
+    # Identify NaN cells close to valid data via binary dilation
+    struct = ndimage.generate_binary_structure(2, 1)
+    dilated = ndimage.binary_dilation(valid, structure=struct,
+                                      iterations=max_radius)
+    fill_mask = np.isnan(dem) & dilated
+
+    n_to_fill = int(fill_mask.sum())
+    if n_to_fill == 0:
+        return dem.copy(), 0
+
+    gy, gx = np.mgrid[0:ny, 0:nx]
+    points = np.column_stack((gy[valid], gx[valid]))
+    values = dem[valid]
+
+    interp_pts = np.column_stack((gy[fill_mask], gx[fill_mask]))
+    filled_vals = griddata(points, values, interp_pts, method='linear')
+
+    filled = dem.copy()
+    filled[fill_mask] = filled_vals
+    n_filled = int(np.isfinite(filled_vals).sum())
+
+    return filled, n_filled
+
+
 def compute_dod(dem_before, dem_after, lod):
     """Compute DEM of Difference, zeroing cells below LoD.
 
@@ -151,6 +202,91 @@ def find_largest_dod_cluster(dod, dem_res, buffer_m=10.0):
     c_hi = min(nx, cols.max() + buf_px + 1)
 
     return slice(r_lo, r_hi), slice(c_lo, c_hi), best_vol, n_labels
+
+
+def rotate_dod_to_cliff(dod_zoom, dem_res):
+    """Rotate a DoD patch so the cliff face runs horizontally.
+
+    Determines the cliff orientation via PCA on cells with significant
+    change, then rotates the grid to align the cliff with the x-axis.
+    Volume is NOT recomputed — call this after volume calculation.
+
+    Parameters
+    ----------
+    dod_zoom : 2-D ndarray with NaN for no-data.
+    dem_res  : float, cell size in metres.
+
+    Returns
+    -------
+    rotated  : 2-D ndarray (NaN-trimmed).
+    x_edges  : 1-D ndarray, relative x cell edges (metres).
+    y_edges  : 1-D ndarray, relative y cell edges (metres).
+    angle    : float, rotation applied (degrees).
+    """
+    # Use erosion cells only — they trace the cliff face more reliably
+    # than the full erosion+deposition footprint.
+    erosion = (dod_zoom < 0) & ~np.isnan(dod_zoom)
+    if erosion.sum() >= 10:
+        significant = erosion
+        weights = np.abs(dod_zoom[significant])
+    else:
+        significant = (dod_zoom != 0) & ~np.isnan(dod_zoom)
+        weights = None
+
+    if significant.sum() < 10:
+        ny, nx = dod_zoom.shape
+        return (dod_zoom,
+                np.arange(nx + 1) * dem_res,
+                np.arange(ny + 1) * dem_res,
+                0.0)
+
+    rows, cols = np.where(significant)
+    coords = np.column_stack([cols.astype(float), rows.astype(float)])
+
+    # Magnitude-weighted PCA so the strongest erosion cells dominate
+    if weights is not None:
+        mean = np.average(coords, axis=0, weights=weights)
+        coords -= mean
+        cov = np.cov(coords.T, aweights=weights)
+    else:
+        coords -= coords.mean(axis=0)
+        cov = np.cov(coords.T)
+
+    eigvals, eigvecs = np.linalg.eigh(cov)
+
+    # Principal axis (largest eigenvalue) = along-cliff direction
+    principal = eigvecs[:, np.argmax(eigvals)]
+    angle = np.degrees(np.arctan2(principal[1], principal[0]))
+
+    # Rotate grid so principal axis is horizontal
+    rot = -angle
+
+    # Fill NaN with 0 for rotation; rotate a validity mask in parallel
+    filled = np.where(np.isnan(dod_zoom), 0.0, dod_zoom)
+    valid_mask = (~np.isnan(dod_zoom)).astype(float)
+
+    rotated_filled = ndimage.rotate(filled, rot, reshape=True,
+                                    order=1, cval=0.0)
+    rotated_valid = ndimage.rotate(valid_mask, rot, reshape=True,
+                                   order=1, cval=0.0)
+
+    # Re-mask: cells with <50% valid contribution become NaN
+    rotated = np.where(rotated_valid > 0.5, rotated_filled, np.nan)
+
+    # Trim all-NaN border rows/columns
+    finite = np.isfinite(rotated)
+    if finite.any():
+        rr = np.any(finite, axis=1)
+        cc = np.any(finite, axis=0)
+        r0, r1 = np.where(rr)[0][[0, -1]]
+        c0, c1 = np.where(cc)[0][[0, -1]]
+        rotated = rotated[r0:r1 + 1, c0:c1 + 1]
+
+    ny_r, nx_r = rotated.shape
+    x_edges = np.arange(nx_r + 1) * dem_res
+    y_edges = np.arange(ny_r + 1) * dem_res
+
+    return rotated, x_edges, y_edges, rot
 
 
 # ==========================================================================
@@ -260,6 +396,11 @@ def run_comparison(min_volume=MIN_VOLUME, n_top=15, dem_res=DEM_RES,
                                             dem_res, nx, ny)
             del x2, y2, z2
 
+            # Fill NaN gaps via linear interpolation before DoD
+            dem1, n1 = fill_dem_nans(dem1)
+            dem2, n2 = fill_dem_nans(dem2)
+            print(f"  Interpolated DEM gaps: {n1:,} + {n2:,} cells filled")
+
             dod = compute_dod(dem1, dem2, lod)
             del dem1, dem2
 
@@ -272,10 +413,33 @@ def run_comparison(min_volume=MIN_VOLUME, n_top=15, dem_res=DEM_RES,
                 x_edges_zoom = x_edges[c_slice.start:c_slice.stop + 1]
                 y_edges_zoom = y_edges[r_slice.start:r_slice.stop + 1]
 
-                # Volume = all erosion within the bounding box
+                # Volume = all erosion within the bounding box (before rotation)
                 ero_mask = dod_zoom < 0
                 bbox_vol = float(np.nansum(np.abs(dod_zoom[ero_mask]))
                                  * cell_area) if np.any(ero_mask) else 0.0
+
+                # Rotate ~40° so cliff face runs horizontally
+                CLIFF_ROTATION = -10.0
+                filled = np.where(np.isnan(dod_zoom), 0.0, dod_zoom)
+                valid_mask = (~np.isnan(dod_zoom)).astype(float)
+                rot_filled = ndimage.rotate(filled, CLIFF_ROTATION,
+                                            reshape=True, order=1, cval=0.0)
+                rot_valid = ndimage.rotate(valid_mask, CLIFF_ROTATION,
+                                           reshape=True, order=1, cval=0.0)
+                dod_zoom = np.where(rot_valid > 0.5, rot_filled, np.nan)
+
+                # Trim all-NaN borders
+                finite = np.isfinite(dod_zoom)
+                if finite.any():
+                    rr = np.any(finite, axis=1)
+                    cc = np.any(finite, axis=0)
+                    r0, r1 = np.where(rr)[0][[0, -1]]
+                    c0, c1 = np.where(cc)[0][[0, -1]]
+                    dod_zoom = dod_zoom[r0:r1+1, c0:c1+1]
+
+                ny_z, nx_z = dod_zoom.shape
+                x_edges_zoom = np.arange(nx_z + 1) * dem_res
+                y_edges_zoom = np.arange(ny_z + 1) * dem_res
 
                 print(f"  Largest DoD cluster: {cluster_vol:.1f} m\u00b3 "
                       f"(of {n_clusters} clusters)")
@@ -395,8 +559,8 @@ def make_event_figures(results_df):
         cb = plt.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
         cb.set_label("DoD elevation change (m)", fontsize=11)
 
-        ax.set_xlabel("Easting (m)", fontsize=11)
-        ax.set_ylabel("Northing (m)", fontsize=11)
+        ax.set_xlabel("Alongshore (m)", fontsize=11)
+        ax.set_ylabel("Cross-shore (m)", fontsize=11)
         ratio_str = (f"{row['ratio']:.1f}" if np.isfinite(row["ratio"])
                      else "inf")
         ax.set_title(
@@ -407,8 +571,7 @@ def make_event_figures(results_df):
             f"Ratio: {ratio_str}\u00d7",
             fontweight="bold", fontsize=9)
         ax.set_aspect("equal")
-        ax.ticklabel_format(useOffset=False, style="plain")
-        ax.tick_params(labelsize=8, labelrotation=30)
+        ax.tick_params(labelsize=8)
 
         plt.tight_layout()
 
@@ -575,8 +738,9 @@ def make_multi_panel_figures(results_df, cols_per_page=3):
                                         vmin=-vabs, vmax=vabs,
                                         shading="flat")
                 ax_bot.set_facecolor("white")
-                ax_bot.ticklabel_format(useOffset=False, style="plain")
-                ax_bot.tick_params(labelsize=4, labelrotation=30)
+                ax_bot.tick_params(labelsize=5)
+                ax_bot.set_xlabel("Alongshore (m)", fontsize=6)
+                ax_bot.set_ylabel("Cross-shore (m)", fontsize=6)
                 cb2 = plt.colorbar(im2, ax=ax_bot, shrink=0.5,
                                    pad=0.02, aspect=12)
                 cb2.ax.tick_params(labelsize=5)
@@ -756,8 +920,8 @@ def make_summary_figure(results_df):
         cb = plt.colorbar(im, ax=ax_map, shrink=0.8, pad=0.02)
         cb.set_label("DoD elevation change (m)", fontsize=9)
 
-        ax_map.set_xlabel("Easting (m)")
-        ax_map.set_ylabel("Northing (m)")
+        ax_map.set_xlabel("Alongshore (m)")
+        ax_map.set_ylabel("Cross-shore (m)")
         ratio_str = (f"{best['ratio']:.1f}"
                      if np.isfinite(best["ratio"]) else "inf")
         ax_map.set_title(
@@ -768,8 +932,7 @@ def make_summary_figure(results_df):
             f"({ratio_str}\u00d7)",
             fontweight="bold", loc="left", fontsize=8)
         ax_map.set_aspect("equal")
-        ax_map.ticklabel_format(useOffset=False, style="plain")
-        ax_map.tick_params(labelsize=7, labelrotation=30)
+        ax_map.tick_params(labelsize=7)
 
     # -- Panel C: schematic cross-section --
     ax_xs = fig.add_subplot(gs[2])
@@ -885,7 +1048,7 @@ def make_scatter_figure(results_df):
 
     # Size legend (3 representative volumes)
     vol_ticks = np.array([50, 200, 500])
-    vol_ticks = vol_ticks[vol_ticks <= vol_max * 1.1]
+    vol_ticks = vol_ticks[(vol_ticks >= vol_min) & (vol_ticks <= vol_max * 1.1)]
     if len(vol_ticks) == 0:
         vol_ticks = np.array([vol_min, vol_max])
     for vt in vol_ticks:

@@ -28,6 +28,7 @@ import laspy
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from scipy import ndimage
+from scipy.interpolate import griddata
 
 # ── paths ──────────────────────────────────────────────────────────────────────
 SYSTEM = platform.system()
@@ -99,6 +100,56 @@ def rasterise_to_common_grid(x, y, z, x_min, y_min, dem_res, nx, ny):
     dem = np.full(ny * nx, np.nan)
     dem[maxz.index.values] = maxz.values
     return dem.reshape(ny, nx)
+
+
+def fill_dem_nans(dem, max_radius=5):
+    """Fill small NaN gaps in a DEM using linear interpolation.
+
+    Only fills NaN cells that are within *max_radius* pixels of valid data
+    (i.e. small occlusion holes).  Large empty regions (ocean, beach, scan
+    gaps) are left as NaN so they don't introduce spurious DoD changes.
+
+    Parameters
+    ----------
+    dem        : 2-D ndarray with NaN for no-data.
+    max_radius : int, maximum distance (in cells) from valid data for a
+                 NaN cell to be eligible for filling.  Default 5 (~1.25 m
+                 at 0.25 m resolution).
+
+    Returns
+    -------
+    filled : 2-D ndarray, same shape as *dem*.
+    n_filled : int, number of NaN cells that were filled.
+    """
+    ny, nx = dem.shape
+    valid = ~np.isnan(dem)
+    n_valid = int(valid.sum())
+
+    if n_valid == 0 or n_valid == ny * nx:
+        return dem.copy(), 0
+
+    # Identify NaN cells close to valid data via binary dilation
+    struct = ndimage.generate_binary_structure(2, 1)
+    dilated = ndimage.binary_dilation(valid, structure=struct,
+                                      iterations=max_radius)
+    fill_mask = np.isnan(dem) & dilated
+
+    n_to_fill = int(fill_mask.sum())
+    if n_to_fill == 0:
+        return dem.copy(), 0
+
+    gy, gx = np.mgrid[0:ny, 0:nx]
+    points = np.column_stack((gy[valid], gx[valid]))
+    values = dem[valid]
+
+    interp_pts = np.column_stack((gy[fill_mask], gx[fill_mask]))
+    filled_vals = griddata(points, values, interp_pts, method='linear')
+
+    filled = dem.copy()
+    filled[fill_mask] = filled_vals
+    n_filled = int(np.isfinite(filled_vals).sum())
+
+    return filled, n_filled
 
 
 def compute_dod(dem_before, dem_after, lod):
@@ -274,6 +325,11 @@ def run_comparison(n_events=5, dem_res=DEM_RES, lod=LOD_THRESHOLD):
         del x1, y1, z1
         dem2 = rasterise_to_common_grid(x2, y2, z2, x_min, y_min, dem_res, nx, ny)
         del x2, y2, z2
+
+        # Fill NaN gaps via linear interpolation before DoD
+        dem1, n1 = fill_dem_nans(dem1)
+        dem2, n2 = fill_dem_nans(dem2)
+        print(f"  Interpolated DEM gaps: {n1:,} + {n2:,} cells filled")
 
         # --- DoD ---
         dod = compute_dod(dem1, dem2, lod)

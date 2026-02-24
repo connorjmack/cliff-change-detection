@@ -472,56 +472,52 @@ def plot_geomorph_stats(df, out_dir, title_prefix, area_hm2=None, normalized=Tru
     ax1 = fig.add_subplot(gs[0, 0])
 
     if normalized:
-        # --- Dual-regime power law fit (Janeras et al. 2023) ---
-        LOWER_BOUND = 0.25   # m³ — minimum detection volume
-        BREAKPOINT  = 2.0    # m³ — regime boundary
+        # --- Single power law fit above cutoff (Janeras et al. 2023) ---
+        CUTOFF = 2.0   # m³ — rollover boundary
 
         vols_sorted = np.sort(np.asarray(df_clean['volume']))[::-1]
         raw_n = np.arange(1, len(vols_sorted) + 1, dtype=float)
         fst = raw_n / norm_denom
         v_max = vols_sorted[0]
 
-        B1, a1, r2_1, n1 = _fit_log_range(vols_sorted, fst, LOWER_BOUND, BREAKPOINT)
-        B2, a2, r2_2, n2 = _fit_log_range(vols_sorted, fst, BREAKPOINT, v_max)
+        B, alpha, r2, n_fit = _fit_log_range(vols_sorted, fst, CUTOFF, v_max)
 
-        # Plot all data (including rollover below lower bound)
-        ax1.loglog(vols_sorted, fst,
-                   'o', color='gray', markersize=5, alpha=0.4)
+        # Plot rollover points (< cutoff)
+        rollover_mask = vols_sorted < CUTOFF
+        if rollover_mask.sum() > 0:
+            ax1.loglog(vols_sorted[rollover_mask], fst[rollover_mask],
+                       'o', color='gray', markersize=5, alpha=0.4,
+                       label='_nolegend_')
 
-        # Regime 1 fit line
-        mask1 = (vols_sorted >= LOWER_BOUND) & (vols_sorted <= BREAKPOINT)
-        if not np.isnan(B1) and mask1.sum() > 0:
-            fit_v1 = vols_sorted[mask1]
-            ax1.loglog(fit_v1, a1 * fit_v1 ** (-B1), '--',
-                       color=COLOR_MAIN, linewidth=3.5,
-                       label=r'R1: $\beta_1$' + f' = {B1:.2f}')
+        # Plot power law points (>= cutoff)
+        pl_mask = vols_sorted >= CUTOFF
+        if pl_mask.sum() > 0:
+            ax1.loglog(vols_sorted[pl_mask], fst[pl_mask],
+                       'o', color=COLOR_MAIN, markersize=5, alpha=0.6)
 
-        # Regime 2 fit line
-        mask2 = vols_sorted >= BREAKPOINT
-        if not np.isnan(B2) and mask2.sum() > 0:
-            fit_v2 = vols_sorted[mask2]
-            ax1.loglog(fit_v2, a2 * fit_v2 ** (-B2), '--',
+        # Power law fit line
+        if not np.isnan(B) and pl_mask.sum() > 0:
+            fit_v = vols_sorted[pl_mask]
+            ax1.loglog(fit_v, alpha * fit_v ** (-B), '--',
                        color=COLOR_ACCENT, linewidth=3.5,
-                       label=r'R2: $\beta_2$' + f' = {B2:.2f}')
+                       label=r'$\beta$' + f' = {B:.2f}')
 
-        # Breakpoint line
-        ax1.axvline(BREAKPOINT, color='black', linestyle=':', alpha=0.6,
-                    linewidth=2.5)
+        # Cutoff line
+        ax1.axvline(CUTOFF, color='black', linestyle=':', alpha=0.6,
+                    linewidth=2.5, label=f'Rollover cutoff: {CUTOFF} m³')
 
         # Terminal report
-        print(f"\n  Dual-Regime Power Law Fit:")
-        print(f"    Regime 1 [{LOWER_BOUND} - {BREAKPOINT} m^3]:")
-        print(f"      B1 = {B1:.3f}, alpha1 = {a1:.3f}, R^2 = {r2_1:.4f}, N = {n1}")
-        print(f"    Regime 2 [{BREAKPOINT} - {v_max:.1f} m^3]:")
-        print(f"      B2 = {B2:.3f}, alpha2 = {a2:.3f}, R^2 = {r2_2:.4f}, N = {n2}")
+        print(f"\n  Power Law Fit (V >= {CUTOFF} m^3):")
+        print(f"    B = {B:.3f}, alpha = {alpha:.3f}, R^2 = {r2:.4f}, N = {n_fit}")
+        print(f"    Rollover events (V < {CUTOFF} m^3): {rollover_mask.sum()}")
 
         # Add A_st x T as a text-only legend entry
         ax1.plot([], [], ' ',
-                 label=f'$SA \\times T = {norm_denom:.1f}$ hm$^2$ yr')
+                 label=f'Source Area $ \\times $ Time = {norm_denom:.1f} hm$^2$ yr')
 
         ax1.set_xlabel(r'Erosion Volume $V$ (m$^3$)', fontweight='bold')
         ax1.set_ylabel(r'$F_{st}$ (hm$^{-2}$ yr$^{-1}$)', fontweight='bold')
-        ax1.set_title('A) Magnitude-Frequency (Normalized)', loc='left', fontweight='bold', pad=15)
+        ax1.set_title('A) Magnitude-Frequency', loc='left', fontweight='bold', pad=15)
 
     else:
         # --- Original histogram-based power law ---
