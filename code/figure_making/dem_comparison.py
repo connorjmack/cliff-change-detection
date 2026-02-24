@@ -183,26 +183,27 @@ def dod_deposition_volume(dod, cell_area):
     return float(np.sum(dod[dep_mask]) * cell_area)
 
 
-def compute_coastline_rotation(dz, xe, ye):
+def compute_coastline_rotation(data, xe, ye):
     """Compute rotation angle to align the coastline with the x-axis.
 
-    Uses PCA on erosion cells to find the long axis (coastline direction).
+    Uses PCA on all non-NaN cells to find the long axis of the data
+    footprint (i.e. the coastline direction).  Pass the *full* DoD
+    (before cropping to a cluster) so the survey strip shape dominates.
 
     Returns
     -------
     angle_rad : rotation angle in radians
-    centroid : (2,) centroid of erosion cells in original coords
     """
     cx = 0.5 * (xe[:-1] + xe[1:])
     cy = 0.5 * (ye[:-1] + ye[1:])
 
-    ero_mask = (dz < 0) & ~np.isnan(dz)
-    if np.sum(ero_mask) < 10:
-        return 0.0, np.array([cx.mean(), cy.mean()])
+    valid = ~np.isnan(data)
+    if np.sum(valid) < 10:
+        return 0.0
 
-    ero_rows, ero_cols = np.where(ero_mask)
-    pts_x = cx[ero_cols]
-    pts_y = cy[ero_rows]
+    rows, cols = np.where(valid)
+    pts_x = cx[cols]
+    pts_y = cy[rows]
     centroid = np.array([pts_x.mean(), pts_y.mean()])
 
     cov = np.cov(pts_x - centroid[0], pts_y - centroid[1])
@@ -210,7 +211,7 @@ def compute_coastline_rotation(dz, xe, ye):
     principal = eigenvectors[:, -1]  # largest eigenvalue
     angle = np.arctan2(principal[1], principal[0])
 
-    return angle, centroid
+    return angle
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -620,6 +621,9 @@ def make_multi_panel_figure(results_df):
             yedges = r["_y_edges"]
             dres   = xedges[1] - xedges[0]
 
+            # Compute coastline angle from full DoD footprint
+            angle = compute_coastline_rotation(dod, xedges, yedges)
+
             rs, cs, cvol, _ = find_largest_dod_cluster(dod, dres)
             if rs is not None:
                 dz = dod[rs, cs]
@@ -627,12 +631,13 @@ def make_multi_panel_figure(results_df):
                 ye = yedges[rs.start:rs.stop + 1]
                 vabs = max(abs(np.nanmin(dz)), abs(np.nanmax(dz)), 0.5)
 
-                # Rotate so coastline aligns with x-axis
-                angle, centroid = compute_coastline_rotation(dz, xe, ye)
+                # Rotate crop around its centre so coastline is horizontal
                 EX, EY = np.meshgrid(xe, ye)
+                cx_crop = 0.5 * (xe[0] + xe[-1])
+                cy_crop = 0.5 * (ye[0] + ye[-1])
                 cos_a, sin_a = np.cos(-angle), np.sin(-angle)
-                dx_r = EX - centroid[0]
-                dy_r = EY - centroid[1]
+                dx_r = EX - cx_crop
+                dy_r = EY - cy_crop
                 RX = dx_r * cos_a - dy_r * sin_a
                 RY = dx_r * sin_a + dy_r * cos_a
 
