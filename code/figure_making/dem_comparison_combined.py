@@ -107,6 +107,21 @@ def make_combined_figure(results_df, n_scatter=50, event_ranks=(1, 15)):
                        cmap='plasma', edgecolors='#333', linewidths=0.4,
                        alpha=0.85, zorder=3)
 
+    # Highlight the two event ranks shown in the right panels
+    highlight_keys = set()
+    for rank in event_ranks:
+        ev_rows = ok[ok["rank"] == rank]
+        if not ev_rows.empty:
+            r = ev_rows.iloc[0]
+            highlight_keys.add(r["start_date"] + "_" + r["end_date"])
+    hl_mask = deduped["pair_key"].isin(highlight_keys).values
+    if hl_mask.any():
+        ax_sc.scatter(v_m3c2[hl_mask], v_dod[hl_mask],
+                      c=elev[hl_mask], s=sizes[hl_mask],
+                      cmap='plasma', vmin=elev.min(), vmax=elev.max(),
+                      edgecolors='black', linewidths=2.0,
+                      alpha=1.0, zorder=4)
+
     # Colorbar for elevation
     cb_sc = plt.colorbar(sc, ax=ax_sc, shrink=0.75, pad=0.02)
     cb_sc.set_label("Event Elevation Centroid (m)", fontsize=11)
