@@ -289,6 +289,8 @@ def make_combined_figure(results_df, n_scatter=50, event_ranks=(1, 15)):
 
             # Per-panel display adjustments (crop/shift for visual match
             # with the M3C2 panel above; volumes are unaffected)
+            if rank == event_ranks[0]:
+                ax_bot.set_xlim(20, 60)
             if rank == event_ranks[1]:
                 ax_bot.set_xlim(left=10)
                 yl = ax_bot.get_ylim()
