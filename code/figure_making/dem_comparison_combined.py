@@ -264,6 +264,13 @@ def make_combined_figure(results_df, n_scatter=50, event_ranks=(1, 15)):
             ax_bot.tick_params(labelsize=8)
             ax_bot.set_xlabel("Alongshore (m)", fontsize=10)
             ax_bot.set_ylabel("Cross-shore (m)", fontsize=10)
+
+            # Per-panel display adjustments (crop/shift for visual match
+            # with the M3C2 panel above; volumes are unaffected)
+            if rank == event_ranks[1]:
+                ax_bot.set_xlim(left=10)
+                yl = ax_bot.get_ylim()
+                ax_bot.set_ylim(yl[0] - 3, yl[1])
             cb2 = plt.colorbar(im2, ax=ax_bot, shrink=0.7,
                                pad=0.02, aspect=15)
             cb2.ax.tick_params(labelsize=8)
