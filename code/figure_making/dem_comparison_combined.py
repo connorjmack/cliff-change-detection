@@ -260,9 +260,16 @@ def make_combined_figure(results_df, n_scatter=50, event_ranks=(1, 15)):
             fontsize=11, fontweight='bold')
 
         # -- Bottom: DoD zoomed to largest cluster --
-        dod_zoom = row["_dod_zoom"]
-        xedges = row["_x_edges"]
-        yedges = row["_y_edges"]
+        # Use the wider crop for the first event rank to avoid the
+        # diagonal rotation-edge artifact; keep the tight crop for others.
+        if rank == event_ranks[0] and row.get("_dod_zoom_wide") is not None:
+            dod_zoom = row["_dod_zoom_wide"]
+            xedges = row["_x_edges_wide"]
+            yedges = row["_y_edges_wide"]
+        else:
+            dod_zoom = row["_dod_zoom"]
+            xedges = row["_x_edges"]
+            yedges = row["_y_edges"]
 
         if dod_zoom is not None:
             vabs = max(abs(np.nanmin(dod_zoom)),

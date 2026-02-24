@@ -443,6 +443,38 @@ def run_comparison(min_volume=MIN_VOLUME, n_top=15, dem_res=DEM_RES,
                 x_edges_zoom = np.arange(nx_z + 1) * dem_res
                 y_edges_zoom = np.arange(ny_z + 1) * dem_res
 
+                # Also build a wider version (15 m extra buffer) so that
+                # the rotated-rectangle edge can be pushed out of view
+                # for events where the deposition extends beyond the
+                # tight bounding box.
+                wide_buf_px = int(np.ceil(15.0 / dem_res))
+                ny_full, nx_full = dod.shape
+                r_lo_w = max(0, r_slice.start - wide_buf_px)
+                r_hi_w = min(ny_full, r_slice.stop + wide_buf_px)
+                c_lo_w = max(0, c_slice.start - wide_buf_px)
+                c_hi_w = min(nx_full, c_slice.stop + wide_buf_px)
+                dod_wide = dod[r_lo_w:r_hi_w, c_lo_w:c_hi_w]
+
+                dod_disp_w, _ = fill_dem_nans(dod_wide, max_radius=3)
+                filled_w = np.where(np.isnan(dod_disp_w), 0.0, dod_disp_w)
+                vmask_w = (~np.isnan(dod_disp_w)).astype(float)
+                rf_w = ndimage.rotate(filled_w, CLIFF_ROTATION,
+                                      reshape=True, order=1, cval=0.0)
+                rv_w = ndimage.rotate(vmask_w, CLIFF_ROTATION,
+                                      reshape=True, order=1, cval=0.0)
+                dod_wide_rot = np.where(rv_w > 0.5, rf_w, np.nan)
+                dod_wide_rot[np.abs(dod_wide_rot) < 0.01] = np.nan
+                fin_w = np.isfinite(dod_wide_rot)
+                if fin_w.any():
+                    rrw = np.any(fin_w, axis=1)
+                    ccw = np.any(fin_w, axis=0)
+                    rw0, rw1 = np.where(rrw)[0][[0, -1]]
+                    cw0, cw1 = np.where(ccw)[0][[0, -1]]
+                    dod_wide_rot = dod_wide_rot[rw0:rw1+1, cw0:cw1+1]
+                nyw, nxw = dod_wide_rot.shape
+                x_edges_w = np.arange(nxw + 1) * dem_res
+                y_edges_w = np.arange(nyw + 1) * dem_res
+
                 print(f"  Largest DoD cluster: {cluster_vol:.1f} m\u00b3 "
                       f"(of {n_clusters} clusters)")
                 print(f"  Bounding box erosion: {bbox_vol:.1f} m\u00b3")
@@ -451,6 +483,9 @@ def run_comparison(min_volume=MIN_VOLUME, n_top=15, dem_res=DEM_RES,
                     'dod_zoom': dod_zoom,
                     'x_edges': x_edges_zoom,
                     'y_edges': y_edges_zoom,
+                    'dod_zoom_wide': dod_wide_rot,
+                    'x_edges_wide': x_edges_w,
+                    'y_edges_wide': y_edges_w,
                     'bbox_vol': bbox_vol,
                     'cluster_vol': cluster_vol,
                     'n_clusters': n_clusters,
@@ -461,6 +496,9 @@ def run_comparison(min_volume=MIN_VOLUME, n_top=15, dem_res=DEM_RES,
                     'dod_zoom': None,
                     'x_edges': None,
                     'y_edges': None,
+                    'dod_zoom_wide': None,
+                    'x_edges_wide': None,
+                    'y_edges_wide': None,
                     'bbox_vol': 0.0,
                     'cluster_vol': 0.0,
                     'n_clusters': 0,
@@ -507,6 +545,9 @@ def run_comparison(min_volume=MIN_VOLUME, n_top=15, dem_res=DEM_RES,
             "_dod_zoom": cached['dod_zoom'],
             "_x_edges": cached['x_edges'],
             "_y_edges": cached['y_edges'],
+            "_dod_zoom_wide": cached['dod_zoom_wide'],
+            "_x_edges_wide": cached['x_edges_wide'],
+            "_y_edges_wide": cached['y_edges_wide'],
         })
 
     all_results = pd.DataFrame(results)
