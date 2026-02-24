@@ -132,6 +132,36 @@ def dod_deposition_volume(dod, cell_area):
     return float(np.sum(dod[dep_mask]) * cell_area)
 
 
+def compute_coastline_rotation(dz, xe, ye):
+    """Compute rotation angle to align the coastline with the x-axis.
+
+    Uses PCA on erosion cells to find the long axis (coastline direction).
+
+    Returns
+    -------
+    angle_rad : rotation angle in radians
+    centroid : (2,) centroid of erosion cells in original coords
+    """
+    cx = 0.5 * (xe[:-1] + xe[1:])
+    cy = 0.5 * (ye[:-1] + ye[1:])
+
+    ero_mask = (dz < 0) & ~np.isnan(dz)
+    if np.sum(ero_mask) < 10:
+        return 0.0, np.array([cx.mean(), cy.mean()])
+
+    ero_rows, ero_cols = np.where(ero_mask)
+    pts_x = cx[ero_cols]
+    pts_y = cy[ero_rows]
+    centroid = np.array([pts_x.mean(), pts_y.mean()])
+
+    cov = np.cov(pts_x - centroid[0], pts_y - centroid[1])
+    _, eigenvectors = np.linalg.eigh(cov)
+    principal = eigenvectors[:, -1]  # largest eigenvalue
+    angle = np.arctan2(principal[1], principal[0])
+
+    return angle, centroid
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  MAIN COMPARISON
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -541,13 +571,22 @@ def make_multi_panel_figure(results_df):
                 ye = yedges[rs.start:rs.stop + 1]
                 vabs = max(abs(np.nanmin(dz)), abs(np.nanmax(dz)), 0.5)
 
+                # Rotate so coastline aligns with x-axis
+                angle, centroid = compute_coastline_rotation(dz, xe, ye)
+                EX, EY = np.meshgrid(xe, ye)
+                cos_a, sin_a = np.cos(-angle), np.sin(-angle)
+                dx_r = EX - centroid[0]
+                dy_r = EY - centroid[1]
+                RX = dx_r * cos_a - dy_r * sin_a
+                RY = dx_r * sin_a + dy_r * cos_a
+
                 # Negate DoD so erosion is positive (red), matching M3C2 row
                 dz_masked = np.ma.masked_invalid(-dz)
-                im2 = ax_bot.pcolormesh(xe, ye, dz_masked, cmap="RdBu_r",
+                im2 = ax_bot.pcolormesh(RX, RY, dz_masked, cmap="RdBu_r",
                                          vmin=-vabs, vmax=vabs, shading="flat")
                 ax_bot.set_facecolor("white")
-                ax_bot.ticklabel_format(useOffset=False, style="plain")
-                ax_bot.tick_params(labelsize=4, labelrotation=30)
+                ax_bot.set_aspect("equal")
+                ax_bot.tick_params(labelsize=4)
                 cb2 = plt.colorbar(im2, ax=ax_bot, shrink=0.5, pad=0.02, aspect=12)
                 cb2.ax.tick_params(labelsize=5)
                 if col == 2:
