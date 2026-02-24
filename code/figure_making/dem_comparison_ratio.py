@@ -418,8 +418,16 @@ def run_comparison(min_volume=MIN_VOLUME, n_top=15, dem_res=DEM_RES,
                 bbox_vol = float(np.nansum(np.abs(dod_zoom[ero_mask]))
                                  * cell_area) if np.any(ero_mask) else 0.0
 
-                # Rotate ~40° so cliff face runs horizontally
-                CLIFF_ROTATION = -10.0
+                # Compute rotation from full DoD footprint via PCA
+                _valid = ~np.isnan(dod)
+                _rows, _cols = np.where(_valid)
+                if len(_rows) > 10:
+                    _cov = np.cov(_cols - _cols.mean(), _rows - _rows.mean())
+                    _, _evecs = np.linalg.eigh(_cov)
+                    _principal = _evecs[:, -1]
+                    CLIFF_ROTATION = -np.degrees(np.arctan2(_principal[1], _principal[0]))
+                else:
+                    CLIFF_ROTATION = 0.0
                 filled = np.where(np.isnan(dod_zoom), 0.0, dod_zoom)
                 valid_mask = (~np.isnan(dod_zoom)).astype(float)
                 rot_filled = ndimage.rotate(filled, CLIFF_ROTATION,
