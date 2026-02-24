@@ -413,8 +413,18 @@ def run_comparison(min_volume=MIN_VOLUME, n_top=15, dem_res=DEM_RES,
                 bbox_vol = float(np.nansum(np.abs(dod_zoom[ero_mask]))
                                  * cell_area) if np.any(ero_mask) else 0.0
 
+                # Expand crop for display so the rotated rectangle edge
+                # falls well outside the area of interest (50 m extra)
+                rot_buf_px = int(np.ceil(50.0 / dem_res))
+                ny_full, nx_full = dod.shape
+                r_lo_w = max(0, r_slice.start - rot_buf_px)
+                r_hi_w = min(ny_full, r_slice.stop + rot_buf_px)
+                c_lo_w = max(0, c_slice.start - rot_buf_px)
+                c_hi_w = min(nx_full, c_slice.stop + rot_buf_px)
+                dod_wide = dod[r_lo_w:r_hi_w, c_lo_w:c_hi_w]
+
                 # Fill small holes for display only (volumes already computed)
-                dod_display, _ = fill_dem_nans(dod_zoom, max_radius=3)
+                dod_display, _ = fill_dem_nans(dod_wide, max_radius=3)
 
                 # Del Mar coastline runs ~340° bearing (NNW-SSE),
                 # which is ~70° from horizontal in the DEM array.
