@@ -426,6 +426,9 @@ def run_comparison(min_volume=MIN_VOLUME, n_top=15, dem_res=DEM_RES,
                 rot_valid = ndimage.rotate(valid_mask, CLIFF_ROTATION,
                                            reshape=True, order=1, cval=0.0)
                 dod_zoom = np.where(rot_valid > 0.5, rot_filled, np.nan)
+                # Drop zero-change and near-zero rotation artifacts so they
+                # render as background, not as colored cells
+                dod_zoom[np.abs(dod_zoom) < 0.01] = np.nan
 
                 # Trim all-NaN borders
                 finite = np.isfinite(dod_zoom)
