@@ -396,11 +396,6 @@ def run_comparison(min_volume=MIN_VOLUME, n_top=15, dem_res=DEM_RES,
                                             dem_res, nx, ny)
             del x2, y2, z2
 
-            # Fill NaN gaps via linear interpolation before DoD
-            dem1, n1 = fill_dem_nans(dem1)
-            dem2, n2 = fill_dem_nans(dem2)
-            print(f"  Interpolated DEM gaps: {n1:,} + {n2:,} cells filled")
-
             dod = compute_dod(dem1, dem2, lod)
             del dem1, dem2
 
