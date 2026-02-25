@@ -20,6 +20,8 @@ import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+from scipy.ndimage import binary_fill_holes
+from scipy.interpolate import griddata as scipy_griddata
 
 # Allow import from same directory
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -192,7 +194,21 @@ def make_combined_figure(results_df, n_scatter=50, event_ranks=(1, 15)):
             combined = np.nan_to_num(ero2d, nan=0.0)
             if dep_3d is not None:
                 dep2d = dep_3d[:, :, tidx][asort, :]
-                dc = np.nan_to_num(dep2d, nan=0.0)
+                # Fill internal NaN holes in the deposition footprint
+                dep_valid = ~np.isnan(dep2d) & (dep2d > 0)
+                dep_footprint = binary_fill_holes(dep_valid)
+                holes = dep_footprint & ~dep_valid
+                if holes.any() and dep_valid.any():
+                    yx_valid = np.argwhere(dep_valid)
+                    yx_holes = np.argwhere(holes)
+                    filled_vals = scipy_griddata(
+                        yx_valid, dep2d[dep_valid],
+                        yx_holes, method='nearest')
+                    dep2d_filled = dep2d.copy()
+                    dep2d_filled[tuple(yx_holes.T)] = filled_vals
+                    dc = np.nan_to_num(dep2d_filled, nan=0.0)
+                else:
+                    dc = np.nan_to_num(dep2d, nan=0.0)
                 dep_mask = (dc > 0) & (combined < 0.01)
                 combined[dep_mask] = -dc[dep_mask]
 
