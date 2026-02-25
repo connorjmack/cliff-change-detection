@@ -121,7 +121,7 @@ def make_combined_figure(results_df, n_scatter=50, event_ranks=(1, 15)):
         ax_sc.scatter(v_m3c2[hl_mask], v_dod[hl_mask],
                       c=elev[hl_mask], s=sizes[hl_mask],
                       cmap='plasma', vmin=elev.min(), vmax=elev.max(),
-                      edgecolors='black', linewidths=2.0,
+                      edgecolors='cyan', linewidths=2.0,
                       alpha=1.0, zorder=4)
 
     # Colorbar for elevation
