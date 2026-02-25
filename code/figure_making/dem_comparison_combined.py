@@ -20,7 +20,7 @@ import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
-from scipy.ndimage import binary_fill_holes
+from scipy.ndimage import binary_fill_holes, label
 from scipy.interpolate import griddata as scipy_griddata
 
 # Allow import from same directory
@@ -209,7 +209,12 @@ def make_combined_figure(results_df, n_scatter=50, event_ranks=(1, 15)):
                     dc = np.nan_to_num(dep2d_filled, nan=0.0)
                 else:
                     dc = np.nan_to_num(dep2d, nan=0.0)
+                # Remove small deposition clusters (< 25 connected cells)
                 dep_mask = (dc > 0) & (combined < 0.01)
+                labeled, n_clusters = label(dep_mask)
+                for cid in range(1, n_clusters + 1):
+                    if np.sum(labeled == cid) < 25:
+                        dep_mask[labeled == cid] = False
                 combined[dep_mask] = -dc[dep_mask]
 
             # Zoom to event footprint
