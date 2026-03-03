@@ -60,8 +60,6 @@ LOCATIONS_ALL = ['DelMar', 'Torrey', 'Solana', 'Encinitas', 'SanElijo']
 # QC flags to exclude
 EXCLUDE_FLAGS = {'construction', 'noise'}
 
-# Volume matching tolerance (fraction) for linking grid clusters to QC events
-MATCH_TOL = 0.02
 
 # ==============================================================================
 # 1. PATHS & HELPERS
@@ -162,11 +160,11 @@ def load_qc_events(base_dir, location):
     return df
 
 
-def get_excluded_volumes_for_interval(qc_df, d1, d2):
-    """Return sorted list of volumes for excluded events in a given interval."""
+def get_excluded_events_for_interval(qc_df, d1, d2):
+    """Return DataFrame of excluded events for a given interval."""
     mask = ((qc_df['start_date'] == d1) & (qc_df['end_date'] == d2)
             & qc_df['qc_flag'].isin(EXCLUDE_FLAGS))
-    return sorted(qc_df.loc[mask, 'volume'].values, reverse=True)
+    return qc_df.loc[mask]
 
 
 # ==============================================================================
@@ -191,8 +189,9 @@ def load_uncertainty_stats(unc_path):
         return 0.0
 
 
-def extract_cluster_id_volumes(cluster_path, grid_path, res_val):
-    """Extract {cluster_id: volume} mapping from the grid files."""
+
+def compute_cluster_centroids(cluster_path, grid_path, res_val):
+    """Compute {cluster_id: (volume, elevation)} from grid files."""
     df_c = pd.read_csv(cluster_path, index_col=0).fillna(0)
     df_g = pd.read_csv(grid_path, index_col=0).fillna(0)
     df_c.columns = [c.split('_')[-1] for c in df_c.columns]
@@ -200,7 +199,7 @@ def extract_cluster_id_volumes(cluster_path, grid_path, res_val):
     common_index = df_c.index.intersection(df_g.index)
     common_cols = df_c.columns.intersection(df_g.columns)
     if len(common_cols) == 0:
-        return {}, df_c, df_g
+        return {}
 
     df_c = df_c.loc[common_index, common_cols]
     df_g = df_g.loc[common_index, common_cols]
@@ -208,47 +207,58 @@ def extract_cluster_id_volumes(cluster_path, grid_path, res_val):
     g_vals = df_g.values
     cell_area = res_val * res_val
 
+    try:
+        z_values = np.array([float(re.findall(
+            r"[-+]?\d*\.\d+|\d+", c)[0]) for c in df_c.columns])
+    except Exception:
+        z_values = np.arange(len(df_c.columns)) * res_val
+
     unique_ids = np.unique(c_vals)
     unique_ids = unique_ids[unique_ids != 0]
 
-    id_vols = {}
+    cluster_info = {}
     for uid in unique_ids:
         mask = (c_vals == uid)
-        id_vols[uid] = np.sum(np.abs(g_vals[mask])) * cell_area
+        dists = g_vals[mask]
+        vol = np.sum(np.abs(dists)) * cell_area
+        cols = np.where(mask)[1]
+        z_cells = z_values[cols]
+        weights = np.abs(dists)
+        if np.sum(weights) > 0:
+            z_w = np.average(z_cells, weights=weights)
+        else:
+            z_w = np.mean(z_cells)
+        cluster_info[uid] = {'volume': vol, 'elevation': z_w}
 
-    return id_vols, df_c, df_g
+    return cluster_info
 
 
-def match_excluded_cluster_ids(id_vols, excluded_volumes, tol=MATCH_TOL):
-    """Match excluded QC event volumes to cluster IDs via greedy closest-volume.
+def match_excluded_cluster_ids(cluster_info, excluded_events):
+    """Match excluded QC events to cluster IDs by nearest (elevation, volume).
 
     Returns set of cluster IDs to exclude."""
-    if not excluded_volumes or not id_vols:
+    if excluded_events.empty or not cluster_info:
         return set()
 
-    # Build list of (cluster_id, volume) sorted by volume descending
-    candidates = sorted(id_vols.items(), key=lambda x: x[1], reverse=True)
-    used = set()
     excluded_ids = set()
-
-    for exc_vol in excluded_volumes:
+    for _, event in excluded_events.iterrows():
         best_id = None
-        best_diff = float('inf')
-        for cid, cvol in candidates:
-            if cid in used:
+        best_dist = float('inf')
+        for cid, info in cluster_info.items():
+            if cid in excluded_ids:
                 continue
-            diff = abs(cvol - exc_vol)
-            rel_diff = diff / max(exc_vol, 1e-6)
-            if rel_diff < tol and diff < best_diff:
-                best_diff = diff
+            # Relative volume difference + absolute elevation difference
+            vol_diff = abs(info['volume'] - event['volume']) / max(event['volume'], 1e-6)
+            elev_diff = abs(info['elevation'] - event['elevation'])
+            dist = vol_diff + elev_diff
+            if dist < best_dist:
+                best_dist = dist
                 best_id = cid
-        if best_id is not None:
+        if best_id is not None and best_dist < 5.0:
             excluded_ids.add(best_id)
-            used.add(best_id)
         else:
-            # Warn but don't fail — could be rounding differences
-            print(f"    [Warning] No cluster match for excluded volume "
-                  f"{exc_vol:.2f} m3")
+            print(f"    [Warning] No cluster match for excluded event "
+                  f"(vol={event['volume']:.2f}, elev={event['elevation']:.1f})")
 
     return excluded_ids
 
@@ -393,15 +403,15 @@ def collect_dashboard_data(results_dir, location, qc_df):
             continue
 
         # --- Identify which clusters to exclude for this interval ---
-        excluded_volumes = get_excluded_volumes_for_interval(qc_df, d1, d2)
+        excluded_events = get_excluded_events_for_interval(qc_df, d1, d2)
         excluded_ids = set()
 
-        if excluded_volumes and clus_file:
+        if not excluded_events.empty and clus_file:
             try:
-                id_vols, _, _ = extract_cluster_id_volumes(
+                cluster_info = compute_cluster_centroids(
                     clus_file, grid_file, RES_VAL)
                 excluded_ids = match_excluded_cluster_ids(
-                    id_vols, excluded_volumes)
+                    cluster_info, excluded_events)
             except Exception as e:
                 print(f"    [Warning] Cluster matching failed for "
                       f"{interval}: {e}")
