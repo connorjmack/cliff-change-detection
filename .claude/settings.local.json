@@ -25,7 +25,8 @@
       "Bash(git -C /Users/cjmack/Documents/GitHub/cliff-change-detection log --oneline utilities/event_lists/make_event_lists.py)",
       "Bash(git -C /Users/cjmack/Documents/GitHub/cliff-change-detection show aab2eb1:utilities/event_lists/make_event_lists.py)",
       "Bash(git -C /Users/cjmack/Documents/GitHub/cliff-change-detection log -1 --format=\"%H %ai\" utilities/event_lists/make_event_lists.py)",
-      "Bash(git -C /Users/cjmack/Documents/GitHub/cliff-change-detection show HEAD:utilities/event_lists/make_event_lists.py)"
+      "Bash(git -C /Users/cjmack/Documents/GitHub/cliff-change-detection show HEAD:utilities/event_lists/make_event_lists.py)",
+      "Bash(/opt/anaconda3/envs/cliff-change-detection/bin/python3:*)"
     ]
   }
 }
