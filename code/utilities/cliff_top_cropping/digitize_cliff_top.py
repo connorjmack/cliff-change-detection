@@ -273,6 +273,15 @@ def detect_line_pixels(image_array, color_name):
         mask = (g > 80) & ((g - r) > 30) & ((g - b) > 30)
         return mask
 
+    if color_name == 'cyan':
+        # Relative-channel detection: both green and blue must dominate red.
+        # Cyan contrasts well against the warm magma_r colormap.
+        r = image_array[:, :, 0].astype(np.int16)
+        g = image_array[:, :, 1].astype(np.int16)
+        b = image_array[:, :, 2].astype(np.int16)
+        mask = (g > 80) & (b > 80) & ((g - r) > 30) & ((b - r) > 30)
+        return mask
+
     color_range = COLOR_RANGES[color_name]
     min_rgb = np.array(color_range['min'])
     max_rgb = np.array(color_range['max'])
@@ -497,7 +506,7 @@ def detect_plot_bounds(image_array, debug=False):
     # Transpose so _longest_run_per_line operates on columns.
     col_lengths, col_starts, col_ends = _longest_run_per_line(spine_candidate.T)
 
-    min_run_v = h * 0.4
+    min_run_v = h * 0.25
     spine_cols = np.where(col_lengths >= min_run_v)[0]
 
     if debug:
@@ -518,7 +527,7 @@ def detect_plot_bounds(image_array, debug=False):
         if debug:
             print("  Warning: Vertical spine detection failed, trying horizontal")
         row_lengths, row_starts, row_ends = _longest_run_per_line(spine_candidate)
-        min_run_h = w * 0.4
+        min_run_h = w * 0.25
         spine_rows = np.where(row_lengths >= min_run_h)[0]
 
         if len(spine_rows) >= 2:
