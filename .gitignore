@@ -3,6 +3,10 @@
 *.csv
 *.png
 
+# Point cloud files
+*.las
+*.laz
+
 # Shapefiles and associated files
 *.shp
 *.shx
@@ -12,3 +16,16 @@
 *.sbn
 *.sbx
 *.shp.xml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# Results (large generated outputs)
+results/
+
+# OS files
+.DS_Store

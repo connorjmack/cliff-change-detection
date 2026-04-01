@@ -1,6 +1,19 @@
 ````markdown
 # Coastal Cliff LiDAR Processing Pipeline
 
+> **Paper:** Mack, C.J., Maclay, M., Krier-Mariani, R., & Young, A.P. (2026). Integrated machine learning segmentation and 3D change detection for a scalable coastal cliff monitoring workflow. *Computers & Geosciences*, 106165. [doi:10.1016/j.cageo.2026.106165](https://doi.org/10.1016/j.cageo.2026.106165)
+>
+> ```bibtex
+> @article{Mack2026,
+>   author  = {Mack, Connor J. and Maclay, Matthew and Krier-Mariani, Raphael and Young, Adam P.},
+>   title   = {Integrated machine learning segmentation and 3D change detection for a scalable coastal cliff monitoring workflow},
+>   journal = {Computers \& Geosciences},
+>   pages   = {106165},
+>   year    = {2026},
+>   doi     = {10.1016/j.cageo.2026.106165}
+> }
+> ```
+
 ## Overview
 This repository contains a modular, parallelized Python pipeline designed to process terrestrial LiDAR surveys of coastal cliffs. The system ingests raw LAS point clouds, preprocesses them (cropping), optionally audits cropped outputs, removes non-relevant features (beach, vegetation), calculates change detection (M3C2), clusters significant erosion/deposition events, and aggregates data into spatiotemporal grids for analysis.
 
