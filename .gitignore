@@ -27,5 +27,17 @@ venv/
 # Results (large generated outputs)
 results/
 
+# AI assistant configs
+CLAUDE.md
+AGENTS.md
+.claude/
+DEADJOE
+
+# CI workflows (Claude Code)
+.github/workflows/claude*.yml
+
+# Task tracking
+todo.md
+
 # OS files
 .DS_Store
