@@ -24,8 +24,9 @@ __pycache__/
 venv/
 .venv/
 
-# Results (large generated outputs)
+# Results and figures (large generated outputs)
 results/
+figures/
 
 # AI assistant configs
 CLAUDE.md
