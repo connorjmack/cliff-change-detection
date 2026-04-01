@@ -3,33 +3,33 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - python>=3.9
+  - python>=3.9,<3.13
+
   # Core Geospatial & Point Cloud Libraries
-  - pdal
-  - python-pdal
-  - laspy
-  - lazrs-python        # Acceleration for LAS/LAZ files
-  - geopandas
-  - shapely
-  - pyproj
-  
+  - pdal>=2.9
+  - python-pdal>=3.5
+  - laspy>=2.6
+  - lazrs-python
+  - geopandas>=1.1
+  - shapely>=2.1
+  - pyproj>=3.7
+
   # Math & Data Analysis
-  - numpy
-  - pandas
-  - scipy
-  - scikit-learn        # For DBSCAN and Random Forest
-  
+  - numpy>=2.4
+  - pandas>=2.3
+  - scipy>=1.16
+  - scikit-learn>=1.8
+
   # Visualization
-  - matplotlib
-  - seaborn
-  
+  - matplotlib>=3.10
+  - seaborn>=0.13
+
   # Utilities
-  - tqdm
-  - joblib
-  - alphashape
-  - pytest
-  
+  - tqdm>=4.67
+  - joblib>=1.5
+  - pytest>=8.0
+
   # Pip fallback (if any packages are missing from conda-forge)
   - pip
   - pip:
-    - alphashape        # Sometimes cleaner to install via pip inside conda
+    - alphashape>=1.3
